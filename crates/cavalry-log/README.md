@@ -9,9 +9,10 @@ The durable log: recording and replay. Data plane.
   has recorded and its candidate term, two synced writes per term and one per vote,
   read back at the member's start up to the torn tail of a crash, with a vote a crash
   tore read as the vote stored before it (`spec/durable-log.md`, "Terms"; ADR 0060),
-  and its vote floor, `TermsFile::set_vote_floor`, one synced write once, the
-  position below which a member that came back with its log empty withholds its
-  vote (ADR 0145). A creation syncs the file and then the log directory, by the one
+  and its vote floor, `TermsFile::set_vote_floor`, one synced write once, which a
+  member that came back with its log empty withholds its vote while it holds, and
+  `TermsFile::clear_vote_floor`, one synced write of the slot as zeros once it has
+  caught up, which every reader reads as no floor (ADR 0145, ADR 0161). A creation syncs the file and then the log directory, by the one
   function that ends the creation of the two files below, and an open of a whole
   file syncs the directory once too, for a creation cut off before its directory
   sync, so that a power loss does not take the file's name once the member has

@@ -452,15 +452,20 @@ commit path runs per message.
   what the rules prevent: two marks changed at once elect a leader that lacks a
   committed entry (ADR 0134).
 - Brings back a member that lost its log directory with no vote on what it forgot
-  (`spec/cluster.md`, "A member that lost its log"; ADR 0145). A member whose log is
-  empty while another member's report holds a log, or whose append position is below
-  its vote floor, withholds: it never nominates itself, and it answers a request
+  (`spec/cluster.md`, "A member that lost its log"; ADR 0145, ADR 0161). A member whose
+  log is empty while another member's report holds a log, or that holds a vote floor,
+  withholds: it never nominates itself, and it answers a request
   vote with nothing, counted in `cluster.votes_withheld`, unless every voter has
   reported a log the candidate's is at least and no voter but the candidate has named
   the request's term or a later one. Taking a leader with its log empty,
   it stores the leader's append position as its vote floor, through
-  `Io::store_vote_floor`, in its `terms` file before it records a term;
-  `Consensus::vote_floor()` and the gauge `cluster.vote_floor` hold it. A voter
+  `Io::store_vote_floor`, in its `terms` file before it records a term, 0 included;
+  `Consensus::vote_floor()` and the gauge `cluster.vote_floor` hold it. It clears the
+  floor, through `Io::clear_vote_floor`, once in one run it has joined a leader's
+  live log, going to follower ready, counted in `cluster.vote_floors_cleared`: the
+  live log's image joins past every entry the leader sent it before it came back, so
+  a new leadership term the leader's sender held back, written before an entry it
+  had acknowledged, gives it no vote before it holds the entry (ADR 0161). A voter
   whose log is empty takes a leader only when it voted it in, or when every other
   voter has named a term in this election and none named one above the leader's
   ("Taking a leader"): a leader that a later term deposed answers it too. It

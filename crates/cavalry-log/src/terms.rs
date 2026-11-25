@@ -1,17 +1,19 @@
 //! The terms file: a cluster member's record of the terms it has recorded and the
 //! candidate term it has stored (`spec/durable-log.md`, version 2, "Terms"; ADR 0060),
-//! and the vote floor, since version 6 (ADR 0145).
+//! and the vote floor, since version 6 (ADR 0145, ADR 0161).
 //!
 //! The consensus module of `cavalry-raft` is the file's only writer, from its own
 //! thread: [`TermsFile::create`] or [`TermsFile::open`] at the member's start, then
 //! [`TermsFile::append`] before the member reports an append position for a term,
 //! [`TermsFile::truncate_above`] before it reports its log leadership term id again,
 //! [`TermsFile::set_candidate_term`] before the vote or request vote that raises
-//! the candidate term is sent, and [`TermsFile::set_vote_floor`] once, when the
-//! member takes a leader with its log empty, before it records a term; each write
-//! syncs before it returns. The vote floor is one slot, bytes 48 to 60 of the header,
-//! under its own checksum: a write a crash tears reads as no floor, which the member
-//! then stores again, since it recorded no term after it. A reader takes the
+//! the candidate term is sent, [`TermsFile::set_vote_floor`] once, when the
+//! member takes a leader with its log empty, before it records a term, and
+//! [`TermsFile::clear_vote_floor`] once, when the member has joined a leader's live
+//! log; each write syncs before it returns. The vote floor is one slot, bytes 48 to 60
+//! of the header, under its own checksum: a store a crash tears reads as no floor,
+//! which the member then stores again, since it recorded no term after it, and a clear
+//! a crash tears reads as no floor, which the clear was to leave. A reader takes the
 //! entries in file order, skips a deleted one and stops at the empty last entry a crash
 //! left, an empty entry before the last being damage:
 //! [`TermsHeader::parse`] and [`TermsEntry::parse`] are the checks of "What a reader
@@ -60,7 +62,8 @@ const SLOT_OFFSETS: [usize; 2] = [16, 32];
 /// A candidate slot's length: the term, an i64, and its CRC32.
 const SLOT_LENGTH: usize = 12;
 /// Where the vote floor slot begins in the header, a position and its CRC32, written
-/// once (`spec/durable-log.md`, version 6, "Terms"; ADR 0145).
+/// once and cleared to zeros once (`spec/durable-log.md`, version 6, "Terms"; ADR 0145,
+/// ADR 0161).
 const FLOOR_OFFSET: usize = 48;
 /// The recording id of a term that has no recording yet.
 pub const NO_RECORDING: i64 = -1;
@@ -243,9 +246,9 @@ impl std::fmt::Display for TermsError {
         const STAY_OUT: &str = "the member's votes and the terms of its log are in this \
                                 file, so the member does not start without it. Start the \
                                 member on a new log directory: it replicates the log, and \
-                                it withholds its vote and seeks no leadership until its log \
-                                reaches what the cluster held when it took a leader, the \
-                                position cluster.vote_floor holds. It takes that leader \
+                                it withholds its vote and seeks no leadership until it has \
+                                caught up and joined its leader's live log, which clears \
+                                the floor cluster.vote_floor holds. It takes that leader \
                                 only once it has heard every other member, and waits while \
                                 one is stopped. It catches up only \
                                 while its leader's log begins at position 0; where it no \
@@ -299,8 +302,8 @@ impl std::fmt::Display for TermsError {
             TermsError::VoteFloor { found } => write!(
                 f,
                 "terms file rejected (vote-floor): the vote floor slot holds position \
-                 {found}, which no writer writes, so the position below which the member \
-                 withholds its vote cannot be read and the file is damaged: {STAY_OUT}; see {DOC}"
+                 {found}, which no writer writes, so the vote floor the member withholds its \
+                 vote while it holds cannot be read and the file is damaged: {STAY_OUT}; see {DOC}"
             ),
             TermsError::VoteFloorRefused { position } => write!(
                 f,
@@ -382,10 +385,11 @@ pub struct TermsHeader {
     /// checksum does not match, the raise a crash tore. A header that parsed holds a
     /// term in at least one slot.
     pub candidate_slots: [Option<i64>; 2],
-    /// The vote floor: the position below which the member withholds its vote, which it
-    /// stores once when it takes a leader with its log empty, or `None` when its slot's
-    /// checksum does not match, as in a file the module created and never set it in,
-    /// or one a version before 6 of the page wrote (ADR 0145).
+    /// The vote floor, which the member withholds its vote while it holds: the position
+    /// it stores once when it takes a leader with its log empty, or `None` when its
+    /// slot's checksum does not match, as in a file the module created and never set it
+    /// in, one whose floor it cleared, or one a version before 6 of the page wrote (ADR
+    /// 0145, ADR 0161).
     pub vote_floor: Option<i64>,
 }
 
@@ -826,6 +830,24 @@ impl TermsFile {
         Ok(())
     }
 
+    /// Clears the vote floor in one synced write of its slot as zeros, which every
+    /// reader reads as no floor, as it reads a slot a creation left (`spec/durable-log.md`,
+    /// "Terms"; ADR 0161). The member clears it once it has joined a leader's live
+    /// log, so a write a crash tears reads as no floor too, which is what the clear
+    /// was to leave. A file with no floor is left as it is.
+    pub fn clear_vote_floor(&mut self) -> Result<(), TermsError> {
+        if self.header.vote_floor.is_none() {
+            return Ok(());
+        }
+        self.write_at(
+            FLOOR_OFFSET as u64,
+            &[0u8; SLOT_LENGTH],
+            "clear the vote floor of",
+        )?;
+        self.header.vote_floor = None;
+        Ok(())
+    }
+
     /// The valid entries in order: the member's record of recorded terms.
     pub fn terms(&self) -> impl Iterator<Item = &TermsEntry> {
         self.entries.iter().filter(|entry| entry.state == VALID)
@@ -1014,6 +1036,55 @@ mod tests {
                 .map_err(|error| error.reason()),
             Err("not-ready")
         );
+        let _ = std::fs::remove_dir_all(&kept);
+        let _ = std::fs::remove_dir_all(&torn);
+    }
+
+    /// The vote floor's clear (ADR 0161): one synced write of the slot as zeros, which
+    /// reads as no floor, as a slot a creation left, and stays so after a reopen. A
+    /// floor of 0 is a floor, and is cleared the same way. A clear of a file with no
+    /// floor writes nothing, and a clear a crash tore, part of the zeros written, reads
+    /// as no floor too, which is what the clear was to leave.
+    #[test]
+    fn a_vote_floor_is_cleared_to_zeros_and_a_torn_clear_reads_as_none() {
+        let kept = dir("vote-floor-clear");
+        let mut file = TermsFile::create(&kept).expect("created");
+        file.clear_vote_floor().expect("nothing to clear");
+        assert_eq!(file.vote_floor(), None);
+        file.set_vote_floor(0).expect("a floor of 0 is a floor");
+        assert_eq!(file.vote_floor(), Some(0));
+        file.append(3, 0, NO_RECORDING).expect("appended");
+        file.clear_vote_floor().expect("cleared");
+        assert_eq!(file.vote_floor(), None);
+        drop(file);
+        let path = TermsFile::path_in(&kept);
+        let bytes = std::fs::read(&path).expect("read");
+        assert_eq!(
+            bytes[FLOOR_OFFSET..FLOOR_OFFSET + SLOT_LENGTH],
+            [0u8; SLOT_LENGTH],
+            "the slot is zeros"
+        );
+        let file = TermsFile::open(&kept).expect("opened");
+        assert_eq!(file.vote_floor(), None, "after a reopen");
+        assert_eq!(
+            file.log_leadership_term_id(),
+            3,
+            "the terms are as they were"
+        );
+        drop(file);
+
+        // A clear a crash tore: the floor's position zeroed and its checksum not.
+        let torn = dir("vote-floor-clear-torn");
+        let mut file = TermsFile::create(&torn).expect("created");
+        file.set_vote_floor(1 << 20).expect("stored");
+        drop(file);
+        let path = TermsFile::path_in(&torn);
+        let mut bytes = std::fs::read(&path).expect("read");
+        bytes[FLOOR_OFFSET..FLOOR_OFFSET + 8].copy_from_slice(&[0u8; 8]);
+        std::fs::write(&path, &bytes).expect("torn");
+        let file = TermsFile::open(&torn).expect("opened");
+        assert_eq!(file.vote_floor(), None, "a torn clear reads as none");
+        drop(file);
         let _ = std::fs::remove_dir_all(&kept);
         let _ = std::fs::remove_dir_all(&torn);
     }

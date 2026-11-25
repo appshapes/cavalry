@@ -215,4 +215,5 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0158. Append the timer event of the lower correlation id first, of two timers with one deadline](decisions/0158-append-the-timer-event-of-the-lower-correlation-id-first-of-two-timers-with-one-deadline.md)
 - [0159. Report to the program a publication the driver refuses while a service tells its member of a timer](decisions/0159-report-to-the-program-a-publication-the-driver-refuses-while-a-service-tells-its-member-of-a-timer.md)
 - [0160. Keep the log directory's gate on one tree on CI's macOS runner, and track the lost runner as a fault of its own](decisions/0160-keep-the-log-directorys-gate-on-one-tree-on-cis-macos-runner-and-track-the-lost-runner-as-a-fault-of-its-own.md)
+- [0161. Hold a member's vote floor until it has joined the live log, and then clear it](decisions/0161-hold-a-members-vote-floor-until-it-has-joined-the-live-log-and-then-clear-it.md)
 - [0157. Take the C ABI to version 7 with a service's timers](decisions/0157-take-the-c-abi-to-version-7-with-a-services-timers.md)

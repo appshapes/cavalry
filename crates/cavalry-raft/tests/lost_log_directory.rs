@@ -85,16 +85,21 @@ fn a_member_that_lost_its_log_votes_no_leader_in_that_lacks_what_it_had_acknowle
                     .all(|&id| cluster.append_position(id) >= Some(committed))
         },
     );
-    let floor = cluster.member(holder).expect("a member").vote_floor();
-    assert!(
-        floor >= committed,
-        "the floor {floor} holds every entry committed before it came back, {committed}"
+    // Joined the live log, it holds every entry committed before it came back, and
+    // its floor is cleared (ADR 0161).
+    assert_eq!(cluster.member(holder).expect("a member").vote_floor(), -1);
+    assert_eq!(
+        cluster
+            .counts(holder)
+            .expect("a member")
+            .vote_floors_cleared,
+        1
     );
     let log = cluster.log_to(leader, committed);
     for &id in &ids {
         assert_eq!(cluster.log_to(id, committed), log, "member {id}");
     }
-    // Past its floor it is a voter as any other: the next election counts it.
+    // Its floor cleared, it is a voter as any other: the next election counts it.
     let next = offer(&mut cluster, &mut safety, 20, 5);
     safety.run(&mut cluster, 1_000);
     for &id in &ids {
@@ -154,10 +159,12 @@ fn a_follower_that_lost_its_log_follows_the_leader_while_the_other_two_run_on() 
         term,
         "the same term"
     );
-    let floor = cluster.member(wiped).expect("a member").vote_floor();
-    assert!(
-        floor >= committed,
-        "the floor {floor} holds every entry committed before it came back, {committed}"
+    // Joined the live log, it holds every entry committed before it came back, and
+    // its floor is cleared (ADR 0161).
+    assert_eq!(cluster.member(wiped).expect("a member").vote_floor(), -1);
+    assert_eq!(
+        cluster.counts(wiped).expect("a member").vote_floors_cleared,
+        1
     );
     assert_eq!(
         cluster.log_to(wiped, committed),
@@ -244,7 +251,8 @@ fn two_members_that_lost_their_logs_vote_in_the_one_that_holds_the_log() {
         assert!(counts.votes_for > 0, "member {id} voted: {counts:?}");
         assert_eq!(counts.candidacies, 0, "member {id}: {counts:?}");
         let member = cluster.member(id).expect("a member");
-        assert!(member.vote_floor() >= committed, "member {id}");
+        assert_eq!(member.vote_floor(), -1, "member {id}: its floor is cleared");
+        assert_eq!(counts.vote_floors_cleared, 1, "member {id}");
         assert_eq!(
             cluster.log_to(id, committed),
             cluster.log_to(leader, committed),
@@ -383,8 +391,13 @@ fn follows_no_deposed_leader(late_canvass: bool) {
     for &id in &ids {
         assert_eq!(cluster.log_to(id, committed), log, "member {id}");
     }
-    let floor = cluster.member(voter).expect("a member").vote_floor();
-    assert!(floor >= committed, "the floor {floor} holds {committed}");
+    // Joined the live log, it holds every entry committed before it came back, and
+    // its floor is cleared (ADR 0161).
+    assert_eq!(cluster.member(voter).expect("a member").vote_floor(), -1);
+    assert_eq!(
+        cluster.counts(voter).expect("a member").vote_floors_cleared,
+        1
+    );
 }
 
 /// ADR 0145's cost, held: a new cluster in which one member holds nothing yet when the
@@ -445,6 +458,158 @@ fn a_new_clusters_member_that_holds_nothing_when_its_leader_stops_waits_for_the_
         },
     );
     let log = cluster.log_to(holder, committed);
+    for &id in &ids {
+        assert_eq!(cluster.log_to(id, committed), log, "member {id}");
+    }
+}
+
+/// The frame ADR 0145 left open (work item 411; ADR 0161; `spec/cluster.md`, "Taking a
+/// leader"): a new leadership term that the leader wrote before an entry the member
+/// acknowledged, that its sender held back, and that the member reads after it lost its
+/// log. Such a frame is one the member's empty log can read: one that answered a report
+/// of an empty log, written when the member had lost its log before.
+///
+/// A term begins, and its leader's log ends at `f`. The member loses its log directory a
+/// first time, and the leader's answer to its canvass, at `f`, is held back; the member
+/// follows on a later one. The third member then stops hearing the leader, one way, and the leader appends
+/// entries that the member acknowledges, committed by the two. The member loses its log
+/// again, and the held frame reaches its new run while the third still names the
+/// leader's term: the member takes the leader with a vote floor of `f`, below the
+/// entries, and replicates the log from the leader, one entry a step as a replay over a
+/// driver does over time. The leader stops once the member's log has passed `f`. Under ADR 0145's rule a member at its floor votes, and it and the third,
+/// neither holding the entries, would elect one of them and lose what was committed.
+/// Under ADR 0161's it withholds until it has joined a leader's live log, so no leader
+/// is elected until the leader comes back; then the member catches up, joins, clears its
+/// floor, and every member holds the entries.
+#[test]
+fn a_held_back_new_leadership_term_gives_a_member_that_lost_its_log_no_vote_until_it_joins_the_live_log()
+ {
+    let ids = [0, 1, 2];
+    let mut safety = Safety::new(&ids);
+    let (mut cluster, first) = elected(7, &mut safety);
+    offer(&mut cluster, &mut safety, 0, 10);
+    safety.run(&mut cluster, 1_000);
+
+    // A new term: the first leader is parted from the other two, which elect one of
+    // them, and then it is healed and follows.
+    let others = followers(&ids, first);
+    cluster.cut_between(first, others[0]);
+    cluster.cut_between(first, others[1]);
+    safety.run_until(
+        &mut cluster,
+        30_000,
+        "a leader of the next term",
+        |cluster| {
+            cluster
+                .leader()
+                .is_some_and(|leader| leader != first && settled(cluster, &others))
+        },
+    );
+    let leader = cluster.leader().expect("a leader");
+    let member = followers(&others, leader)[0];
+    let third = first;
+    cluster.heal_between(third, others[0]);
+    cluster.heal_between(third, others[1]);
+    safety.run_until(&mut cluster, 30_000, "the three settle", |cluster| {
+        settled(cluster, &ids)
+    });
+    let term = cluster
+        .member(leader)
+        .expect("a member")
+        .leadership_term_id();
+    let floor = cluster.append_position(leader).expect("a member");
+
+    // The member loses its log a first time; the leader's answer to its empty log, at
+    // `base`, is held back, and it follows on a later one.
+    cluster.hold_back_new_leadership_term(leader, member);
+    safety.wipe(&mut cluster, member);
+    safety.run_until(
+        &mut cluster,
+        30_000,
+        "the member follows again",
+        |cluster| settled(cluster, &ids),
+    );
+    let held = cluster.held_back();
+    assert_eq!(
+        held,
+        vec![(leader, member, floor, term)],
+        "held at the leader's log end then"
+    );
+
+    // The third stops hearing the leader, and the leader appends entries the member
+    // acknowledges: the two commit them, and the third lacks them.
+    cluster.cut_one_way(leader, third);
+    let committed = offer(&mut cluster, &mut safety, 10, 10);
+    safety.run(&mut cluster, 500);
+    assert_eq!(cluster.commit_position(leader), Some(committed));
+    assert_eq!(cluster.append_position(member), Some(committed));
+    assert!(cluster.append_position(third) < Some(committed));
+
+    // The member loses its log again, the leader kept from it until the held frame is
+    // released, so that its answers to the member's canvass, at the end of its log, do
+    // not come first. The member hears the third, which still follows the leader's
+    // term, and then the held frame.
+    // Replays bring one entry a step, as a replay over a driver brings its frames over
+    // time, so that the member's log passes through the floor on its way to the entries.
+    cluster.set_replay_rate(1);
+    cluster.cut_between(member, leader);
+    safety.wipe(&mut cluster, member);
+    safety.run_until(&mut cluster, 5_000, "the member canvasses", |cluster| {
+        cluster.election_state(member) == Some(cavalry_raft::ElectionState::Canvass)
+    });
+    safety.run(&mut cluster, 300);
+    cluster.release_held_back(member);
+    cluster.heal_between(member, leader);
+    safety.run_until(
+        &mut cluster,
+        5_000,
+        "the member takes the leader on the held frame, and its log reaches the floor",
+        |cluster| {
+            cluster.member(member).expect("a member").vote_floor() == floor
+                && cluster.append_position(member) >= Some(floor)
+        },
+    );
+    assert!(
+        cluster.append_position(member) < Some(committed),
+        "its log lacks the entries"
+    );
+    cluster.halt(leader);
+    safety.run(&mut cluster, 30_000);
+    assert_eq!(
+        cluster.leader(),
+        None,
+        "no leader without the entries committed"
+    );
+    let counts = cluster.counts(member).expect("a member");
+    assert_eq!(counts.votes_for, 0, "{counts:?}");
+    assert_eq!(counts.candidacies, 0, "{counts:?}");
+
+    // The leader comes back: the member catches up, joins its live log, and clears its
+    // floor, and every member holds the entries.
+    cluster.set_replay_rate(usize::MAX);
+    cluster.resume(leader);
+    cluster.heal_between(leader, third);
+    safety.run_until(
+        &mut cluster,
+        60_000,
+        "the three settle behind one leader and hold what was committed",
+        |cluster| {
+            settled(cluster, &ids)
+                && ids
+                    .iter()
+                    .all(|&id| cluster.append_position(id) >= Some(committed))
+        },
+    );
+    assert_eq!(cluster.member(member).expect("a member").vote_floor(), -1);
+    assert!(
+        cluster
+            .counts(member)
+            .expect("a member")
+            .vote_floors_cleared
+            >= 1,
+        "the floor was cleared once the member joined"
+    );
+    let log = cluster.log_to(leader, committed);
     for &id in &ids {
         assert_eq!(cluster.log_to(id, committed), log, "member {id}");
     }

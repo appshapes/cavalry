@@ -36,15 +36,14 @@ committed once a quorum, two of three, has it on disk.
   others, has no record of them. It takes a leader only once it has heard every
   other member, so it waits, and `cluster.leaders_withheld` rises, while another
   member is stopped. Then it replicates the log, and it withholds its vote and seeks no
-  leadership until its log reaches what the cluster held when it took a leader, the
-  position `cluster.vote_floor` holds
-  ([ADR 0145](../decisions/0145-withhold-the-vote-of-a-member-that-lost-its-log-until-it-holds-what-the-cluster-held.md)).
+  leadership until it has caught up and joined its leader's live log, which clears the
+  vote floor `cluster.vote_floor` holds and counts it in `cluster.vote_floors_cleared`
+  ([ADR 0145](../decisions/0145-withhold-the-vote-of-a-member-that-lost-its-log-until-it-holds-what-the-cluster-held.md),
+  [ADR 0161](../decisions/0161-hold-a-members-vote-floor-until-it-has-joined-the-live-log-and-then-clear-it.md)).
   Until it has caught up, the cluster tolerates one failed member fewer. That is
-  safe while each other member holds the log it kept, but in one case the transport
-  can make: a new leadership term that the leader's sender held back by flow control,
-  written before an entry the member had acknowledged, gives the member a vote floor
-  below that entry, and an election while it catches up can then lose the entry
-  (work item 411). It is not safe in one more case: another member that holds no log
+  safe while each other member holds the log it kept, a new leadership term that the
+  leader's sender held back by flow control included. It is not safe in one case:
+  another member that holds no log
   either, because it started late and has not yet caught up, while the member that
   holds the log is stopped. The two then elect as a new cluster does. A volume spares
   the wait and both cases.
@@ -243,9 +242,9 @@ committed once a quorum, two of three, has it on disk.
   member while the other two run. To have three members again, start this member
   on a new log directory while the other two run. It takes a leader once it has
   heard both, joins them and replicates the log, and it withholds its vote and seeks no
-  leadership until its log reaches what the cluster held when it took a leader,
-  which `cluster.vote_floor` on its host holds and `cluster.append_position` reaches
-  once it has caught up. While one of the other two is stopped it takes no leader,
+  leadership until it has caught up and joined its leader's live log: then
+  `cluster.vote_floor` on its host reads −1 and `cluster.vote_floors_cleared` reads 1.
+  While one of the other two is stopped it takes no leader,
   and `cluster.leaders_withheld` on its host rises: start the stopped member on the
   log directory it kept. It catches up only while
   the leader's log begins at position 0. Where the other members' recordings were
@@ -579,22 +578,25 @@ committed once a quorum, two of three, has it on disk.
   member whose line differs with the cluster's string. A member whose host holds
   an older string prints no `WARN cluster-voters`. The count stays until this
   member starts again: [Promote a standby to a voter](promote-a-standby.md).
-- `WARN cluster.vote_floor`: this member started on an empty log directory beside
-  members that hold the cluster's log, and its `cluster.append_position` is still
-  below its vote floor; the line says how many bytes short it is. It lost its log
-  directory, or it joined a new cluster after the first term began. Until its log
-  reaches the floor, it withholds its vote and seeks no leadership, so the cluster elects
-  a leader only while both other members run. It catches up from its leader by
-  itself, and the line goes once it has. If the bytes short stay the same while the
-  cluster appends, its leader's log no longer begins at position 0, and it cannot
-  catch up: start the cluster again as a new cluster, every member on a new log
-  directory
-  ([ADR 0145](../decisions/0145-withhold-the-vote-of-a-member-that-lost-its-log-until-it-holds-what-the-cluster-held.md)).
+- `WARN cluster.vote_floor`: this member took a leader with its log empty, and it has
+  not joined its leader's live log since it started; the line says how many bytes
+  its `cluster.append_position` is short of its vote floor, or that it is at or past
+  it. It lost its log directory, it joined a new cluster after the first term began,
+  or it is a new cluster's follower that has not joined yet. Until it joins the live
+  log, it withholds its vote and seeks no leadership, so the cluster elects a leader
+  only while both other members run. A member at or past its floor withholds still
+  after a start that came before it joined: it waits for the live log, not for the
+  position. It catches up and joins from its leader by itself, and the line goes once
+  it has. If the bytes short stay the same while the cluster appends, its leader's log
+  no longer begins at position 0, and it cannot catch up: start the cluster again as a
+  new cluster, every member on a new log directory
+  ([ADR 0145](../decisions/0145-withhold-the-vote-of-a-member-that-lost-its-log-until-it-holds-what-the-cluster-held.md),
+  [ADR 0161](../decisions/0161-hold-a-members-vote-floor-until-it-has-joined-the-live-log-and-then-clear-it.md)).
   A standby that starts on an empty log directory stores a vote floor too, and
   `cavalry doctor` prints no line for it: a standby has no vote to withhold. Once
   it is promoted to a voter ([Promote a standby to a voter](promote-a-standby.md)),
   the line applies to it as written.
-- `WARN cluster.votes_withheld`: this member, below its vote floor or with its log
+- `WARN cluster.votes_withheld`: this member, holding a vote floor or with its log
   empty, answered a candidate's request with no vote, and the count says how many
   times. A vote from it could have elected a leader that lacks an entry the cluster
   committed with its acknowledgement before it lost its log. An election succeeds

@@ -3187,7 +3187,7 @@
     },
     {
       "kind": "arithmetic",
-      "name": "withholds-at-its-floor-not",
+      "name": "withholds-at-its-floor-while-it-holds-it",
       "rule": "withholds",
       "inputs": {
         "own": [
@@ -3198,7 +3198,7 @@
         "log_heard": true
       },
       "fields": {
-        "withholds": false
+        "withholds": true
       }
     },
     {
@@ -3215,6 +3215,86 @@
       },
       "fields": {
         "withholds": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "withholds-past-its-floor-while-it-holds-it",
+      "rule": "withholds",
+      "inputs": {
+        "own": [
+          3,
+          12288
+        ],
+        "vote_floor": 8192,
+        "log_heard": false
+      },
+      "fields": {
+        "withholds": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "withholds-with-a-floor-of-0",
+      "rule": "withholds",
+      "inputs": {
+        "own": [
+          0,
+          4096
+        ],
+        "vote_floor": 0,
+        "log_heard": false
+      },
+      "fields": {
+        "withholds": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "clears-vote-floor-once-joined",
+      "rule": "clears-vote-floor",
+      "inputs": {
+        "vote_floor": 8192,
+        "joined": true
+      },
+      "fields": {
+        "clears": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "clears-vote-floor-of-0-once-joined",
+      "rule": "clears-vote-floor",
+      "inputs": {
+        "vote_floor": 0,
+        "joined": true
+      },
+      "fields": {
+        "clears": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "clears-vote-floor-not-before-joined",
+      "rule": "clears-vote-floor",
+      "inputs": {
+        "vote_floor": 8192,
+        "joined": false
+      },
+      "fields": {
+        "clears": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "clears-vote-floor-not-with-no-floor",
+      "rule": "clears-vote-floor",
+      "inputs": {
+        "vote_floor": -1,
+        "joined": true
+      },
+      "fields": {
+        "clears": false
       }
     },
     {

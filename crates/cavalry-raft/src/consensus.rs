@@ -20,9 +20,9 @@ use cavalry_proto::cluster::{
     ELECTION_STATUS_INTERVAL_NS, ELECTION_TIMEOUT_NS, LEADER_HEARTBEAT_INTERVAL_NS,
     LEADER_HEARTBEAT_TIMEOUT_NS, LIVE_ADD_MAX_WINDOW, LogReport, MAX_MEMBERS, MemberPosition,
     Message, PROTOCOL_VERSION, STARTUP_CANVASS_TIMEOUT_NS, TermAction, TermFields, TermSpan,
-    TimeUnit, Vote, VoteRequest, ballot, candidate, canvass_position_action, commit_position,
-    new_leadership_term_action, next_fields, quorum, request_vote, takes_leader, votes_in_term,
-    withheld_vote, withholds,
+    TimeUnit, Vote, VoteRequest, ballot, candidate, canvass_position_action, clears_vote_floor,
+    commit_position, new_leadership_term_action, next_fields, quorum, request_vote, takes_leader,
+    votes_in_term, withheld_vote, withholds,
 };
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
@@ -33,7 +33,8 @@ use cavalry_shm::counters::generated::{
     CLUSTER_LEADERSHIP_TERMS_IGNORED, CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_REPLICATIONS,
     CLUSTER_LOG_REPLICATIONS_UNAVAILABLE, CLUSTER_LOG_TRUNCATIONS, CLUSTER_STANDBY_VOTE_REQUESTS,
     CLUSTER_TERMS_DROPPED, CLUSTER_TERMS_LED, CLUSTER_TRUNCATIONS_FAULTED,
-    CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTES_AGAINST, CLUSTER_VOTES_FOR, CLUSTER_VOTES_WITHHELD,
+    CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTE_FLOORS_CLEARED, CLUSTER_VOTES_AGAINST,
+    CLUSTER_VOTES_FOR, CLUSTER_VOTES_WITHHELD,
 };
 
 /// The cluster session id of a session message of no session: one the leader's own
@@ -227,16 +228,24 @@ pub trait Io {
     /// since. Read once with [`Io::candidate_term`], and from memory as it is.
     fn log_leadership_term_id(&mut self) -> i64;
 
-    /// The vote floor the member's record of terms holds, −1 for none: the position
-    /// below which it withholds its vote and seeks none, what [`Io::store_vote_floor`] wrote,
-    /// before this start or since (`spec/cluster.md`, "A member that lost its log";
-    /// ADR 0145). Read once with [`Io::candidate_term`], and from memory as it is.
+    /// The vote floor the member's record of terms holds, −1 for none: what
+    /// [`Io::store_vote_floor`] wrote and no [`Io::clear_vote_floor`] cleared, before
+    /// this start or since, which the member withholds its vote and seeks no leadership
+    /// while it holds (`spec/cluster.md`, "A member that lost its log"; ADR 0145, ADR
+    /// 0161). Read once with [`Io::candidate_term`], and from memory as it is.
     fn vote_floor(&mut self) -> i64;
 
     /// Stores `position` as the member's vote floor, durably, before it records a term:
     /// once, when the member takes a leader with its log empty, `position` the end of
     /// the leader's log (ADR 0145).
     fn store_vote_floor(&mut self, position: i64) -> Result<(), Self::Fault>;
+
+    /// Clears the member's vote floor, durably: once, when in this run the member has
+    /// joined a leader's live log with its append position at or past the floor, so
+    /// that its log holds every entry it could have acknowledged before it came back
+    /// (ADR 0161). [`Io::vote_floor`] reads −1 from then on. A clear that a crash tore
+    /// reads as no floor too, which is what it was to leave.
+    fn clear_vote_floor(&mut self) -> Result<(), Self::Fault>;
 
     /// The leader's log for `term`: its publication on stream 100 at position `base`
     /// with every other member's `log` endpoint as a destination, and its recording.
@@ -635,10 +644,10 @@ pub struct Counts {
     /// vote, and the member's own does not (ADR 0134).
     pub standby_vote_requests: u64,
     /// `cluster.votes_withheld`: a request vote the member answered with nothing
-    /// because it withholds its vote, its log empty beside a member that holds one or
-    /// below its vote floor, and not every voter had reported a log the candidate's
-    /// is at least, or a voter other than the candidate had named the request's term
-    /// or a later one (ADR 0145).
+    /// because it withholds its vote, its log empty beside a member that holds one or a
+    /// vote floor held, and not every voter had reported a log the candidate's is at
+    /// least, or a voter other than the candidate had named the request's term or a
+    /// later one (ADR 0145, ADR 0161).
     pub votes_withheld: u64,
     /// `cluster.leaders_withheld`: a new leadership term the member, a voter with its
     /// log empty, ignored where it would otherwise have taken the sender as its leader:
@@ -649,11 +658,14 @@ pub struct Counts {
     /// write faulted, which the member then owed until a truncation to its position
     /// finished; once for each truncation that became owed (ADR 0148).
     pub truncations_faulted: u64,
+    /// `cluster.vote_floors_cleared`: a vote floor the member cleared, having joined a
+    /// leader's live log in this run, after which it votes as any voter does (ADR 0161).
+    pub vote_floors_cleared: u64,
 }
 
 impl Counts {
     /// How many counts a member keeps: one counter of `counters.toml` each.
-    pub const LEN: usize = 26;
+    pub const LEN: usize = 27;
 
     /// Each count with the id of its counter in `counters.toml`, the constant
     /// `cavalry-shm` generates from it: what the consensus module stores, each as a
@@ -711,6 +723,7 @@ impl Counts {
             (CLUSTER_VOTES_WITHHELD, self.votes_withheld),
             (CLUSTER_LEADERS_WITHHELD, self.leaders_withheld),
             (CLUSTER_TRUNCATIONS_FAULTED, self.truncations_faulted),
+            (CLUSTER_VOTE_FLOORS_CLEARED, self.vote_floors_cleared),
         ]
     }
 }
@@ -989,9 +1002,14 @@ pub struct Consensus {
     state_since_ns: u64,
     /// The highest term this member has proposed or followed.
     candidate_term: i64,
-    /// The position below which this member withholds its vote and seeks none, which it
-    /// stored when it took a leader with its log empty; −1 for none (ADR 0145).
+    /// The vote floor this member stored when it took a leader with its log empty, for
+    /// as long as which it withholds its vote and seeks none; −1 for none (ADR 0145,
+    /// ADR 0161).
     vote_floor: i64,
+    /// Whether, in this run, this member has joined a leader's live log, going to
+    /// follower ready, with its append position at the live image's join position:
+    /// what clears its vote floor (ADR 0161).
+    live_joined: bool,
     /// The position of the truncation this member owes, −1 for none: one whose command
     /// or write faulted, from the fault until a truncation to that position finishes,
     /// in memory alone (ADR 0148).
@@ -1144,6 +1162,7 @@ impl Consensus {
             state_since_ns: 0,
             candidate_term: -1,
             vote_floor: -1,
+            live_joined: false,
             truncation_owed: -1,
             log_term: -1,
             term: -1,
@@ -1273,6 +1292,21 @@ impl Consensus {
     /// fault is returned once the state's work has run.
     pub fn do_work<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         self.append_position = self.append_position.max(io.append_position());
+        // A member in follower ready joined the live log of a leader it took by the
+        // rules of "Taking a leader", at its append position, which the leader's sender
+        // made past every entry it sent the member before. So it holds every committed
+        // entry it could have acknowledged before it came back, and clears its vote
+        // floor, durably, before it votes by it (`spec/cluster.md`, "A member that lost
+        // its log"; ADR 0161). A clear that faults leaves the floor, and the next cycle
+        // clears it again.
+        if self.state == ElectionState::FollowerReady {
+            self.live_joined = true;
+        }
+        if clears_vote_floor(self.vote_floor, self.live_joined) {
+            io.clear_vote_floor()?;
+            self.vote_floor = -1;
+            count(&mut self.counts.vote_floors_cleared);
+        }
         // A truncation this member owes is asked for again before its state's work, in
         // every state: a fault comes back here, and the member stays out of the log
         // until a later cycle finishes it (ADR 0148).
@@ -2521,7 +2555,8 @@ impl Consensus {
     /// Whether this member withholds its vote and its candidacy (`spec/cluster.md`,
     /// "A member that lost its log"; ADR 0145): its log empty while a member's report
     /// in this election, or `candidate`, the log of a request it answers, holds a log;
-    /// or its append position below its vote floor.
+    /// or a vote floor held, which it clears once it has joined a leader's live log in
+    /// this run (ADR 0161).
     fn withholds(&self, candidate: Option<LogReport>) -> bool {
         let holds = |log: &LogReport| log.term >= 0 || log.position > 0;
         let reported = self
@@ -2540,23 +2575,25 @@ impl Consensus {
         withholds(self.own_report(), self.vote_floor, log_heard)
     }
 
-    /// The position below which this member withholds its vote and seeks none, −1 for
-    /// none: the end of the log of the leader it took with its log empty (`spec/cluster.md`,
-    /// "A member that lost its log"; ADR 0145), stored in its record of terms.
+    /// The vote floor this member holds, −1 for none: the end of the log of the leader
+    /// it took with its log empty (`spec/cluster.md`, "A member that lost its log"; ADR
+    /// 0145), 0 included, stored in its record of terms, and held, the member
+    /// withholding, until in one run it has joined a leader's live log (ADR 0161).
     pub fn vote_floor(&self) -> i64 {
         self.vote_floor
     }
 
     /// Stores the vote floor when this member takes a leader with its log empty: the
-    /// end of the leader's log, `leader_log_position`, which holds every entry the
-    /// cluster committed before, written durably before the member records a term.
-    /// A leader whose log is empty too, a new cluster's first, gives no floor.
+    /// end of the leader's log, `leader_log_position`, written durably before the
+    /// member records a term. A leader whose log is empty too gives a floor of 0, which
+    /// marks the member all the same: a new leadership term of such a leader that its
+    /// sender held back can reach the member after an entry it acknowledged (ADR 0161).
     fn take_vote_floor<I: Io>(
         &mut self,
         leader_log_position: i64,
         io: &mut I,
     ) -> Result<(), I::Fault> {
-        if self.log_empty() && self.vote_floor < 0 && leader_log_position > 0 {
+        if self.log_empty() && self.vote_floor < 0 && leader_log_position >= 0 {
             io.store_vote_floor(leader_log_position)?;
             self.vote_floor = leader_log_position;
         }

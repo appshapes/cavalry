@@ -13,9 +13,9 @@ use cavalry_proto::cluster::{
     NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd, ReplicationStop, ServiceTimers,
     SnapshotMark, Stream, TermFields, TermSpan, TimeUnit, TimerEventIs, TimerWord, VERSION, Vote,
     VoteAnswer, VoteRequest, answered_term, ballot, candidate, canvass_position_action,
-    commit_position, entry_position, log_at_least, new_leadership_term_action, next_fields,
-    parse_members, quorum, replay_end, replication_record, replication_stop, request_vote,
-    takes_leader, votes_in_term, withheld_vote, withholds, write_log_recordings,
+    clears_vote_floor, commit_position, entry_position, log_at_least, new_leadership_term_action,
+    next_fields, parse_members, quorum, replay_end, replication_record, replication_stop,
+    request_vote, takes_leader, votes_in_term, withheld_vote, withholds, write_log_recordings,
 };
 use serde_json::{Map, Value, json};
 
@@ -694,6 +694,10 @@ fn arithmetic_vector(name: &str, vector: &Value) {
             };
             let heard = inputs["log_heard"].as_bool().expect("log_heard");
             json!({"withholds": withholds(own, int(inputs, "vote_floor"), heard)})
+        }
+        "clears-vote-floor" => {
+            let joined = inputs["joined"].as_bool().expect("joined");
+            json!({"clears": clears_vote_floor(int(inputs, "vote_floor"), joined)})
         }
         "withheld-vote" => {
             let voters = usize::try_from(int(inputs, "voters")).expect("voters");
