@@ -607,6 +607,12 @@ committed once a quorum, two of three, has it on disk.
   each one finished, and the count is history. It stays until this member starts
   again. A count that rises often names a driver or a disk to look at: the line
   `cavalry run` printed for each fault says which.
+- `WARN cluster.timers_cleared`: this member's table of timers filled with timers
+  that are pending in no service, 2,048 of them, and it removed them all. No timer
+  is lost: the service beside it sends every pending one again within a second,
+  and a timer may be late by that much. A count that keeps rising is a service
+  whose cancels do not reach this member
+  ([ADR 0151](../decisions/0151-give-a-clusters-service-timers-that-every-service-decides-from-the-log.md)).
 - `WARN cluster.service_snapshots_passed_over`: the service beside this member was
   told of a snapshot when it started, and could not take it. It read the log from
   position 0. Nothing committed is lost. If this member's log no longer begins at

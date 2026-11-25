@@ -49,7 +49,7 @@ use cavalry_log::snapshots::{CONSENSUS_MODULE, ListedSnapshot, SnapshotsError, S
 use cavalry_proto::cluster::{
     CLOSE_REASON_NONE, CONSENSUS_MODULE_STREAM_ID, EGRESS_STREAM_ID, LOG_REPLAY_STREAM_ID,
     MAX_SESSIONS, Message, NULL_VALUE, SERVICE_ID, SNAPSHOT_STREAM_ID, SNAPSHOT_TIMEOUT_NS,
-    SNAPSHOT_TYPE_ID, SnapshotMark, Stream, TimeUnit,
+    SNAPSHOT_TYPE_ID, SnapshotMark, Stream, TimeUnit, TimerWord,
 };
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
@@ -393,17 +393,36 @@ impl ModuleSnapshot {
     }
 
     /// Reads the consensus module stream, at most [`SERVICE_ACK_LIMIT`] messages: the
-    /// service acks into `acks`, in the order they were read. Returns how many acks
-    /// were read, and how many messages were none: a message the stream does not
-    /// carry, or one a reader rejects (`spec/cluster.md`, "What a reader rejects").
+    /// service acks into `acks`, in the order they were read, and each schedule
+    /// timer and cancel timer to `timer`, in the order they were read
+    /// (`spec/cluster.md`, "The service", "Timers", "The member's timers"). Returns
+    /// how many acks were read, how many timer messages, and how many messages were
+    /// none: a message the stream does not carry, or one a reader rejects
+    /// (`spec/cluster.md`, "What a reader rejects").
     pub(crate) fn read_acks(
         &mut self,
         acks: &mut [Option<ServiceAcked>; SERVICE_ACK_LIMIT],
-    ) -> Result<(usize, u64), Fault> {
+        mut timer: impl FnMut(TimerWord),
+    ) -> Result<(usize, usize, u64), Fault> {
         let mut read = 0usize;
+        let mut timers = 0usize;
         let mut rejected = 0u64;
         self.acks.poll(
             |bytes, _| match Message::parse(Stream::ConsensusModule, bytes) {
+                Ok(Message::ScheduleTimer {
+                    correlation_id,
+                    deadline,
+                }) => {
+                    timer(TimerWord::Schedule {
+                        correlation_id,
+                        deadline,
+                    });
+                    timers += 1;
+                }
+                Ok(Message::CancelTimer { correlation_id }) => {
+                    timer(TimerWord::Cancel { correlation_id });
+                    timers += 1;
+                }
                 Ok(Message::ServiceAck {
                     log_position,
                     timestamp,
@@ -425,7 +444,7 @@ impl ModuleSnapshot {
             },
             SERVICE_ACK_LIMIT,
         )?;
-        Ok((read, rejected))
+        Ok((read, timers, rejected))
     }
 
     /// Lists a service's snapshot for its service ack, when it is one the member can

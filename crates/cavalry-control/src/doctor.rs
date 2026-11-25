@@ -58,8 +58,9 @@ use cavalry_shm::counters::generated::{
     CLUSTER_REPLIES_STALE, CLUSTER_ROLE, CLUSTER_SERVICE_ACKS_REJECTED,
     CLUSTER_SERVICE_SNAPSHOTS_FAILED, CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER,
     CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_PASSED_OVER, CLUSTER_STANDBY,
-    CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TRUNCATION_OWED, CLUSTER_TRUNCATIONS_FAULTED,
-    CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTE_FLOOR, CLUSTER_VOTERS, CLUSTER_VOTES_WITHHELD,
+    CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TIMERS_CLEARED, CLUSTER_TRUNCATION_OWED,
+    CLUSTER_TRUNCATIONS_FAULTED, CLUSTER_TRUNCATIONS_REFUSED, CLUSTER_VOTE_FLOOR, CLUSTER_VOTERS,
+    CLUSTER_VOTES_WITHHELD,
 };
 use cavalry_shm::counters::generated::{
     DRIVER_REGISTRY_FULL, PUBLICATION_ADD_DEFERRED_WAITING, SUBSCRIPTION_ADD_DEFERRED_WAITING,
@@ -1167,8 +1168,9 @@ const DOC_SNAPSHOT: &str = "docs/how-to/ask-for-a-snapshot.md#when-it-does-not-w
 /// log is still empty and it has no leader, since the core counts it only then and the
 /// count does not fall ([`cluster_checks`]). The last is a truncation of the member's
 /// log whose command or write faulted, which the member owed until one finished (ADR
-/// 0148).
-const MEMBER_COUNTS: [CounterId; 15] = [
+/// 0148). After it, a member that removed every timer it held, its table full of
+/// timers that were pending nowhere (ADR 0151).
+const MEMBER_COUNTS: [CounterId; 16] = [
     CLUSTER_MESSAGES_REJECTED,
     CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
     CLUSTER_LOG_IMAGES_LOST,
@@ -1184,6 +1186,7 @@ const MEMBER_COUNTS: [CounterId; 15] = [
     CLUSTER_VOTES_WITHHELD,
     CLUSTER_LEADERS_WITHHELD,
     CLUSTER_TRUNCATIONS_FAULTED,
+    CLUSTER_TIMERS_CLEARED,
 ];
 
 /// Where a cluster session's findings are explained.
@@ -7799,6 +7802,45 @@ mod tests {
         );
     }
 
+    /// A member that removed every timer it held, its table full of timers that are
+    /// pending in no service, is reported with what that means and what it costs
+    /// (ADR 0151); a member that never did is told of in nothing.
+    #[test]
+    fn a_member_that_cleared_its_timers_is_reported() {
+        let leader = |cleared: i64| {
+            [
+                (CLUSTER_ROLE, 2),
+                (CLUSTER_ELECTION_STATE, 17),
+                (CLUSTER_LEADERSHIP_TERM_ID, 3),
+                (CLUSTER_LEADER_MEMBER_ID, 1),
+                (CLUSTER_APPEND_POSITION, 4096),
+                (CLUSTER_COMMIT_POSITION, 4096),
+                (CLUSTER_TIMERS_CLEARED, cleared),
+            ]
+        };
+        let (_, findings) = cluster_findings("timers-cleared", 1, &leader(1));
+        let cleared = findings
+            .iter()
+            .find(|finding| finding.check == "cluster.timers_cleared")
+            .unwrap_or_else(|| panic!("{findings:?}"));
+        assert_eq!(cleared.level, Level::Warn);
+        assert!(
+            cleared.message.starts_with(
+                "member 1's cluster.timers_cleared is 1: This member's table of timers \
+                 filled with timers that are pending in no service"
+            ),
+            "{}",
+            cleared.message
+        );
+        let (_, findings) = cluster_findings("timers-not-cleared", 1, &leader(0));
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.check == "cluster.timers_cleared"),
+            "{findings:?}"
+        );
+    }
+
     /// A member that came back on an empty log directory and has not caught up with
     /// its vote floor is named, with where its log is and how far it has to go, and
     /// the requests it left unanswered meanwhile are reported with what they mean
@@ -8321,7 +8363,7 @@ mod tests {
 
         // A follower that follows: the note alone, with who it is and what it knows.
         let (checks, findings) = cluster_findings("cluster-follower", 1, &follower);
-        assert_eq!(checks, 24);
+        assert_eq!(checks, 25);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].check, "cluster-member");
         assert_eq!(findings[0].level, Level::Note);
@@ -8498,7 +8540,7 @@ mod tests {
         let dir = TestDir::new("cluster-session-member");
         let reader = session_file(&dir, 7, 2, Some((1, &follower)));
         let mut findings = Vec::new();
-        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 25);
+        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 26);
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(
             found,
