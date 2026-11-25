@@ -320,13 +320,16 @@ RULES = {
             "CommittedLog.onEntry",
             # A cluster session and a cluster service (ADR 0124): the session's offer, its
             # poll and its upcall, which reads each reply's values; the service's poll, its
-            # reply and its upcall, which reads each entry's values and passes the ABI the
-            # action the handler returned; and the getters of the two objects of values.
+            # reply, the schedule and the cancel of its timers (ADR 0157) and its upcall,
+            # which reads each entry's values and passes the ABI the action the handler
+            # returned; and the getters of the two objects of values.
             "ClusterSession.offer",
             "ClusterSession.poll",
             "ClusterSession.onReply",
             "ClusterService.poll",
             "ClusterService.reply",
+            "ClusterService.scheduleTimer",
+            "ClusterService.cancelTimer",
             "ClusterService.onClusterEntry",
             "ClusterReplyValues.leadershipTermId",
             "ClusterReplyValues.timestamp",

@@ -1219,6 +1219,30 @@ class Clients(unittest.TestCase):
                            ("ClusterEntryValues.timedOut", "allocates byte with `new`")):
             self.assertTrue(any(f"jvm: {name} (" in f and form in f for f in found), (name, found))
 
+    def test_a_throw_in_a_jvm_services_timer_methods_fails_and_so_does_a_missing_one(self):
+        """scheduleTimer and cancelTimer return a code (ADR 0157): neither checks and
+        throws, and both are held to the rules by name."""
+        self.edit_jvm("    public int scheduleTimer(long correlationId, long deadline) {\n",
+                      "    public int scheduleTimer(long correlationId, long deadline) {\n        Abi.check(\"x\", -1);\n",
+                      file="ClusterService.java")
+        self.edit_jvm("    public int cancelTimer(long correlationId) {\n",
+                      "    public int cancelTimer(long correlationId) {\n        long[] copy = new long[1];\n",
+                      file="ClusterService.java")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for name, form in (("ClusterService.scheduleTimer", "calls Abi.check"),
+                           ("ClusterService.cancelTimer", "allocates long with `new`")):
+            self.assertTrue(any(f"jvm: {name} (" in f and form in f for f in found), (name, found))
+        self.setUp()
+        self.edit_jvm("    public int scheduleTimer(long correlationId, long deadline) {\n",
+                      "    public int schedule(long correlationId, long deadline) {\n", file="ClusterService.java")
+        self.edit_jvm("    public int cancelTimer(long correlationId) {\n",
+                      "    public int cancel(long correlationId) {\n", file="ClusterService.java")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for name in ("ClusterService.scheduleTimer", "ClusterService.cancelTimer"):
+            self.assertTrue(any(f"{name} is not in" in f for f in found), (name, found))
+
     def test_a_missing_jvm_cluster_method_fails(self):
         """A cluster session's and a cluster service's per-message methods are held to the
         rules by name, as the others are (ADR 0124)."""
