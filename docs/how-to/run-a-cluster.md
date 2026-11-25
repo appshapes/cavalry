@@ -607,6 +607,17 @@ committed once a quorum, two of three, has it on disk.
   each one finished, and the count is history. It stays until this member starts
   again. A count that rises often names a driver or a disk to look at: the line
   `cavalry run` printed for each fault says which.
+- `WARN cluster.timers`: this member leads and holds no timer, while the service
+  beside it has timers pending; the line names how many. A service sends its member
+  every pending timer again each second, and tells it nothing while it reads its
+  history after a start, so a first run of `cavalry doctor` may catch the second
+  after a member started or a service that is still reading. When a second run,
+  after the service has read its log to its end, says the same, the
+  member is not told: an application's timers wait while this member leads, since
+  only a leader appends a timer's event. Check that the service beside this member
+  runs and reads its log, and that `cluster.messages_rejected` on this host does
+  not rise, which is a service of another build than its member
+  ([ADR 0151](../decisions/0151-give-a-clusters-service-timers-that-every-service-decides-from-the-log.md)).
 - `WARN cluster.timers_cleared`: this member's table of timers was full, 2,048,
   with no timer in it whose event the member had appended. That is more than the
   service beside it can have pending, so some of them were pending nowhere, and
@@ -614,8 +625,14 @@ committed once a quorum, two of three, has it on disk.
   sent. No timer is lost: a service sends every pending timer again each second,
   and a timer may be late by that much. A count that keeps rising is a service
   whose cancels do not reach this member: check that the service beside it runs
-  and reads its log
+  and reads its log, and look for `WARN cluster.service_timer_cancels_dropped` on
+  this host
   ([ADR 0151](../decisions/0151-give-a-clusters-service-timers-that-every-service-decides-from-the-log.md)).
+- `WARN cluster.service_timer_cancels_dropped`: the service beside this member
+  held 1,024 cancels that its member had not read, and dropped the oldest for the
+  next. No timer is handed to a program wrongly: the member keeps each such timer
+  until it appends an event for it, which every service passes over. Check that
+  the member runs.
 - `WARN cluster.service_snapshots_passed_over`: the service beside this member was
   told of a snapshot when it started, and could not take it. It read the log from
   position 0. Nothing committed is lost. If this member's log no longer begins at

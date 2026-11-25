@@ -593,6 +593,15 @@ pub const CLUSTER_TIMERS_REPLACED: CounterId = CounterId(195);
 /// `cluster.timers_cleared`, a client counter: Schedule timers at which one cluster member removed every timer it held: its table held 2,048 with no timer in it whose event the member had appended, so that it held more than its service has pending and could not tell which. It kept the timer it was sent, and its service sends the pending ones again within a second (spec/cluster.md, The service, Timers, The member's timers; ADR 0151). key and label as cluster.elections.
 pub const CLUSTER_TIMERS_CLEARED: CounterId = CounterId(196);
 
+/// `cluster.service_timers`, a client gauge: How many timers are pending in the service beside one cluster member: scheduled by its program while it took an entry, and not since cancelled or handed over. At most 1,024, and a schedule of another id beyond them is refused to the program. It is a function of the log, so it is the same beside every member at the same position. The service adds the counter, with its member's id as the key and in the label, when it adds its other counters (spec/cluster.md, Snapshots, A service's snapshot).
+pub const CLUSTER_SERVICE_TIMERS: CounterId = CounterId(197);
+
+/// `cluster.service_timer_events_passed_over`, a client counter: Timer events the service beside one cluster member read and did not hand to its program: the timer was not pending, or was pending with a deadline after the event's timestamp. Every service passes the same events over (spec/cluster.md, The service, Timers, A timer event; ADR 0151). The service adds the counter, with its member's id as the key and in the label, when it adds its other counters (spec/cluster.md, Snapshots, A service's snapshot). A service that version 6 of the C ABI makes hands such an event to its program as an entry of no kind, and counts it the same when the program takes it.
+pub const CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER: CounterId = CounterId(198);
+
+/// `cluster.service_timer_cancels_dropped`, a client counter: Cancel timers the service beside one cluster member never sent: the consensus module stream took none while 1,024 waited, and the oldest was dropped for the next. The member keeps that timer until it appends an event for it, which every service passes over, or needs its place (spec/cluster.md, The service, Timers, What a service tells its member; ADR 0151). The service adds the counter, with its member's id as the key and in the label, when it adds its other counters (spec/cluster.md, Snapshots, A service's snapshot).
+pub const CLUSTER_SERVICE_TIMER_CANCELS_DROPPED: CounterId = CounterId(199);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -2137,7 +2146,7 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Gauge,
         scope: Scope::Client,
         doc: "How many timers one cluster member holds: each told to it by the service beside it in a schedule timer on the consensus module stream, and not since removed by a cancel timer, replaced or cleared. At most 2,048. What a member holds is no state it computes from the log: it is in no snapshot, a member that starts holds none, and the service sends every pending timer again each second (spec/cluster.md, The service, Timers; ADR 0151). key and label as cluster.elections.",
-        doctor: "",
+        doctor: "Read it beside cluster.service_timers on the same host. 0 on a member that leads, while cluster.service_timers is above 0, is a leader that was not told of its service's timers: they wait while it leads. A service tells its member nothing while it reads its history after a start, and sends every pending timer again each second after that, so read both twice. Check that the service beside this member runs and reads its log. Above cluster.service_timers is timers the member was sent no cancel for, which it keeps until their places are needed, and nothing to act on.",
     },
     CounterDef {
         id: CLUSTER_TIMER_EVENTS,
@@ -2161,6 +2170,30 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Counter,
         scope: Scope::Client,
         doc: "Schedule timers at which one cluster member removed every timer it held: its table held 2,048 with no timer in it whose event the member had appended, so that it held more than its service has pending and could not tell which. It kept the timer it was sent, and its service sends the pending ones again within a second (spec/cluster.md, The service, Timers, The member's timers; ADR 0151). key and label as cluster.elections.",
-        doctor: "This member's table of timers was full, 2,048, with no timer in it whose event the member had appended: more than the service beside it can have pending, so some of them pending nowhere. It removed them all and kept the one it was sent. No timer is lost: a service sends every pending timer again each second (spec/cluster.md, The service, Timers), and a timer may be late by that much. A count that keeps rising is a service whose cancels do not reach this member: check that the service beside it runs and reads its log.",
+        doctor: "This member's table of timers was full, 2,048, with no timer in it whose event the member had appended: more than the service beside it can have pending, so some of them pending nowhere. It removed them all and kept the one it was sent. No timer is lost: a service sends every pending timer again each second (spec/cluster.md, The service, Timers), and a timer may be late by that much. A count that keeps rising is a service whose cancels do not reach this member: check that the service beside it runs and reads its log, and read cluster.service_timer_cancels_dropped on this host.",
+    },
+    CounterDef {
+        id: CLUSTER_SERVICE_TIMERS,
+        name: "cluster.service_timers",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "How many timers are pending in the service beside one cluster member: scheduled by its program while it took an entry, and not since cancelled or handed over. At most 1,024, and a schedule of another id beyond them is refused to the program. It is a function of the log, so it is the same beside every member at the same position. The service adds the counter, with its member's id as the key and in the label, when it adds its other counters (spec/cluster.md, Snapshots, A service's snapshot).",
+        doctor: "",
+    },
+    CounterDef {
+        id: CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER,
+        name: "cluster.service_timer_events_passed_over",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Timer events the service beside one cluster member read and did not hand to its program: the timer was not pending, or was pending with a deadline after the event's timestamp. Every service passes the same events over (spec/cluster.md, The service, Timers, A timer event; ADR 0151). The service adds the counter, with its member's id as the key and in the label, when it adds its other counters (spec/cluster.md, Snapshots, A service's snapshot). A service that version 6 of the C ABI makes hands such an event to its program as an entry of no kind, and counts it the same when the program takes it.",
+        doctor: "",
+    },
+    CounterDef {
+        id: CLUSTER_SERVICE_TIMER_CANCELS_DROPPED,
+        name: "cluster.service_timer_cancels_dropped",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Cancel timers the service beside one cluster member never sent: the consensus module stream took none while 1,024 waited, and the oldest was dropped for the next. The member keeps that timer until it appends an event for it, which every service passes over, or needs its place (spec/cluster.md, The service, Timers, What a service tells its member; ADR 0151). The service adds the counter, with its member's id as the key and in the label, when it adds its other counters (spec/cluster.md, Snapshots, A service's snapshot).",
+        doctor: "The service beside this member could not tell it of cancels for long enough to hold 1,024: the member is stopped or does not read its consensus module stream. No timer is handed to a program wrongly. Check that the member runs.",
     },
 ];

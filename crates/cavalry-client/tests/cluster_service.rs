@@ -15,13 +15,16 @@ use cavalry_client::{
 };
 use cavalry_driver::Driver;
 use cavalry_proto::cluster::{
-    CloseReason, EGRESS_STREAM_ID, LOG_RECORDINGS_FILE_PREFIX, LogRecording,
-    MAX_LOG_RECORDINGS_LENGTH, MAX_SESSIONS, Message, Stream, TimeUnit, write_log_recordings,
+    CONSENSUS_MODULE_STREAM_ID, CloseReason, ClusterAction, EGRESS_STREAM_ID,
+    LOG_RECORDINGS_FILE_PREFIX, LogRecording, MAX_LOG_RECORDINGS_LENGTH, MAX_SESSIONS, Message,
+    Stream, TimeUnit, write_log_recordings,
 };
 use cavalry_shm::counters::CountersError;
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_LEADER_MEMBER_ID,
     CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID, CLUSTER_REPLIES_DROPPED,
+    CLUSTER_SERVICE_TIMER_CANCELS_DROPPED, CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER,
+    CLUSTER_SERVICE_TIMERS,
 };
 
 // This test's ports, from the one file that says how they are taken and why, which is
@@ -280,6 +283,7 @@ enum Kind {
     Open(i64),
     Close(i64, bool),
     Term(i32),
+    Timer(i64),
     Other,
 }
 
@@ -306,6 +310,7 @@ fn kind(entry: &Entry<'_>) -> Kind {
             timed_out,
         } => Kind::Close(session_id, timed_out),
         Entry::NewLeadershipTerm { leader_member_id } => Kind::Term(leader_member_id),
+        Entry::Timer { correlation_id } => Kind::Timer(correlation_id),
         Entry::Snapshot | Entry::Other => Kind::Other,
     }
 }
@@ -628,7 +633,8 @@ fn a_reply_no_client_takes_is_tried_for_the_keepalive_interval_and_then_dropped(
 /// that is not open, before its open event and after its close event, and a payload
 /// longer than one frame carries. A session is open at its own open event and at its
 /// own close event: a reply at each is sent. A payload of the longest length is sent. An entry
-/// no leader of this version appends is handed over as such, and an entry that is not
+/// no leader of this version appends is handed over as such, a timer event whose
+/// timer is not pending is handed to no handler, and an entry that is not
 /// of the page stops the service at its position.
 #[test]
 fn a_reply_names_a_session_the_log_holds_open_and_fits_one_frame() {
@@ -646,6 +652,16 @@ fn a_reply_names_a_session_the_log_holds_open_and_fits_one_frame() {
     member.term(0, MEMBER);
     member.open(0, 0, &channel);
     member.message(0, 0, b"ask");
+    // A cluster action that suspends: no leader of this version appends one. And a
+    // timer event for a timer that nobody scheduled, which is handed to no handler.
+    let other = encode(&Message::ClusterAction {
+        leadership_term_id: 0,
+        log_position: member.end,
+        timestamp: member.time(),
+        action: ClusterAction::Suspend,
+        flags: 0,
+    });
+    let other = member.append_bytes(&other);
     let timer = encode(&Message::TimerEvent {
         leadership_term_id: 0,
         correlation_id: 9,
@@ -721,7 +737,37 @@ fn a_reply_names_a_session_the_log_holds_open_and_fits_one_frame() {
             Reply::NoSession,
         ]
     );
-    assert_eq!(kinds[3], (timer.0, Kind::Other));
+    assert_eq!(kinds[3], (other.0, Kind::Other));
+    assert!(
+        kinds.iter().all(|(position, _)| *position != timer.0),
+        "a timer event of no pending timer is passed over: {kinds:?}"
+    );
+    // A service of the C ABI below the version that gives a program timers hands
+    // that event over as an entry of no kind, as its page says, and counts it as
+    // passed over all the same.
+    let mut c_client = Cavalry::connect_to(&member.dir).expect("a C program's client");
+    let mut c_service = c_client.cluster_service();
+    c_service.hand_passed_over_timer_events_as_other();
+    let mut c_kinds = Vec::new();
+    wait("the second service reads the log to its end", || {
+        c_service
+            .poll(
+                &mut c_client,
+                |committed, _| {
+                    c_kinds.push((committed.position, kind(&committed.entry)));
+                    Action::Continue
+                },
+                16,
+            )
+            .expect("the service polls");
+        c_service.position() == member.end
+    });
+    assert!(
+        c_kinds.contains(&(timer.0, Kind::Other)),
+        "the timer event is handed over as an entry of no kind: {c_kinds:?}"
+    );
+    c_service.close(&mut c_client).expect("the service closes");
+    c_client.close().expect("the client closes");
     assert_eq!(kinds[4].1, Kind::Close(0, false));
     assert_eq!(service.sessions(), 0);
     let mut replies = Read::new();
@@ -1366,4 +1412,571 @@ fn a_service_closes_with_no_error_at_a_client_that_is_closed() {
     );
     let closed = service.close(&mut client);
     assert!(closed.is_ok(), "{closed:?}");
+}
+
+/// A session message that schedules a timer: `s`, the id and the deadline.
+fn schedule(id: i64, deadline: i64) -> Vec<u8> {
+    let mut payload = vec![b's'];
+    payload.extend_from_slice(&id.to_le_bytes());
+    payload.extend_from_slice(&deadline.to_le_bytes());
+    payload
+}
+
+/// A session message that cancels a timer: `c` and the id.
+fn cancel(id: i64) -> Vec<u8> {
+    let mut payload = vec![b'c'];
+    payload.extend_from_slice(&id.to_le_bytes());
+    payload
+}
+
+/// Polls with a program whose session messages schedule and cancel timers, and that
+/// does not take the first timer it is handed while `refuse_once` is set.
+fn poll_timers(
+    service: &mut ClusterService,
+    client: &mut Cavalry,
+    seen: &mut Seen,
+    refuse_once: &mut bool,
+) -> usize {
+    service
+        .poll(
+            client,
+            |committed: &Committed<'_>, replies| {
+                let number = |bytes: &[u8]| {
+                    i64::from_le_bytes(bytes.try_into().expect("eight bytes of a number"))
+                };
+                match committed.entry {
+                    Entry::SessionMessage { payload, .. } if payload.first() == Some(&b's') => {
+                        replies
+                            .schedule_timer(number(&payload[1..9]), number(&payload[9..17]))
+                            .expect("room for a timer");
+                    }
+                    Entry::SessionMessage { payload, .. } if payload.first() == Some(&b'c') => {
+                        replies.cancel_timer(number(&payload[1..9]));
+                    }
+                    Entry::Timer { correlation_id } if *refuse_once => {
+                        // What a handler does before it gives an entry back is undone.
+                        replies.cancel_timer(correlation_id);
+                        replies
+                            .schedule_timer(correlation_id + 1_000, 0)
+                            .expect("room for a timer");
+                        *refuse_once = false;
+                        seen.retries += 1;
+                        return Action::Abort;
+                    }
+                    _ => {}
+                }
+                seen.entries.push((
+                    committed.position,
+                    committed.leadership_term_id,
+                    committed.timestamp,
+                    kind(&committed.entry),
+                ));
+                Action::Continue
+            },
+            16,
+        )
+        .expect("the service polls")
+}
+
+/// The value of one of the service's counters of the member, or `None` while no
+/// service has added it.
+fn service_counter(client: &Cavalry, counter: i32) -> Option<i64> {
+    let counters = client.counters();
+    let ours = |id: u32| {
+        counters.record(id).ok().flatten().filter(|record| {
+            record.type_id() == counter && record.key().starts_with(&MEMBER.to_le_bytes())
+        })
+    };
+    (0..counters.capacity()).find_map(|id| {
+        ours(id)?;
+        let value = match counters.read(id) {
+            Ok(value) => value,
+            Err(CountersError::Unallocated { .. }) => return None,
+            Err(error) => panic!("the counter reads: {error:?}"),
+        };
+        ours(id)?;
+        Some(value)
+    })
+}
+
+/// A program schedules a timer while it takes an entry and is handed the timer's
+/// event once: not by an event before its deadline, not a second time, not after
+/// its cancel, and once still when its handler gave the event back first
+/// (`spec/cluster.md`, "The service", "Timers"; ADR 0151). The service tells the
+/// member on its driver what each taken entry changed, on the consensus module
+/// stream, and every pending timer again each second. A service that starts later
+/// reads the same log, is handed the same timer at the same position, tells the
+/// member nothing of that history, and at the end of it what is pending.
+#[test]
+fn a_program_is_handed_each_timer_once_and_its_member_is_told() {
+    let mut member = Member::start("timers");
+    let mut client = Cavalry::connect_to(&member.dir).expect("the service's client");
+    let mut service = client.cluster_service();
+    let mut seen = Seen::default();
+    let mut refuse_once = false;
+    // The member's side of the consensus module stream, read by hand.
+    let mut stream = member
+        .client
+        .add_subscription("cavalry:ipc", CONSENSUS_MODULE_STREAM_ID)
+        .expect("the member's subscription");
+    let mut told: Vec<(char, i64, i64)> = Vec::new();
+    let mut read_told = |told: &mut Vec<(char, i64, i64)>| {
+        stream
+            .poll(
+                |bytes, _| match Message::parse(Stream::ConsensusModule, bytes) {
+                    Ok(Message::ScheduleTimer {
+                        correlation_id,
+                        deadline,
+                    }) => told.push(('s', correlation_id, deadline)),
+                    Ok(Message::CancelTimer { correlation_id }) => {
+                        told.push(('c', correlation_id, 0));
+                    }
+                    other => panic!("no timer message on the stream: {other:?}"),
+                },
+                16,
+            )
+            .expect("the stream is read");
+    };
+    member.name();
+    // The service opens an empty log: it has no history to read.
+    wait("the service opens the member's log", || {
+        poll_timers(&mut service, &mut client, &mut seen, &mut refuse_once);
+        dropped(&client).is_some()
+    });
+    let to_end = |service: &mut ClusterService,
+                  client: &mut Cavalry,
+                  seen: &mut Seen,
+                  refuse_once: &mut bool,
+                  member: &Member| {
+        member.commit();
+        wait("the service reads the log to its end", || {
+            poll_timers(service, client, seen, refuse_once);
+            service.position() == member.end
+        });
+    };
+    let timer_event = |member: &mut Member, id: i64, timestamp: i64| {
+        let entry = encode(&Message::TimerEvent {
+            leadership_term_id: 0,
+            correlation_id: id,
+            timestamp,
+        });
+        member.append_bytes(&entry).0
+    };
+
+    // Two timers, scheduled by two entries. Nothing is told before the entries are
+    // taken, and then both are, in the order of their ids.
+    member.term(0, MEMBER);
+    member.message(0, -1, &schedule(9, TIME + 10_000));
+    member.message(0, -1, &schedule(7, TIME + 100));
+    read_told(&mut told);
+    assert_eq!(told, []);
+    to_end(
+        &mut service,
+        &mut client,
+        &mut seen,
+        &mut refuse_once,
+        &member,
+    );
+    // A word may come again before the next is looked for: a refresh's, each second.
+    let seven = ('s', 7, TIME + 100);
+    let nine = ('s', 9, TIME + 10_000);
+    wait("the member is told of two timers", || {
+        // The service's poll offers a word again that the stream did not take.
+        poll_timers(&mut service, &mut client, &mut seen, &mut refuse_once);
+        read_told(&mut told);
+        told.contains(&seven) && told.contains(&nine)
+    });
+    assert!(
+        told.iter().all(|word| *word == seven || *word == nine),
+        "{told:?}"
+    );
+    told.clear();
+    assert_eq!(service_counter(&client, CLUSTER_SERVICE_TIMERS.0), Some(2));
+
+    // An event before the deadline is passed over: no handler sees it.
+    timer_event(&mut member, 7, TIME + 99);
+    to_end(
+        &mut service,
+        &mut client,
+        &mut seen,
+        &mut refuse_once,
+        &member,
+    );
+    assert!(!seen.entries.iter().any(|entry| entry.3 == Kind::Timer(7)));
+    // An event at the deadline is handed over. The handler gives it back once,
+    // after cancelling the timer and scheduling another: both are undone, and it is
+    // handed the same event again.
+    refuse_once = true;
+    let due = timer_event(&mut member, 7, TIME + 100);
+    to_end(
+        &mut service,
+        &mut client,
+        &mut seen,
+        &mut refuse_once,
+        &member,
+    );
+    assert_eq!(seen.retries, 1);
+    let handed: Vec<_> = seen
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.3, Kind::Timer(_)))
+        .cloned()
+        .collect();
+    assert_eq!(handed, [(due, 0, TIME + 100, Kind::Timer(7))]);
+    wait(
+        "the member is told that the timer is pending no more",
+        || {
+            poll_timers(&mut service, &mut client, &mut seen, &mut refuse_once);
+            read_told(&mut told);
+            told.contains(&('c', 7, 0))
+        },
+    );
+    assert!(
+        told.iter()
+            .all(|word| *word == ('c', 7, 0) || *word == seven || *word == nine),
+        "nothing of timer 1007, which the handling that was given back scheduled: {told:?}"
+    );
+    assert_eq!(told.iter().filter(|word| word.0 == 'c').count(), 1);
+    told.clear();
+    // A second event for it, and one for a timer nobody scheduled: passed over.
+    timer_event(&mut member, 7, TIME + 200);
+    timer_event(&mut member, 8, TIME + 200);
+    // A cancel, and an event for the cancelled timer after its deadline.
+    member.message(0, -1, &cancel(9));
+    timer_event(&mut member, 9, TIME + 20_000);
+    to_end(
+        &mut service,
+        &mut client,
+        &mut seen,
+        &mut refuse_once,
+        &member,
+    );
+    assert_eq!(
+        seen.entries
+            .iter()
+            .filter(|entry| matches!(entry.3, Kind::Timer(_)))
+            .count(),
+        1
+    );
+    wait("the member is told of the cancel", || {
+        poll_timers(&mut service, &mut client, &mut seen, &mut refuse_once);
+        read_told(&mut told);
+        told.contains(&('c', 9, 0))
+    });
+    assert!(
+        told.iter()
+            .all(|word| *word == ('c', 9, 0) || *word == nine),
+        "{told:?}"
+    );
+    told.clear();
+    wait("the service stores what it counted", || {
+        poll_timers(&mut service, &mut client, &mut seen, &mut refuse_once);
+        service_counter(&client, CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER.0) == Some(4)
+    });
+    assert_eq!(service_counter(&client, CLUSTER_SERVICE_TIMERS.0), Some(0));
+    assert_eq!(
+        service_counter(&client, CLUSTER_SERVICE_TIMER_CANCELS_DROPPED.0),
+        Some(0)
+    );
+
+    // A timer that stays pending is told again each timer refresh interval, 1 s.
+    member.message(0, -1, &schedule(11, TIME + 1_000_000));
+    to_end(
+        &mut service,
+        &mut client,
+        &mut seen,
+        &mut refuse_once,
+        &member,
+    );
+    wait("the member is told of the timer, and again", || {
+        poll_timers(&mut service, &mut client, &mut seen, &mut refuse_once);
+        read_told(&mut told);
+        told.len() >= 2
+    });
+    // The words after the first are refreshes, a second apart: in any stretch of
+    // time the member is told once for each whole second of it, and once more at the
+    // most. The stretch is measured from before the first of them to after the last,
+    // so a thread that is held makes the bound looser and never tighter.
+    let from = Instant::now();
+    let had = told.len();
+    wait("the member is told of the timer twice more", || {
+        poll_timers(&mut service, &mut client, &mut seen, &mut refuse_once);
+        read_told(&mut told);
+        told.len() >= had + 2
+    });
+    let more = (told.len() - had) as u64;
+    let seconds = from.elapsed().as_secs();
+    assert!(told.iter().all(|word| *word == ('s', 11, TIME + 1_000_000)));
+    assert!(
+        more <= seconds + 1,
+        "{more} refreshes in {seconds} whole seconds: a refresh comes a second after the one before it"
+    );
+    told.clear();
+
+    // A service that starts now reads all of that as history. It is handed the one
+    // timer at the same position, tells the member nothing on the way, and at the
+    // end of its history tells it the one timer that is pending.
+    let mut second_client = Cavalry::connect_to(&member.dir).expect("a second service's client");
+    let mut second = second_client.cluster_service();
+    let mut second_seen = Seen::default();
+    let mut never = false;
+    wait("the second service reads the log to its end", || {
+        poll_timers(
+            &mut second,
+            &mut second_client,
+            &mut second_seen,
+            &mut never,
+        );
+        second.position() == member.end
+    });
+    let handed: Vec<_> = second_seen
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.3, Kind::Timer(_)))
+        .cloned()
+        .collect();
+    assert_eq!(handed, [(due, 0, TIME + 100, Kind::Timer(7))]);
+    wait("the member is told by the second service", || {
+        poll_timers(
+            &mut second,
+            &mut second_client,
+            &mut second_seen,
+            &mut never,
+        );
+        read_told(&mut told);
+        !told.is_empty()
+    });
+    assert!(
+        told.iter().all(|word| *word == ('s', 11, TIME + 1_000_000)),
+        "nothing of the history: {told:?}"
+    );
+
+    second
+        .close(&mut second_client)
+        .expect("the service closes");
+    second_client.close().expect("the client closes");
+    service.close(&mut client).expect("the service closes");
+    client.close().expect("the client closes");
+    drop(stream);
+    member.close();
+}
+
+/// A service holds 1,024 pending timers: a schedule of another id beyond them is
+/// refused, and changes nothing. And a program may schedule a timer again inside
+/// that timer's own event: it is pending again, and handed over again at its next
+/// event (`spec/cluster.md`, "The service", "Timers"; ADR 0151).
+#[test]
+fn a_program_is_refused_a_timer_beyond_the_bound_and_schedules_one_again_in_its_event() {
+    let mut member = Member::start("timers-bound");
+    let mut client = Cavalry::connect_to(&member.dir).expect("the service's client connects");
+    let mut service = client.cluster_service();
+    let bound = cavalry_proto::cluster::MAX_SERVICE_TIMERS as i64;
+    // What the program was refused, and each timer it was handed with its event's time.
+    let mut refused: Vec<i64> = Vec::new();
+    let mut handed: Vec<(i64, i64)> = Vec::new();
+    let mut poll = |service: &mut ClusterService, client: &mut Cavalry| {
+        service
+            .poll(
+                client,
+                |committed: &Committed<'_>, replies| {
+                    match committed.entry {
+                        // One message fills the table and asks for one more.
+                        Entry::SessionMessage { .. } => {
+                            for id in 0..=bound {
+                                if replies.schedule_timer(id, TIME + 1_000).is_err() {
+                                    refused.push(id);
+                                }
+                            }
+                        }
+                        // The timer's own event: pending no more, and scheduled again.
+                        Entry::Timer { correlation_id } => {
+                            handed.push((correlation_id, committed.timestamp));
+                            replies
+                                .schedule_timer(correlation_id, committed.timestamp + 1_000)
+                                .expect("the place the timer left");
+                        }
+                        _ => {}
+                    }
+                    Action::Continue
+                },
+                16,
+            )
+            .expect("the service polls")
+    };
+    member.name();
+    wait("the service opens the member's log", || {
+        poll(&mut service, &mut client);
+        dropped(&client).is_some()
+    });
+    member.term(0, MEMBER);
+    member.message(0, -1, b"fill");
+    for timestamp in [TIME + 1_000, TIME + 1_500, TIME + 2_000] {
+        let event = encode(&Message::TimerEvent {
+            leadership_term_id: 0,
+            correlation_id: 3,
+            timestamp,
+        });
+        member.append_bytes(&event);
+    }
+    member.commit();
+    wait("the service reads the log to its end", || {
+        poll(&mut service, &mut client);
+        service.position() == member.end
+    });
+    wait("the service stores what it counted", || {
+        poll(&mut service, &mut client);
+        service_counter(&client, CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER.0) == Some(1)
+    });
+    assert_eq!(
+        service_counter(&client, CLUSTER_SERVICE_TIMERS.0),
+        Some(bound),
+        "the table is full still: the timer handed over is pending again"
+    );
+
+    // No member has read the consensus module stream, so the service has told
+    // nobody: every word waits. Once a member reads it, the service tells it of
+    // the whole table, every timer once before any a second time, in the order of
+    // their ids (`spec/cluster.md`, "What a service tells its member").
+    let mut stream = member
+        .client
+        .add_subscription("cavalry:ipc", CONSENSUS_MODULE_STREAM_ID)
+        .expect("the member's subscription");
+    let mut told: Vec<i64> = Vec::new();
+    wait("the member is told of every timer", || {
+        poll(&mut service, &mut client);
+        stream
+            .poll(
+                |bytes, _| match Message::parse(Stream::ConsensusModule, bytes) {
+                    Ok(Message::ScheduleTimer { correlation_id, .. }) => told.push(correlation_id),
+                    other => panic!("a schedule timer and nothing else: {other:?}"),
+                },
+                64,
+            )
+            .expect("the stream is read");
+        told.len() >= bound as usize
+    });
+    let first: Vec<i64> = told.iter().copied().take(bound as usize).collect();
+    assert_eq!(
+        first,
+        (0..bound).collect::<Vec<i64>>(),
+        "each timer once, in the order of the ids, before any refresh"
+    );
+    drop(stream);
+    assert_eq!(refused, [bound], "the one beyond the bound, and no other");
+    // Handed at its deadline, scheduled again for a second later, passed over half
+    // a second later, and handed again when that second has passed.
+    assert_eq!(handed, [(3, TIME + 1_000), (3, TIME + 2_000)]);
+
+    service.close(&mut client).expect("the service closes");
+    client.close().expect("the client closes");
+    member.close();
+}
+
+/// A service that reads history with a timer pending, and passes no event over in
+/// it, adds no counter of its timers while it reads that history: the page names
+/// three moments for them, its first snapshot, the first thing it has to tell its
+/// member of a timer and the first timer event it passes over, and a service tells
+/// its member nothing of its history (`spec/cluster.md`, "A service's snapshot",
+/// "What a service tells its member"). Once it has read it, its gauge holds the
+/// timer and its member is told of it.
+#[test]
+fn a_service_adds_its_timers_counters_at_the_end_of_a_history_that_passes_no_event_over() {
+    let mut member = Member::start("timers-history");
+    // The history: a timer scheduled, and two entries after it.
+    member.term(0, MEMBER);
+    member.message(0, -1, &schedule(7, TIME + 1_000_000));
+    // The position after the entry that schedules it.
+    let scheduled = member.message(0, -1, b"no timer").0;
+    member.message(0, -1, b"no timer either");
+    member.name();
+    member.commit();
+    let history = member.end;
+    let mut client = Cavalry::connect_to(&member.dir).expect("the service's client connects");
+    let mut service = client.cluster_service();
+    // One entry a poll, so that what each poll in the history added can be read.
+    let poll = |service: &mut ClusterService, client: &mut Cavalry| {
+        service
+            .poll(
+                client,
+                |committed: &Committed<'_>, replies| {
+                    if let Entry::SessionMessage { payload, .. } = committed.entry
+                        && payload.first() == Some(&b's')
+                    {
+                        let number = |bytes: &[u8]| {
+                            i64::from_le_bytes(bytes.try_into().expect("eight bytes of a number"))
+                        };
+                        replies
+                            .schedule_timer(number(&payload[1..9]), number(&payload[9..17]))
+                            .expect("room for a timer");
+                    }
+                    Action::Continue
+                },
+                1,
+            )
+            .expect("the service polls")
+    };
+    // The polls that ended in the history with the timer pending.
+    let mut pending_in_history = 0;
+    wait("the service reads its history", || {
+        poll(&mut service, &mut client);
+        if service.position() < history {
+            assert_eq!(
+                service_counter(&client, CLUSTER_SERVICE_TIMERS.0),
+                None,
+                "no counter of a service's timers at {} of a history that ends at {history}",
+                service.position()
+            );
+            if service.position() >= scheduled {
+                pending_in_history += 1;
+            }
+        }
+        service.position() == history
+    });
+    assert!(
+        pending_in_history >= 2,
+        "two polls end in the history with the timer pending, one entry a poll: {pending_in_history}"
+    );
+    wait(
+        "the service has read its history and stores its gauge",
+        || {
+            poll(&mut service, &mut client);
+            service_counter(&client, CLUSTER_SERVICE_TIMERS.0) == Some(1)
+        },
+    );
+    assert_eq!(
+        service_counter(&client, CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER.0),
+        Some(0)
+    );
+    // And the timer is what it tells its member, on the publication it added with
+    // the counters.
+    let mut stream = member
+        .client
+        .add_subscription("cavalry:ipc", CONSENSUS_MODULE_STREAM_ID)
+        .expect("the member's subscription");
+    let mut told: Vec<(i64, i64)> = Vec::new();
+    wait("the member is told of the timer", || {
+        poll(&mut service, &mut client);
+        stream
+            .poll(
+                |bytes, _| match Message::parse(Stream::ConsensusModule, bytes) {
+                    Ok(Message::ScheduleTimer {
+                        correlation_id,
+                        deadline,
+                    }) => told.push((correlation_id, deadline)),
+                    other => panic!("a schedule timer and nothing else: {other:?}"),
+                },
+                16,
+            )
+            .expect("the stream is read");
+        !told.is_empty()
+    });
+    assert!(
+        told.iter().all(|word| *word == (7, TIME + 1_000_000)),
+        "{told:?}"
+    );
+    drop(stream);
+
+    service.close(&mut client).expect("the service closes");
+    client.close().expect("the client closes");
+    member.close();
 }

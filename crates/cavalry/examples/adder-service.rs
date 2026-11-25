@@ -171,7 +171,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         "adder-service {beside}: position {position}, term {term}: the \
                          leader asked for a snapshot; this service takes none and reads on"
                     ),
-                    Entry::Other => {}
+                    // This service schedules no timer, so it is handed none.
+                    Entry::Timer { .. } | Entry::Other => {}
                 }
                 Action::Continue
             },
