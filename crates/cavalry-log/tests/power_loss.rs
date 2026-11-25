@@ -13,9 +13,11 @@
 //! crosses a roll into the next segment file: the synced position in the middle of
 //! the segment before the roll, and the synced position at the next segment's base
 //! (work item 405). A segment file is 128 MiB, and those tests cross one by padding
-//! frames, whose bytes the recorder writes as their 32-byte header alone: each test
-//! writes a few hundred kilobytes, and its two segment files take no more of the disk
-//! on a file system that keeps a file sparse, as APFS and ext4 do.
+//! frames, whose bytes the recorder writes as their 32-byte header alone, one header
+//! per 64 KiB term: each test writes under 150 KiB. On a file system that keeps a file
+//! sparse, as APFS and ext4 do, each header still takes a whole block of the file
+//! system, 4 KiB, so a test's two segment files take about 8 MiB of the disk while
+//! it runs, against the 256 MiB of their lengths.
 
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::FileExt;
