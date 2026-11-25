@@ -111,7 +111,7 @@ committed once a quorum, two of three, has it on disk.
    started`. Every line then names the members that the member's own string gives a
    vote to, `; its members string gives a vote to members 0, 1 and 2`, the same on
    the three, and the version of the cluster protocol that the member runs, `; it
-   runs version 1 of the cluster protocol, 0.1.0`. The term is 1 or more where two
+   runs version 2 of the cluster protocol, 0.2.0`. The term is 1 or more where two
    members asked for votes at the same moment and another ballot was taken. Each
    line ends with `; see` and the page that explains it, as every finding does.
 
@@ -435,8 +435,8 @@ committed once a quorum, two of three, has it on disk.
   each other, whatever their versions, as during an upgrade. So a rejected consensus
   message is usually from a member of another major, and the member may canvass with
   no leader for as long as that member runs. `cavalry doctor` on each member names the
-  version that member runs, in its `note cluster-member` line: `it runs version 1 of
-  the cluster protocol, 0.1.0`, where the major is the first number of `0.1.0`. Of
+  version that member runs, in its `note cluster-member` line: `it runs version 2 of
+  the cluster protocol, 0.2.0`, where the major is the first number of `0.2.0`. Of
   a member that has no `cluster.protocol_version` counter, `doctor` says that `it
   runs a build older than that counter: version 0 of the cluster protocol, or the
   first build of version 1`. Both are of major 0. Start every member on one major:

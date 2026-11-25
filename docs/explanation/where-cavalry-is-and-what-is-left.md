@@ -167,7 +167,7 @@ the line.
 | A client that drives a remote driver's recordings; a replay that merges into a live stream | Absent | Out |
 | Election and a commit by quorum | Works; the membership is a string of up to 8 members | Done |
 | Sessions in six languages | Work: connect, redirect, follow the leader, keepalive, close. At most 10 sessions; a message of at most 1,344 bytes | Feature 6 |
-| A service in six languages | Works: session open and close, message, new term, the cluster's time, replies. No timer | Feature 6 |
+| A service in six languages | Works: session open and close, message, new term, the cluster's time, replies. Timers are specified, at version 2 of the cluster protocol (ADR 0151), and no service has the calls yet | Feature 6 |
 | A service's snapshot | Works in Rust, through the C ABI since version 6 (ADR 0146) and in the five clients (ADR 0149): a service gives its program's state at the leader's request, which `cavalry snapshot` asks for, and starts from it | Feature 6 |
 | Catch-up, a restart on the log a member kept, a start from its own snapshot | Work | Done |
 | A start from a peer's snapshot | Absent | Feature 5 |

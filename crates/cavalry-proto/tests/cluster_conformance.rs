@@ -1,20 +1,21 @@
 //! Runs every vector in `spec/vectors/cluster.json` against this crate: a message
 //! vector decodes to its fields on its stream and encodes back to its bytes, or is
 //! rejected for the named reason; a members vector parses to its members or is
-//! refused; an arithmetic vector's fields are computed from its inputs
-//! (`spec/README.md`, "Conventions"; ADR 0058). `just conformance` runs this test
+//! refused; an arithmetic vector's fields are computed from its inputs; a timers
+//! vector's steps are taken by a service's table of timers, which answers each as
+//! the vector says (`spec/README.md`, "Conventions"; ADR 0058; ADR 0151). `just conformance` runs this test
 //! alone; `just test` runs it with the rest.
 
 use cavalry_proto::cluster::{
     Ballot, Candidate, CanvassAction, CanvassTerms, ChangeType, CloseReason, ClusterAction,
     ClusterError, CommitPosition, EMPTY_MEMBER, EventCode, LogRecording, LogRecordings, LogReport,
     MAX_LOG_RECORDINGS, MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS, Member, MemberPosition, Message,
-    NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd, ReplicationStop, SnapshotMark,
-    Stream, TermFields, TermSpan, TimeUnit, VERSION, Vote, VoteAnswer, VoteRequest, answered_term,
-    ballot, candidate, canvass_position_action, commit_position, entry_position, log_at_least,
-    new_leadership_term_action, next_fields, parse_members, quorum, replay_end, replication_record,
-    replication_stop, request_vote, takes_leader, votes_in_term, withheld_vote, withholds,
-    write_log_recordings,
+    NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd, ReplicationStop, ServiceTimers,
+    SnapshotMark, Stream, TermFields, TermSpan, TimeUnit, TimerEventIs, TimerWord, VERSION, Vote,
+    VoteAnswer, VoteRequest, answered_term, ballot, candidate, canvass_position_action,
+    commit_position, entry_position, log_at_least, new_leadership_term_action, next_fields,
+    parse_members, quorum, replay_end, replication_record, replication_stop, request_vote,
+    takes_leader, votes_in_term, withheld_vote, withholds, write_log_recordings,
 };
 use serde_json::{Map, Value, json};
 
@@ -327,6 +328,15 @@ fn fields(message: &Message<'_>) -> Value {
             "log_position": log_position, "timestamp": timestamp, "ack_id": ack_id,
             "relevant_id": relevant_id, "service_id": service_id,
         }),
+        Message::ScheduleTimer {
+            correlation_id,
+            deadline,
+        }
+        | Message::Timer {
+            correlation_id,
+            deadline,
+        } => json!({ "correlation_id": correlation_id, "deadline": deadline }),
+        Message::CancelTimer { correlation_id } => json!({ "correlation_id": correlation_id }),
     }
 }
 
@@ -448,6 +458,133 @@ fn log_recordings_vector(name: &str, vector: &Value) {
             "{name}: position {}",
             read["position"]
         );
+    }
+}
+
+/// A timers vector (`spec/cluster.md`, "The service", "Timers"): each step is taken by
+/// one table, which refuses, hands over, holds and tells what the vector's fields say.
+fn timers_vector(name: &str, vector: &Value) {
+    let mut timers = Box::new(ServiceTimers::new());
+    // The program's calls while it handles one entry: whether each schedule was refused.
+    let calls = |timers: &mut ServiceTimers, step: &Value| -> Vec<Value> {
+        let mut refused = Vec::new();
+        for call in step["calls"].as_array().map_or(&[][..], Vec::as_slice) {
+            match call["call"].as_str().expect("call") {
+                "schedule" => refused.push(Value::from(
+                    timers
+                        .schedule(int(call, "id"), int(call, "deadline"))
+                        .is_err(),
+                )),
+                "cancel" => timers.cancel(int(call, "id")),
+                other => panic!("unknown call {other}"),
+            }
+        }
+        refused
+    };
+    for (index, step) in vector["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .enumerate()
+    {
+        let at = format!("{name}: step {index}");
+        let fields = &step["fields"];
+        let taken = step.get("taken").and_then(Value::as_bool).unwrap_or(true);
+        let mut dropped = 0;
+        let mut refused = None;
+        match step["op"].as_str().expect("op") {
+            "entry" => {
+                timers.begin_entry();
+                refused = Some(Value::Array(calls(&mut timers, step)));
+                dropped += timers.end_entry(taken);
+            }
+            "fill" => {
+                let mut count = 0;
+                for id in 0..int(step, "count") {
+                    timers.begin_entry();
+                    count += usize::from(timers.schedule(id, int(step, "deadline") + id).is_err());
+                    dropped += timers.end_entry(true);
+                }
+                assert_eq!(Value::from(count), fields["refused"], "{at}: refused");
+            }
+            "empty" => {
+                timers.begin_entry();
+                for id in 0..int(step, "count") {
+                    timers.cancel(id);
+                }
+                dropped += timers.end_entry(true);
+            }
+            "event" => {
+                let is = timers.begin_event(int(step, "id"), int(step, "timestamp"));
+                let handed = is == TimerEventIs::Handed;
+                assert_eq!(Value::from(handed), fields["handed"], "{at}: handed");
+                if handed {
+                    refused = Some(Value::Array(calls(&mut timers, step)));
+                    dropped += timers.end_entry(taken);
+                } else {
+                    dropped += timers.end_entry(true);
+                }
+            }
+            "history" => timers.hold(),
+            "history-ends" => timers.release(),
+            "refresh" => timers.tell_all_again(),
+            other => panic!("{at}: unknown op {other}"),
+        }
+        if let Some(refused) = refused {
+            let expected = fields.get("refused").cloned().unwrap_or(json!([]));
+            assert_eq!(refused, expected, "{at}: refused");
+        }
+        let expected = fields
+            .get("cancels_dropped")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        assert_eq!(dropped as u64, expected, "{at}: cancels dropped");
+        if let Some(count) = fields.get("pending_count") {
+            assert_eq!(Value::from(timers.len()), *count, "{at}: pending count");
+        } else {
+            let pending: Vec<Value> = timers
+                .iter()
+                .map(|(id, deadline)| json!({ "id": id, "deadline": deadline }))
+                .collect();
+            let pending_is_empty = pending.is_empty();
+            assert_eq!(Value::Array(pending), fields["pending"], "{at}: pending");
+            assert_eq!(timers.is_empty(), pending_is_empty, "{at}: empty");
+        }
+        if step.get("stream").and_then(Value::as_bool).unwrap_or(true) {
+            // The stream takes everything the service has to tell, in its order.
+            let mut words = Vec::new();
+            while let Some(word) = timers.next_word() {
+                words.push(match word {
+                    TimerWord::Cancel { correlation_id } => json!({ "cancel": correlation_id }),
+                    TimerWord::Schedule {
+                        correlation_id,
+                        deadline,
+                    } => json!({ "schedule": correlation_id, "deadline": deadline }),
+                });
+                // A word the table did not give changes nothing; the one it gave is taken.
+                timers.told(TimerWord::Cancel {
+                    correlation_id: i64::MIN,
+                });
+                timers.told(word);
+                assert!(words.len() <= 4096, "{at}: the words do not end");
+            }
+            if let Some(count) = fields.get("words_count") {
+                assert_eq!(Value::from(words.len()), *count, "{at}: words count");
+                let first: Vec<Value> = words.iter().take(2).cloned().collect();
+                assert_eq!(
+                    Value::Array(first),
+                    fields["words_first"],
+                    "{at}: first words"
+                );
+            } else {
+                assert_eq!(Value::Array(words), fields["words"], "{at}: words");
+            }
+        } else {
+            assert!(
+                fields.get("words").is_none() && fields.get("words_count").is_none(),
+                "{at}: a stream that takes nothing"
+            );
+        }
     }
 }
 
@@ -775,12 +912,13 @@ fn every_vector_in_spec_vectors_cluster_json() {
             "members" => members_vector(name, vector),
             "arithmetic" => arithmetic_vector(name, vector),
             "log recordings" => log_recordings_vector(name, vector),
+            "timers" => timers_vector(name, vector),
             other => panic!("{name}: unknown kind {other}"),
         }
         let count = kinds.get(kind).and_then(Value::as_u64).unwrap_or(0);
         kinds.insert(kind.to_string(), Value::from(count + 1));
     }
-    assert_eq!(kinds.len(), 4, "the four kinds of spec/cluster.md, Vectors");
+    assert_eq!(kinds.len(), 5, "the five kinds of spec/cluster.md, Vectors");
 }
 
 /// The file at its bound (`spec/cluster.md`, "The log's recordings"): 1,025 entries

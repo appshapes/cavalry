@@ -57,7 +57,7 @@ use core::fmt;
 pub const SCHEMA_ID: u16 = 1;
 
 /// The version of `spec/cluster.md` this crate reads and writes.
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 
 /// The version every message's header carries: the version of the page's layouts,
 /// which is 0 in every version of the page whose major is 0, since none of them
@@ -69,13 +69,34 @@ pub const HEADER_VERSION: u16 = 0;
 pub const HEADER_LENGTH: usize = 8;
 
 /// A protocol version field's value for this version, in semantic form: the major
-/// times 65536, the minor times 256 and the patch, added. It is 0.1.0, the page's
+/// times 65536, the minor times 256 and the patch, added. It is 0.2.0, the page's
 /// version being the minor while the major is 0. A reader reads every version of its
 /// major (`spec/cluster.md`, "Encoding").
 pub const PROTOCOL_VERSION: i32 = (VERSION as i32) << 8;
 
 /// An id or a position that is none: Aeron's null value (`spec/cluster.md`, "Encoding").
 pub const NULL_VALUE: i64 = -1;
+
+/// How many timers may be pending in one service (`spec/cluster.md`, "Values", a
+/// service's timers): a schedule of another id beyond them is refused to the program.
+pub const MAX_SERVICE_TIMERS: usize = 1_024;
+
+/// How many cancel timers a service holds for a consensus module stream that has not
+/// taken them (`spec/cluster.md`, "Values", unsent cancels).
+pub const MAX_UNSENT_TIMER_CANCELS: usize = 1_024;
+
+/// How many timers a member holds, twice a service's (`spec/cluster.md`, "Values",
+/// the member's timers).
+pub const MAX_MEMBER_TIMERS: usize = 2 * MAX_SERVICE_TIMERS;
+
+/// How often a service sends its member every pending timer again, in nanoseconds
+/// of the service's monotonic clock: 1 s (`spec/cluster.md`, "Values", timer
+/// refresh interval).
+pub const TIMER_REFRESH_INTERVAL_NS: u64 = 1_000_000_000;
+
+/// How many timer events a leader appends in one duty cycle (`spec/cluster.md`,
+/// "Values", timer events).
+pub const MAX_TIMER_EVENTS_PER_DUTY_CYCLE: usize = 10;
 
 /// How many members a members string may name (`spec/cluster.md`, "Values").
 pub const MAX_MEMBERS: usize = 8;
@@ -313,9 +334,13 @@ impl Stream {
                 Template::SnapshotMarker
                     | Template::ClientSession
                     | Template::ClusterSession
+                    | Template::Timer
                     | Template::ConsensusModule
             ),
-            Stream::ConsensusModule => matches!(template, Template::ServiceAck),
+            Stream::ConsensusModule => matches!(
+                template,
+                Template::ScheduleTimer | Template::CancelTimer | Template::ServiceAck
+            ),
         }
     }
 }
@@ -374,6 +399,12 @@ pub enum Template {
     ClientSession = 102,
     /// A service's word to its member that it took a snapshot.
     ServiceAck = 33,
+    /// A service's word to its member that its program scheduled a timer.
+    ScheduleTimer = 31,
+    /// A service's word to its member that a timer is pending no more.
+    CancelTimer = 32,
+    /// A pending timer in a service's snapshot.
+    Timer = 104,
 }
 
 impl Template {
@@ -406,6 +437,9 @@ impl Template {
             105 => Template::ConsensusModule,
             102 => Template::ClientSession,
             33 => Template::ServiceAck,
+            31 => Template::ScheduleTimer,
+            32 => Template::CancelTimer,
+            104 => Template::Timer,
             _ => return None,
         })
     }
@@ -439,6 +473,8 @@ impl Template {
             Template::ConsensusModule => 28,
             Template::ClientSession => 12,
             Template::ServiceAck => 36,
+            Template::ScheduleTimer | Template::Timer => 16,
+            Template::CancelTimer => 8,
         }
     }
 
@@ -470,6 +506,9 @@ impl Template {
             Template::ConsensusModule => "consensus-module",
             Template::ClientSession => "client-session",
             Template::ServiceAck => "service-ack",
+            Template::ScheduleTimer => "schedule-timer",
+            Template::CancelTimer => "cancel-timer",
+            Template::Timer => "timer",
         }
     }
 }
@@ -1112,6 +1151,25 @@ pub enum Message<'a> {
         /// The service's id, [`SERVICE_ID`].
         service_id: i32,
     },
+    /// Template 31.
+    ScheduleTimer {
+        /// The timer's correlation id.
+        correlation_id: i64,
+        /// The cluster's time at or after which the timer is due.
+        deadline: i64,
+    },
+    /// Template 32.
+    CancelTimer {
+        /// The timer's correlation id.
+        correlation_id: i64,
+    },
+    /// Template 104.
+    Timer {
+        /// The timer's correlation id.
+        correlation_id: i64,
+        /// The cluster's time at or after which the timer is due.
+        deadline: i64,
+    },
 }
 
 /// What a cluster session's `close reason` holds in a snapshot, where every session
@@ -1326,6 +1384,9 @@ impl<'a> Message<'a> {
             Message::ConsensusModule { .. } => Template::ConsensusModule,
             Message::ClientSession { .. } => Template::ClientSession,
             Message::ServiceAck { .. } => Template::ServiceAck,
+            Message::ScheduleTimer { .. } => Template::ScheduleTimer,
+            Message::CancelTimer { .. } => Template::CancelTimer,
+            Message::Timer { .. } => Template::Timer,
         }
     }
 
@@ -1850,6 +1911,29 @@ impl<'a> Message<'a> {
                     service_id,
                 }
             }
+            Template::ScheduleTimer => {
+                let correlation_id = reader.i64()?;
+                let deadline = reader.i64()?;
+                reader.done()?;
+                Message::ScheduleTimer {
+                    correlation_id,
+                    deadline,
+                }
+            }
+            Template::CancelTimer => {
+                let correlation_id = reader.i64()?;
+                reader.done()?;
+                Message::CancelTimer { correlation_id }
+            }
+            Template::Timer => {
+                let correlation_id = reader.i64()?;
+                let deadline = reader.i64()?;
+                reader.done()?;
+                Message::Timer {
+                    correlation_id,
+                    deadline,
+                }
+            }
         };
         Ok(message)
     }
@@ -2251,6 +2335,20 @@ impl<'a> Message<'a> {
                 writer.i64(ack_id)?;
                 writer.i64(relevant_id)?;
                 writer.i32(service_id)?;
+            }
+            Message::ScheduleTimer {
+                correlation_id,
+                deadline,
+            }
+            | Message::Timer {
+                correlation_id,
+                deadline,
+            } => {
+                writer.i64(correlation_id)?;
+                writer.i64(deadline)?;
+            }
+            Message::CancelTimer { correlation_id } => {
+                writer.i64(correlation_id)?;
             }
         }
         Ok(writer.at)
@@ -3366,6 +3464,653 @@ const fn aligned_frame(payload: usize) -> Option<usize> {
     match payload.checked_add(32 + 31) {
         Some(length) => Some(length / 32 * 32),
         None => None,
+    }
+}
+
+// ---- a service's timers -----------------------------------------------------------------
+
+/// A schedule that [`ServiceTimers`] refused: [`MAX_SERVICE_TIMERS`] timers are pending
+/// and the id is not one of them. The refusal is by the count of pending timers alone,
+/// so every member's service refuses the same call at the same entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TimersFull;
+
+/// A timer of a service's snapshot that [`ServiceTimers::load`] refused: its
+/// correlation id is not above the one before it, or the table is full.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TimerOutOfOrder;
+
+/// What a service tells the member on its driver of one timer, on the consensus
+/// module stream (`spec/cluster.md`, "The service", "Timers", "What a service tells
+/// its member").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimerWord {
+    /// A cancel timer: the timer is pending no more.
+    Cancel {
+        /// The timer's correlation id.
+        correlation_id: i64,
+    },
+    /// A schedule timer: the timer is pending with this deadline.
+    Schedule {
+        /// The timer's correlation id.
+        correlation_id: i64,
+        /// The cluster's time at or after which it is due.
+        deadline: i64,
+    },
+}
+
+impl TimerWord {
+    /// The message that says it.
+    pub const fn message(self) -> Message<'static> {
+        match self {
+            TimerWord::Cancel { correlation_id } => Message::CancelTimer { correlation_id },
+            TimerWord::Schedule {
+                correlation_id,
+                deadline,
+            } => Message::ScheduleTimer {
+                correlation_id,
+                deadline,
+            },
+        }
+    }
+}
+
+/// What a timer event is to a service, by [`ServiceTimers::begin_event`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimerEventIs {
+    /// The timer is pending with a deadline at or before the event's timestamp: the
+    /// event is handed to the program, and [`ServiceTimers::end_entry`] follows with
+    /// whether the program took it.
+    Handed,
+    /// The timer is not pending: the event is passed over.
+    NotPending,
+    /// The timer is pending with this deadline, which is after the event's timestamp:
+    /// the event is passed over.
+    Early(i64),
+}
+
+/// The timers of one moment: what [`ServiceTimers`] holds, and keeps a second time
+/// while a program handles an entry.
+#[derive(Clone, Debug)]
+struct Timers {
+    ids: [i64; MAX_SERVICE_TIMERS],
+    deadlines: [i64; MAX_SERVICE_TIMERS],
+    // Whether the member has not been sent the timer with this deadline.
+    unsent: [bool; MAX_SERVICE_TIMERS],
+    len: usize,
+}
+
+impl Timers {
+    const fn new() -> Self {
+        Timers {
+            ids: [0; MAX_SERVICE_TIMERS],
+            deadlines: [0; MAX_SERVICE_TIMERS],
+            unsent: [false; MAX_SERVICE_TIMERS],
+            len: 0,
+        }
+    }
+
+    // Where `correlation_id` is, or where it would be put.
+    fn find(&self, correlation_id: i64) -> Result<usize, usize> {
+        self.ids
+            .get(..self.len)
+            .unwrap_or(&[])
+            .binary_search(&correlation_id)
+    }
+
+    fn insert(&mut self, index: usize, correlation_id: i64, deadline: i64) {
+        if self.len >= MAX_SERVICE_TIMERS || index > self.len {
+            return;
+        }
+        self.ids.copy_within(index..self.len, index + 1);
+        self.deadlines.copy_within(index..self.len, index + 1);
+        self.unsent.copy_within(index..self.len, index + 1);
+        self.len += 1;
+        if let (Some(id), Some(slot), Some(unsent)) = (
+            self.ids.get_mut(index),
+            self.deadlines.get_mut(index),
+            self.unsent.get_mut(index),
+        ) {
+            *id = correlation_id;
+            *slot = deadline;
+            *unsent = true;
+        }
+    }
+
+    fn remove(&mut self, index: usize) {
+        if index >= self.len {
+            return;
+        }
+        self.ids.copy_within(index + 1..self.len, index);
+        self.deadlines.copy_within(index + 1..self.len, index);
+        self.unsent.copy_within(index + 1..self.len, index);
+        self.len -= 1;
+    }
+
+    // Takes the timers of `other`, of which only the first `other.len` are read.
+    fn copy_from(&mut self, other: &Timers) {
+        let len = other.len.min(MAX_SERVICE_TIMERS);
+        if let (Some(to), Some(from)) = (self.ids.get_mut(..len), other.ids.get(..len)) {
+            to.copy_from_slice(from);
+        }
+        if let (Some(to), Some(from)) = (self.deadlines.get_mut(..len), other.deadlines.get(..len))
+        {
+            to.copy_from_slice(from);
+        }
+        if let (Some(to), Some(from)) = (self.unsent.get_mut(..len), other.unsent.get(..len)) {
+            to.copy_from_slice(from);
+        }
+        self.len = len;
+    }
+}
+
+/// A service's pending timers (`spec/cluster.md`, "The service", "Timers"; ADR 0151):
+/// for each a correlation id and a deadline in the cluster's time, held in the rising
+/// order of the ids, which is the order a snapshot writes them in. The table is a
+/// function of the entries a program took and of the calls it made while it took
+/// them, and of nothing else, so it is the same beside every member.
+///
+/// A service brackets its handling of every entry: [`ServiceTimers::begin_entry`], or
+/// [`ServiceTimers::begin_event`] for a timer event, then the program's calls,
+/// [`ServiceTimers::schedule`] and [`ServiceTimers::cancel`], then
+/// [`ServiceTimers::end_entry`] with whether the program took the entry. An entry
+/// that is not taken leaves every timer as it was before its handling, whatever the
+/// program did, so the next handling of it is answered as the first was. A service
+/// refuses its program a call outside a handling before the call reaches the table:
+/// one that reached it would be undone when the next handling begins.
+///
+/// It holds [`MAX_SERVICE_TIMERS`] timers in itself, twice, and allocates nothing.
+/// Beside them it holds what is no part of that function, what the service has yet to
+/// tell the member on its driver: a mark on each timer the member has not been sent,
+/// and at most [`MAX_UNSENT_TIMER_CANCELS`] cancels. Both follow from the entries
+/// taken: an entry that is not taken tells the member nothing.
+/// [`ServiceTimers::next_word`] gives them in the order the member must be told, and
+/// [`ServiceTimers::told`] takes one off once the consensus module stream has taken
+/// its message.
+///
+/// What it costs a service's reading: nothing for an entry that is no timer event
+/// and whose handler touches no timer, and nothing for a timer event that is
+/// passed over. A timer event that is handed over costs the move of the timers
+/// above its own, 17 bytes for each, when its handler touches no timer. A handler
+/// that schedules or cancels costs a copy of the pending timers at its first
+/// change, 17 bytes for each, a move of as much for a timer put in or taken out,
+/// and one pass over both copies when the handling ends. Telling a member every
+/// timer again is one pass over the table, and a read with nothing to tell reads
+/// none of it.
+///
+/// ```
+/// use cavalry_proto::cluster::{ServiceTimers, TimerEventIs, TimerWord};
+///
+/// let mut timers = Box::new(ServiceTimers::new());
+/// // A program schedules timer 7 while it takes an entry.
+/// timers.begin_entry();
+/// timers.schedule(7, 1_000).expect("room");
+/// timers.end_entry(true);
+/// assert_eq!(
+///     timers.next_word(),
+///     Some(TimerWord::Schedule { correlation_id: 7, deadline: 1_000 })
+/// );
+/// // An event before the deadline, and one for a timer nobody scheduled: passed over.
+/// assert_eq!(timers.begin_event(7, 999), TimerEventIs::Early(1_000));
+/// timers.end_entry(true);
+/// assert_eq!(timers.begin_event(8, 2_000), TimerEventIs::NotPending);
+/// timers.end_entry(true);
+/// // An event at the deadline is handed over. A program that does not take it is
+/// // handed it again; once it has taken it the timer is pending no more.
+/// assert_eq!(timers.begin_event(7, 1_000), TimerEventIs::Handed);
+/// timers.end_entry(false);
+/// assert_eq!(timers.begin_event(7, 1_000), TimerEventIs::Handed);
+/// timers.end_entry(true);
+/// assert_eq!(timers.deadline(7), None);
+/// assert_eq!(timers.begin_event(7, 5_000), TimerEventIs::NotPending);
+/// ```
+#[derive(Clone, Debug)]
+pub struct ServiceTimers {
+    now: Timers,
+    // The timers as they were before the entry being handled, taken at the first
+    // call that changes one: what an entry that is not taken goes back to, and what
+    // the member is told the difference from.
+    before: Timers,
+    saved: bool,
+    // Whether an entry is being handled: nothing is told until its handling ends.
+    handling: bool,
+    // Whether every pending timer is to be marked when the handling ends: a refresh
+    // that came while an entry was being handled.
+    again: bool,
+    // No timer below this index is marked: where the search for the next timer to
+    // tell begins, so that telling every timer is one pass over the table.
+    scan_from: usize,
+    // The cancels the member has not been sent, oldest first, in a ring.
+    cancels: [i64; MAX_UNSENT_TIMER_CANCELS],
+    cancels_head: usize,
+    cancels_len: usize,
+    // Whether the service is reading history, and tells its member nothing.
+    held: bool,
+    // The timer event being handled: its id, and what it is to the service.
+    event: Option<(i64, TimerEventIs)>,
+    // Whether the timer whose event the program is handling stays pending once the
+    // program has taken the event: the last thing the program did with its id was to
+    // schedule it.
+    stays: bool,
+}
+
+impl Default for ServiceTimers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ServiceTimers {
+    /// A table with no timer pending.
+    pub const fn new() -> Self {
+        ServiceTimers {
+            now: Timers::new(),
+            before: Timers::new(),
+            saved: false,
+            handling: false,
+            again: false,
+            scan_from: 0,
+            cancels: [0; MAX_UNSENT_TIMER_CANCELS],
+            cancels_head: 0,
+            cancels_len: 0,
+            held: false,
+            event: None,
+            stays: false,
+        }
+    }
+
+    /// How many timers are pending. The timer whose event a program is handling
+    /// counts until the program has taken the event.
+    pub const fn len(&self) -> usize {
+        self.now.len
+    }
+
+    /// Whether no timer is pending.
+    pub const fn is_empty(&self) -> bool {
+        self.now.len == 0
+    }
+
+    /// The deadline of the timer `correlation_id`, or `None` when it is not pending.
+    pub fn deadline(&self, correlation_id: i64) -> Option<i64> {
+        let index = self.now.find(correlation_id).ok()?;
+        self.now.deadlines.get(index).copied()
+    }
+
+    /// The pending timers, each a correlation id and a deadline, in the rising order
+    /// of the ids: what a snapshot writes.
+    pub fn iter(&self) -> impl Iterator<Item = (i64, i64)> + '_ {
+        let ids = self.now.ids.get(..self.now.len).unwrap_or(&[]);
+        let deadlines = self.now.deadlines.get(..self.now.len).unwrap_or(&[]);
+        ids.iter().copied().zip(deadlines.iter().copied())
+    }
+
+    // Keeps the timers as they are, once in the handling of an entry, before the
+    // first change to one.
+    fn save(&mut self) {
+        if !self.saved {
+            self.before.copy_from(&self.now);
+            self.saved = true;
+        }
+    }
+
+    /// Begins the handling of an entry that is no timer event. An entry whose
+    /// handling was begun and not ended is ended as not taken.
+    pub fn begin_entry(&mut self) {
+        self.end_entry(false);
+        self.handling = true;
+    }
+
+    /// Begins the handling of the timer event of `correlation_id` at `timestamp`, and
+    /// says what the event is to this service. For [`TimerEventIs::Handed`] the
+    /// service hands the event to its program; the timer stays in the table, and
+    /// counts toward the bound, until [`ServiceTimers::end_entry`]. For the two other
+    /// answers the service hands its program nothing and ends the entry as taken.
+    pub fn begin_event(&mut self, correlation_id: i64, timestamp: i64) -> TimerEventIs {
+        self.end_entry(false);
+        let is = match self.deadline(correlation_id) {
+            None => TimerEventIs::NotPending,
+            Some(deadline) if deadline > timestamp => TimerEventIs::Early(deadline),
+            Some(_) => TimerEventIs::Handed,
+        };
+        self.event = Some((correlation_id, is));
+        self.stays = false;
+        self.handling = true;
+        is
+    }
+
+    /// Schedules the timer `correlation_id` for `deadline`, whether it was pending or
+    /// not. Refused, with nothing changed, when the id is not pending and
+    /// [`MAX_SERVICE_TIMERS`] timers are.
+    pub fn schedule(&mut self, correlation_id: i64, deadline: i64) -> Result<(), TimersFull> {
+        match self.now.find(correlation_id) {
+            Ok(index) => {
+                self.save();
+                if let Some(slot) = self.now.deadlines.get_mut(index) {
+                    *slot = deadline;
+                }
+            }
+            Err(index) => {
+                if self.now.len >= MAX_SERVICE_TIMERS {
+                    return Err(TimersFull);
+                }
+                self.save();
+                self.now.insert(index, correlation_id, deadline);
+            }
+        }
+        if self.handed() == Some(correlation_id) {
+            self.stays = true;
+        }
+        Ok(())
+    }
+
+    /// Cancels the timer `correlation_id`: it is pending no more. It answers nothing,
+    /// since a program that is handed an entry again makes the same call and must be
+    /// given the same answer. The timer whose event the program is handling stays in
+    /// the table until [`ServiceTimers::end_entry`], and counts toward the bound till
+    /// then.
+    pub fn cancel(&mut self, correlation_id: i64) {
+        if self.handed() == Some(correlation_id) {
+            self.stays = false;
+            return;
+        }
+        if let Ok(index) = self.now.find(correlation_id) {
+            self.save();
+            self.now.remove(index);
+        }
+    }
+
+    // The id of the timer whose event the program is handling.
+    fn handed(&self) -> Option<i64> {
+        match self.event {
+            Some((correlation_id, TimerEventIs::Handed)) => Some(correlation_id),
+            _ => None,
+        }
+    }
+
+    /// Ends the handling of an entry. With `taken`, the program took it: what it
+    /// scheduled and cancelled stands, the timer whose event it was handed is pending
+    /// no more unless the last thing the program did with its id was to schedule it,
+    /// and what changed is held for the member, a cancel for each timer that is
+    /// pending no more and a mark on each that is new or has another deadline. A
+    /// timer event that was passed over changes nothing and holds nothing. Without
+    /// `taken`, the program did not
+    /// take the entry and is handed it again: every timer is as it was before the
+    /// handling, and nothing is held for the member.
+    ///
+    /// It answers how many cancels were dropped, [`MAX_UNSENT_TIMER_CANCELS`] being
+    /// held already, the oldest for each: what
+    /// `cluster.service_timer_cancels_dropped` counts. 0 with nothing changed when no
+    /// handling was begun.
+    pub fn end_entry(&mut self, taken: bool) -> usize {
+        let event = self.event.take();
+        self.handling = false;
+        let dropped = self.end(event, taken);
+        if self.again {
+            self.again = false;
+            self.mark_all();
+        }
+        dropped
+    }
+
+    // What `end_entry` does to the timers, before a refresh that waited for it.
+    fn end(&mut self, event: Option<(i64, TimerEventIs)>, taken: bool) -> usize {
+        if !taken {
+            if self.saved {
+                self.now.copy_from(&self.before);
+                self.saved = false;
+                self.scan_from = 0;
+            }
+            return 0;
+        }
+        let mut dropped = 0;
+        // The timer a program was handed and scheduled again is sent to the member
+        // whatever its deadline, the same one included: the member marked it when it
+        // appended the event, and only a schedule timer takes that mark off.
+        let mut again = None;
+        match event {
+            Some((correlation_id, TimerEventIs::Handed)) if self.stays => {
+                again = Some(correlation_id);
+            }
+            Some((correlation_id, TimerEventIs::Handed)) => {
+                if let Ok(index) = self.now.find(correlation_id) {
+                    if !self.saved {
+                        // The handler changed no timer: the one handed over is taken
+                        // out where it is, with no copy and no pass over the table.
+                        self.now.remove(index);
+                        if index < self.scan_from {
+                            self.scan_from -= 1;
+                        }
+                        return self.hold_cancel(correlation_id);
+                    }
+                    self.now.remove(index);
+                }
+            }
+            _ => {}
+        }
+        if !self.saved {
+            return dropped;
+        }
+        self.saved = false;
+        // The first timer that is marked, for the next search to begin at.
+        let mut first = self.now.len;
+        // What the entry changed, by one pass over the two tables in the order of the
+        // ids: a timer that was pending and is not is a cancel for the member; one
+        // that is new, or has another deadline, is marked; any other keeps its mark.
+        let (mut was, mut is) = (0, 0);
+        while was < self.before.len || is < self.now.len {
+            let before = self
+                .before
+                .ids
+                .get(was)
+                .copied()
+                .filter(|_| was < self.before.len);
+            let now = self.now.ids.get(is).copied().filter(|_| is < self.now.len);
+            match (before, now) {
+                (Some(old), Some(new)) if old == new => {
+                    let same = self.before.deadlines.get(was) == self.now.deadlines.get(is);
+                    let mark = self.before.unsent.get(was).copied().unwrap_or(true);
+                    if let Some(unsent) = self.now.unsent.get_mut(is) {
+                        *unsent = !same || mark;
+                        if *unsent {
+                            first = first.min(is);
+                        }
+                    }
+                    was += 1;
+                    is += 1;
+                }
+                (Some(old), Some(new)) if old < new => {
+                    dropped += self.hold_cancel(old);
+                    was += 1;
+                }
+                (Some(old), None) => {
+                    dropped += self.hold_cancel(old);
+                    was += 1;
+                }
+                (_, Some(_)) => {
+                    if let Some(unsent) = self.now.unsent.get_mut(is) {
+                        *unsent = true;
+                        first = first.min(is);
+                    }
+                    is += 1;
+                }
+                (None, None) => break,
+            }
+        }
+        if let Some(correlation_id) = again
+            && let Ok(index) = self.now.find(correlation_id)
+            && let Some(unsent) = self.now.unsent.get_mut(index)
+        {
+            *unsent = true;
+            first = first.min(index);
+        }
+        self.scan_from = first;
+        dropped
+    }
+
+    // Holds a cancel of `correlation_id` for the member, and answers 1 when the
+    // oldest cancel held was dropped for it. Nothing is held while the service reads
+    // history.
+    fn hold_cancel(&mut self, correlation_id: i64) -> usize {
+        if self.held {
+            return 0;
+        }
+        let mut dropped = 0;
+        if self.cancels_len >= MAX_UNSENT_TIMER_CANCELS {
+            self.cancels_head = (self.cancels_head + 1) % MAX_UNSENT_TIMER_CANCELS;
+            self.cancels_len -= 1;
+            dropped = 1;
+        }
+        let at = (self.cancels_head + self.cancels_len) % MAX_UNSENT_TIMER_CANCELS;
+        if let Some(slot) = self.cancels.get_mut(at) {
+            *slot = correlation_id;
+            self.cancels_len += 1;
+        }
+        dropped
+    }
+
+    /// Takes one timer of a service's snapshot, which holds them in the rising order
+    /// of their ids, no two alike: refused for an id that is not above the last one
+    /// taken, and for one more than [`MAX_SERVICE_TIMERS`]. A timer so taken is marked
+    /// not yet sent to the member.
+    pub fn load(&mut self, correlation_id: i64, deadline: i64) -> Result<(), TimerOutOfOrder> {
+        if self.now.len >= MAX_SERVICE_TIMERS {
+            return Err(TimerOutOfOrder);
+        }
+        if let Some(last) = self
+            .now
+            .len
+            .checked_sub(1)
+            .and_then(|last| self.now.ids.get(last))
+            && *last >= correlation_id
+        {
+            return Err(TimerOutOfOrder);
+        }
+        self.now.insert(self.now.len, correlation_id, deadline);
+        Ok(())
+    }
+
+    /// Removes every timer, and everything still to tell the member: a service that
+    /// passes a snapshot over starts with none. A service that was reading history
+    /// ([`ServiceTimers::hold`]) is reading it still.
+    pub fn clear(&mut self) {
+        self.now.len = 0;
+        self.saved = false;
+        self.handling = false;
+        self.again = false;
+        self.scan_from = 0;
+        self.event = None;
+        self.cancels_head = 0;
+        self.cancels_len = 0;
+    }
+
+    /// Holds everything back from the member, and forgets the cancels held for it: a
+    /// service that reads history, the entries its member held when the service
+    /// opened its log, tells its member nothing of them, since what they schedule
+    /// and cancel a service before it told the member, or is long past.
+    /// [`ServiceTimers::next_word`] gives nothing until
+    /// [`ServiceTimers::release`], which the service calls when it has read that
+    /// history.
+    pub fn hold(&mut self) {
+        self.held = true;
+        self.again = false;
+        self.cancels_head = 0;
+        self.cancels_len = 0;
+    }
+
+    /// Ends [`ServiceTimers::hold`]: the service has read its history, and sends its
+    /// member every pending timer, as [`ServiceTimers::tell_all_again`] marks them.
+    pub fn release(&mut self) {
+        self.held = false;
+        self.tell_all_again();
+    }
+
+    /// Marks every pending timer not yet sent to the member: the service sends each
+    /// again, as it does at each timer refresh interval
+    /// ([`TIMER_REFRESH_INTERVAL_NS`]). A timer that is marked already stays
+    /// marked, so a stream that takes nothing holds no more for a second call than
+    /// for the first. Nothing while the service reads history, which
+    /// [`ServiceTimers::release`] ends with every timer marked. While an entry is
+    /// being handled the timers are marked when its handling ends, taken or not.
+    pub fn tell_all_again(&mut self) {
+        if self.held {
+            return;
+        }
+        if self.handling || self.saved {
+            self.again = true;
+            return;
+        }
+        self.mark_all();
+    }
+
+    fn mark_all(&mut self) {
+        if let Some(unsent) = self.now.unsent.get_mut(..self.now.len) {
+            unsent.fill(true);
+        }
+        self.scan_from = 0;
+    }
+
+    // The index of the first timer that is marked, at or after `scan_from`, below
+    // which none is.
+    fn first_unsent(&self) -> Option<usize> {
+        let from = self.scan_from.min(self.now.len);
+        let unsent = self.now.unsent.get(from..self.now.len).unwrap_or(&[]);
+        Some(from + unsent.iter().position(|unsent| *unsent)?)
+    }
+
+    /// The next thing to tell the member: the oldest cancel held, and with none
+    /// held the first timer, in the order of the ids, that the member has not been
+    /// sent. Every cancel held is of an entry taken before the last entry that
+    /// scheduled its id, since a timer that an entry leaves pending holds no cancel
+    /// for that entry: so cancels before schedules is, for each id, the order of the
+    /// entries. Nothing while the service reads history, and nothing while an entry
+    /// is being handled.
+    pub fn next_word(&self) -> Option<TimerWord> {
+        if self.held || self.handling || self.saved {
+            return None;
+        }
+        if self.cancels_len > 0 {
+            let correlation_id = *self.cancels.get(self.cancels_head)?;
+            return Some(TimerWord::Cancel { correlation_id });
+        }
+        let index = self.first_unsent()?;
+        Some(TimerWord::Schedule {
+            correlation_id: *self.now.ids.get(index)?,
+            deadline: *self.now.deadlines.get(index)?,
+        })
+    }
+
+    /// Takes `word` off what is still to tell, once the consensus module stream has
+    /// taken its message: the oldest cancel held, when it is that one; the mark of
+    /// a timer that is pending with that deadline still. A timer that has since
+    /// been scheduled for another deadline stays to be told, and a word that is
+    /// neither changes nothing.
+    pub fn told(&mut self, word: TimerWord) {
+        match word {
+            TimerWord::Cancel { correlation_id } => {
+                if self.cancels_len > 0
+                    && self.cancels.get(self.cancels_head) == Some(&correlation_id)
+                {
+                    self.cancels_head = (self.cancels_head + 1) % MAX_UNSENT_TIMER_CANCELS;
+                    self.cancels_len -= 1;
+                }
+            }
+            TimerWord::Schedule {
+                correlation_id,
+                deadline,
+            } => {
+                if let Ok(index) = self.now.find(correlation_id)
+                    && self.now.deadlines.get(index) == Some(&deadline)
+                {
+                    let first = self.first_unsent();
+                    if let Some(unsent) = self.now.unsent.get_mut(index) {
+                        *unsent = false;
+                    }
+                    if first == Some(index) {
+                        self.scan_from = index + 1;
+                    }
+                }
+            }
+        }
     }
 }
 

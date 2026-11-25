@@ -60,6 +60,17 @@ Wire types, zero-copy frames and version negotiation. Data plane.
   id given to any of them is the highest term in the member's record of recorded
   terms, not the term of its last entry. What a member does with a message is
   `cavalry-raft`'s.
+- Holds a cluster service's timers, `spec/cluster.md`, "The service", "Timers" (ADR
+  0151): `ServiceTimers`, the table of pending timers that a program schedules and
+  cancels in, which says of each timer event whether it is handed to the program,
+  `TimerEventIs`, and what the service has yet to tell the member on its driver,
+  `TimerWord`. The table holds 1,024 timers in itself, twice, and allocates nothing.
+  Which timers are pending, and which event is handed over, is a function of the
+  entries a program took and of its calls while it took them, so it is the same
+  beside every member; what is still to tell a member is not, since it follows
+  what that member's stream has taken. The spec's `timers` vectors run against
+  it, and `tests/cluster_timers.rs` runs it against a second reading of the rule
+  under seeded calls.
 - Reads and writes the file in which a cluster member lists the recordings of its
   log for its service, `spec/cluster.md`, "The log's recordings": `LogRecordings::read`
   with the spec's seven checks in the spec's order, `recording_at`, the recording a

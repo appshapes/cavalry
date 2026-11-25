@@ -46,8 +46,8 @@ is allowed here.
   its last election began, the members that its own members string gives a vote
   to, so that the notes of all members show one that was started with another
   string, and last the version of the cluster protocol that the member runs, from
-  its gauge `cluster.protocol_version`, as `it runs version 1 of the cluster
-  protocol, 0.1.0`, so that the notes of all members give the versions of a
+  its gauge `cluster.protocol_version`, as `it runs version 2 of the cluster
+  protocol, 0.2.0`, so that the notes of all members give the versions of a
   cluster during an upgrade; of a member that holds no such gauge the note says
   `it has no cluster.protocol_version, so it runs a build older than that
   counter`, which is version 0 or the first build of version 1
