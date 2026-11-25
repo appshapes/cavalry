@@ -174,19 +174,36 @@ fn crashed(test: &str, synced: usize, unsynced: usize) -> (TestDir, Descriptor, 
     (dir, found, synced_position, written)
 }
 
+/// Writes `blocks` blocks of frames, each 2 ms after the one before: more than the
+/// index interval, so the recorder appends an index entry for each.
 fn write_blocks(writer: &mut RecordingWriter, found: &Descriptor, blocks: usize, now: &mut i64) {
     for _ in 0..blocks {
-        let mut block = Vec::with_capacity(BLOCK);
-        let mut position = writer.position();
-        for _ in 0..PER_BLOCK {
-            block.extend_from_slice(&frame(found, position));
-            position += FRAME as i64;
-        }
         *now += 2 * MS;
         writer
-            .write(&block, BLOCK, *now)
+            .write(&block(found, writer.position()), BLOCK, *now)
             .expect("the block is written");
     }
+}
+
+/// The block of frames the recorder writes at `position`: one page of them.
+fn block(found: &Descriptor, mut position: i64) -> Vec<u8> {
+    let mut block = Vec::with_capacity(BLOCK);
+    for _ in 0..PER_BLOCK {
+        block.extend_from_slice(&frame(found, position));
+        position += FRAME as i64;
+    }
+    block
+}
+
+/// The position of the last entry in the recording's time index.
+fn last_indexed(dir: &TestDir, found: &Descriptor) -> i64 {
+    let entries = fs::read(dir.index(found.recording_id())).expect("the index reads");
+    let last = entries[HEADER_LENGTH..]
+        .as_chunks::<16>()
+        .0
+        .last()
+        .expect("the index holds an entry");
+    i64::from_le_bytes(last[8..16].try_into().expect("8"))
 }
 
 /// Writes padding frames from the writer's position to `to`, each to the end of its
@@ -556,7 +573,10 @@ fn a_tail_that_rolled_into_the_next_segment_is_cut_in_its_segment_and_the_next_i
 /// The synced position at the next segment's base: the recorder filled the segment,
 /// rolled, synced, and wrote into the next before the crash. Nothing in the full
 /// segment lies past the stop, so it is left whole, and the next segment, which
-/// begins at the stop, is removed; the frame at its base counts the cut.
+/// begins at the stop, is removed. The tail is written within the millisecond after
+/// the sync, so the recorder appended no index entry for it, and the frame at the
+/// next segment's base alone says the recorder wrote past the sync: it counts the
+/// cut, and with the next segment gone no file holds it afterwards.
 #[test]
 fn a_tail_past_a_sync_at_the_next_segments_base_removes_that_segment_and_keeps_the_full_one() {
     let dir = TestDir::new("synced-at-the-roll");
@@ -578,14 +598,30 @@ fn a_tail_past_a_sync_at_the_next_segments_base_removes_that_segment_and_keeps_t
         SEGMENT,
         "synced at the next segment's base"
     );
-    write_blocks(&mut writer, &found, 3, &mut now);
+    let within_the_interval = now + MS / 2;
+    for _ in 0..3 {
+        writer
+            .write(
+                &block(&found, writer.position()),
+                BLOCK,
+                within_the_interval,
+            )
+            .expect("the block is written");
+    }
+    assert_eq!(writer.position(), SEGMENT + 3 * BLOCK as i64);
     // The crash: no stop, the slot reads live.
     drop(writer);
     drop(log);
     assert_eq!(
+        last_indexed(&dir, &found),
+        SEGMENT,
+        "no index entry lies past the sync"
+    );
+    assert_eq!(
         recovered_from(&dir, &found, last_term, SEGMENT),
         Recovery {
             files_removed: 1,
+            index_rewritten: 0,
             ..CUT
         }
     );
