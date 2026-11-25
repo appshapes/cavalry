@@ -114,12 +114,13 @@ int main(int argc, char **argv) {
     }
     if (entries != 0) wrong("the handler was called beside a driver with no member", entries);
 
-    /* 4. The service closes with no error: a driver that is gone cannot be told. The
-     * close of the client itself may say that its driver is gone, and its answer is
-     * not this round's. */
+    /* 4. The service closes with no error, and its client after it: a driver that is
+     * gone cannot be told. This service holds no log, so its close has no command to
+     * send; crates/cavalry-client/tests/cluster_service.rs holds the close of one
+     * that does. */
     CHECK(cavalry_cluster_service_close(service, client));
-    (void) cavalry_close(client);
-    (void) cavalry_context_close(context);
+    CHECK(cavalry_close(client));
+    CHECK(cavalry_context_close(context));
     printf("conformance/c: closed round: a service beside a driver with no member took nothing; after the driver's "
            "stop, poll %d and the %d after it returned -1 with CAVALRY_ERR_CLOSED, the client's reason is "
            "CAVALRY_CLOSED_DRIVER_CLOSED, and the service closed with 0\n", polls, POLLS_AFTER);

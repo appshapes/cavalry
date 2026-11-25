@@ -125,9 +125,10 @@ are a service's `onTakeSnapshot` and the snapshot image of its `onStart`.
   closed` has a log; one in an election has none until it has joined its leader's.
 - **The program prints `ended at position 192 with a total of 0: code 102` and
   ends**, with its own position and total. A poll failed, and the program ends on
-  a poll that fails. Code 102 is `CAVALRY_ERR_CLOSED`: the member's driver closed
-  the service's client, as it does when the member stops. Start the member again,
-  then the program, which starts from its newest snapshot. Any other code is in
+  a poll that fails. Code 102 is `CAVALRY_ERR_CLOSED`: the service's client is
+  closed, as it is when the member's driver stops. Start the member again, then
+  the program, which starts from its newest snapshot, or from the log's start when
+  the member lists none. Any other code is in
   [the C ABI's error codes](../reference/c-abi.md#error-codes).
 - **`started at position 0` after a snapshot was taken.** The service was started
   beside another member than the one whose service gave its state. Every member

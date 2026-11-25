@@ -135,9 +135,13 @@ makes wrong. What it costs is under "Consequences".
   `a_service_closes_with_no_error_at_a_client_that_is_closed`: a service that reads
   its member's log, its driver closed, one poll, and then its close. Run without
   the close's change it failed with `Client(Closed(DriverClosed))` from the close.
+  A close that finds its client closed only as it stops the log's replay is `Ok`
+  by the same rule and has no test: the moment cannot be made on purpose.
 - `conformance/c/closed.c`, the C runner's closed round: a service beside a driver
   with no member, the driver stopped, the first poll that fails and the three
-  after it held to −1 with `CAVALRY_ERR_CLOSED`, and the service's close to 0.
+  after it held to −1 with `CAVALRY_ERR_CLOSED`, and the closes after them to 0.
+  The round's service holds no log, so its close would be 0 without this change
+  too; the round is evidence for the poll.
 - The tutorial's script with a pause of 300 ms at the top of the example's loop, on
   a laptop: `master`'s example fails step 7 with the library's line, as on the
   runner; the example of this change passes its ten steps.
@@ -181,7 +185,8 @@ makes wrong. What it costs is under "Consequences".
 
 - Work item 454 on the Brigade Board, which this decision was made in; work item
   446, where the failure was found.
-- `crates/cavalry-client/src/service.rs`, `ClusterService::poll`;
+- `crates/cavalry-client/src/service.rs`, `ClusterService::poll` and
+  `ClusterService::close`;
   `crates/cavalry-client/src/client.rs`, the command's send;
   `crates/cavalry-ffi/src/cluster_service.rs`, `cavalry_cluster_service_poll`.
 - `spec/client-protocol.md`, "Liveness and timeouts"; `spec/command-ring.md`, the

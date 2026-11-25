@@ -1773,8 +1773,9 @@ impl ClusterService {
 
     /// Closes the service: its read of the log, its publications and its counter.
     /// A driver that is gone cannot be told, and that is not an error here, as it
-    /// is none of a publication's close: at a client that is closed the service
-    /// drops what it held and the close is `Ok` (ADR 0155).
+    /// is none of a publication's close: at a client that is closed, or that the
+    /// close itself finds closed, the service drops what it held and the close is
+    /// `Ok` (ADR 0155).
     pub fn close(mut self, client: &mut Cavalry) -> Result<(), ClusterError> {
         if client.closed().is_some() {
             return Ok(());
@@ -1786,7 +1787,8 @@ impl ClusterService {
     }
 
     /// The close, for a client that was open when it began. What it has not closed
-    /// when it returns an error, the service's drop closes with no answer waited for.
+    /// when it returns an error, the drops of the service's handles close with no
+    /// answer waited for.
     fn close_handles(&mut self, client: &mut Cavalry) -> Result<(), ClusterError> {
         for session in self.sessions.iter_mut() {
             if let Some(publication) = session.publication.take() {

@@ -900,8 +900,9 @@ pub unsafe extern "C" fn cavalry_cluster_service_restore(
 /// subscription are closed with no answer waited for, the replay is left to the
 /// driver, and the function returns 0, which is how a service is closed after its
 /// client's `cavalry_close`. With a `client` that is closed, as when its driver has
-/// stopped, it returns 0 too: a driver that is gone cannot be told, and that is no
-/// error of a close (ADR 0155). The handle is freed whatever the function returns, with
+/// stopped, or that the close itself finds closed, it returns 0 too: a driver that is
+/// gone cannot be told, and that is no error of a close (ADR 0155). The handle is
+/// freed whatever the function returns, with
 /// one exception: a call from inside the service's own handler, or from inside the
 /// handler of another service whose poll holds `client`, is refused with
 /// `CAVALRY_ERR_POLLING` and frees nothing.
