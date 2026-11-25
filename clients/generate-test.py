@@ -3122,6 +3122,48 @@ class GoPackage(unittest.TestCase):
         self.assertEqual(gen_go.go_name("CAVALRY_PUBLICATION_BACK_PRESSURED"), "PublicationBackPressured")
         self.assertEqual(gen_go.go_value("INT64_MAX"), "math.MaxInt64")
 
+    def test_a_count_below_zero_is_refused_in_the_shim_before_the_abi_is_called(self):
+        """Work item 465 (ADR 0164). The ABI takes a count as a size_t, and a Go int below
+        zero converted for it is a count near 2 ** 64. The claim's length and each poll's
+        fragment limit cross to shim.c as an int64, with no conversion in Go, and the
+        shim refuses one below zero before the ABI's call, with the client's own code and
+        a message that names the parameter as Go names it and the README's section;
+        `ImageAt` refuses in Go. No per-message function of the package converts a count
+        to a size_t but for the length of bytes it was given. The compiled shim is driven
+        with each count in
+        `test_a_cluster_services_trampoline_passes_the_action_on_and_aborts_what_the_abi_refuses`."""
+        files = gen_go.write_go(self.header)
+        code, shim, header = files["cavalry.go"], files["shim.c"], files["shim.h"]
+        # What Go converts to a size_t itself: the length of bytes it was given, and the
+        # image's index after its own refusal, below.
+        self.assertEqual(re.findall(r"C\.size_t\((\w+)", code), ["len", "index", "len", "len", "len"])
+        self.assertEqual(code.count("C.int64_t(length), &p.claim"), 1)
+        self.assertEqual(code.count("C.int64_t(fragmentLimit)"), 8)  # each of the four polls calls its shim in two places
+        self.assertIn("#define CAVALRY_GO_ERR_NEGATIVE (-1)\n", header)
+        self.assertIn("const ErrNegative int32 = C.CAVALRY_GO_ERR_NEGATIVE\n", code)
+        for function, parameter, answer, call in (
+                ("cavalry_go_try_claim", "length", "CAVALRY_PUBLICATION_ERROR", "cavalry_publication_try_claim(publication, (size_t) length, claim)"),
+                ("cavalry_go_poll", "fragment_limit", "-1", "cavalry_subscription_poll(subscription, cavalry_go_trampoline, (void *) index, (size_t) fragment_limit)"),
+                ("cavalry_go_committed_log_poll", "fragment_limit", "-1", "cavalry_committed_log_poll(log, cavalry_go_entry_trampoline, (void *) index, (size_t) fragment_limit)"),
+                ("cavalry_go_cluster_session_poll", "fragment_limit", "-1", "cavalry_cluster_session_poll(session, cavalry_go_reply_trampoline, (void *) index, (size_t) fragment_limit)"),
+                ("cavalry_go_cluster_service_poll", "fragment_limit", "-1", "cavalry_cluster_service_poll(service, client, cavalry_go_service_trampoline, &poll,")):
+            body = shim.split(f"{function}(", 1)[1].split("\n}\n", 1)[0]
+            self.assertIn(f"int64_t {parameter}", body.split(") {", 1)[0], function)
+            refusal = body.index(f"  if ({parameter} < 0) {{\n")
+            self.assertIn(f"    return {answer};\n  }}\n", body[refusal:], function)
+            self.assertLess(refusal, body.index(call), function)
+            self.assertEqual(body.count("cavalry_go_refuse(error, "), 1, function)
+        self.assertEqual(shim.count("cavalry_go_refuse("), 6)  # its definition and the five refusals
+        self.assertIn('See clients/go/README.md#what-it-must-never-do", parameter, (long long) given);', shim)
+        image = code.split("func (s *Subscription) ImageAt(index int) (*Image, error) {", 1)[1].split("\n}\n", 1)[0]
+        self.assertLess(image.index("\tif index < 0 {\n\t\treturn nil, &Error{Fn: \"cavalry_subscription_image_at_index\", "
+                                    "Code: ErrNegative, "), image.index("C.cavalry_subscription_image_at_index("))
+        self.assertIn('"clients/go/README.md#what-it-must-never-do", index)}', image)
+        with open(os.path.join(gen.ROOT, "clients", "go", "README.md"), encoding="utf-8") as f:
+            slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
+                     for line in f if line.startswith("#")}
+        self.assertIn("what-it-must-never-do", slugs)
+
     def test_the_shim_installs_the_exported_trampoline_around_the_one_poll(self):
         files = gen_go.write_go(self.header)
         self.assertIn("cavalryGoFragment((uintptr_t) clientd, (uint8_t *) buffer, length, (cavalry_header_t *) header);",
@@ -3868,6 +3910,46 @@ class JvmPackage(unittest.TestCase):
         self.assertEqual(sorted(os.path.basename(name) for name in lint.RULES["jvm"]["files"]),
                          sorted(os.path.basename(name) for name in files))
 
+    def test_a_count_below_zero_is_refused_before_the_abi_is_called(self):
+        """Work item 465 (ADR 0164). The ABI takes a count as a size_t, and a Java int
+        below zero cast for it is a count near 2 ** 64. The claim, each of the four polls
+        and the image at an index test their int in line, as the method's first statement
+        and before its `try`, and call `Abi.negative` for one below zero, which throws
+        IllegalArgumentException with the parameter's name as the method names it, the
+        range, the value, what to pass and the README's section. No other cast of an int
+        to the ABI's size_t is in the package. The conformance runner makes each refusal
+        through the built library."""
+        files = gen_jvm.write_jvm(self.header)
+        source = lambda name: files[f"src/com/appshapes/cavalry/{name}.java"]  # noqa: E731
+        abi = source("Abi")
+        reader = abi.split("    static void negative(String name, int value) {\n", 1)[1].split("\n    }\n", 1)[0]
+        self.assertEqual(reader, '        throw new IllegalArgumentException(name + ": an int from 0 to " + Integer.MAX_VALUE + '
+                         '" expected, a count or a "\n            + "length, and " + value + " was given; the ABI would be passed '
+                         'another count, near 2 ** 64. Pass a count "\n            + "that is not below zero. See '
+                         'clients/jvm/README.md#what-it-must-never-do");')
+        calls = 0
+        for name, signature, parameter in (
+                ("Publication", "    public long tryClaim(int length) {\n", "length"),
+                ("Subscription", "    public int poll(FragmentHandler handler, int fragmentLimit) {\n", "fragmentLimit"),
+                ("CommittedLog", "    public int poll(EntryHandler handler, int fragmentLimit) {\n", "fragmentLimit"),
+                ("ClusterSession", "    public int poll(ReplyHandler handler, int fragmentLimit) {\n", "fragmentLimit"),
+                ("ClusterService", "    public int poll(ServiceHandler handler, int fragmentLimit) {\n", "fragmentLimit"),
+                ("Subscription", "    public Image imageAt(int index) {\n", "index")):
+            body = source(name).split(signature, 1)[1].split("\n    }\n", 1)[0]
+            self.assertTrue(body.startswith(f'        if ({parameter} < 0) {{\n            Abi.negative("{parameter}", {parameter});\n'
+                                            f'        }}\n'), (name, signature))
+            self.assertEqual(body.count("Abi.negative("), 1, (name, signature))
+            self.assertIn(f"(long) {parameter}", body, (name, signature))
+            calls += 1
+        casts = sorted(m for name in files if name.endswith(".java") for m in re.findall(r"\(long\) (\w+)[,)]", files[name]))
+        self.assertEqual([c for c in casts if c in ("length", "fragmentLimit", "index")],
+                         ["fragmentLimit"] * 8 + ["index", "length"])
+        self.assertEqual(sum(files[name].count("Abi.negative(") for name in files if name.endswith(".java")), calls)
+        with open(os.path.join(gen.ROOT, "clients", "jvm", "README.md"), encoding="utf-8") as f:
+            slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
+                     for line in f if line.startswith("#")}
+        self.assertIn("what-it-must-never-do", slugs)
+
     def test_the_generated_java_compiles_with_every_lint_an_error_when_javac_25_is_on_the_path(self):
         """The README builds the client with `javac --release 25` and run.sh adds
         `-Xlint:all -Werror`, so the generated files carry no warning; without a javac of
@@ -4196,6 +4278,45 @@ class DotnetPackage(unittest.TestCase):
                       files["Abi.cs"])
         self.assertEqual(sorted(gen_dotnet.PER_MESSAGE_DOTNET), sorted(lint.RULES["dotnet"]["functions"]))
         self.assertEqual(sorted(lint.RULES["dotnet"]["files"]), sorted(name for name in files if name.endswith(".cs")))
+
+    def test_a_count_below_zero_is_refused_before_the_abi_is_called(self):
+        """Work item 465 (ADR 0164). The ABI takes a count as a size_t, and a C# int below
+        zero cast to nuint for it is a count near 2 ** 64. The claim, each of the four
+        polls and the image at an index test their int in line, as the member's first
+        statement, and call `Abi.Negative` for one below zero, which throws
+        ArgumentOutOfRangeException for the parameter as the member names it, with the
+        range, the value, what to pass and the README's section. No other cast of an int
+        to nuint for a caller's count is in the package. The conformance runner makes each
+        refusal through the built library."""
+        files = gen_dotnet.write_dotnet(self.header)
+        abi = files["Abi.cs"]
+        reader = abi.split("    internal static void Negative(string name, int value)\n    {\n", 1)[1].split("\n    }\n", 1)[0]
+        self.assertEqual(reader, '        throw new ArgumentOutOfRangeException(name, value, name + ": an int from 0 to " + int.MaxValue + '
+                         '" expected, a"\n            + " count or a length, and " + value + " was given; the ABI would be passed '
+                         'another count, near 2 ** 64."\n            + " Pass a count that is not below zero. See '
+                         'clients/dotnet/README.md#what-it-must-never-do");')
+        calls = 0
+        for name, signature, parameter in (
+                ("Publication", "    public long TryClaim(int length)\n    {\n", "length"),
+                ("Subscription", "    public int Poll(FragmentHandler handler, int fragmentLimit)\n    {\n", "fragmentLimit"),
+                ("CommittedLog", "    public int Poll(EntryHandler handler, int fragmentLimit)\n    {\n", "fragmentLimit"),
+                ("ClusterSession", "    public int Poll(ReplyHandler handler, int fragmentLimit)\n    {\n", "fragmentLimit"),
+                ("ClusterService", "    public int Poll(ServiceHandler handler, int fragmentLimit)\n    {\n", "fragmentLimit"),
+                ("Subscription", "    public Image? ImageAt(int index)\n    {\n", "index")):
+            body = files[f"{name}.cs"].split(signature, 1)[1].split("\n    }\n", 1)[0]
+            self.assertTrue(body.startswith(f"        if ({parameter} < 0)\n        {{\n            Abi.Negative(nameof({parameter}), "
+                                            f"{parameter});\n        }}\n"), (name, signature))
+            self.assertEqual(body.count("Abi.Negative("), 1, (name, signature))
+            self.assertIn(f"(nuint) {parameter}", body, (name, signature))
+            calls += 1
+        casts = sorted(m for name in files if name.endswith(".cs") for m in re.findall(r"\(nuint\) (\w+)[,)]", files[name]))
+        self.assertEqual([c for c in casts if c in ("length", "fragmentLimit", "index")],
+                         ["fragmentLimit"] * 8 + ["index", "length"])
+        self.assertEqual(sum(files[name].count("Abi.Negative(") for name in files if name.endswith(".cs")), calls)
+        with open(os.path.join(gen.ROOT, "clients", "dotnet", "README.md"), encoding="utf-8") as f:
+            slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
+                     for line in f if line.startswith("#")}
+        self.assertIn("what-it-must-never-do", slugs)
 
     def test_the_generated_project_builds_with_every_warning_an_error_when_dotnet_10_is_on_the_path(self):
         """The README builds the client with `dotnet build`, whose project makes every warning
