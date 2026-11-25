@@ -218,3 +218,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0160. Keep the log directory's gate on one tree on CI's macOS runner, and track the lost runner as a fault of its own](decisions/0160-keep-the-log-directorys-gate-on-one-tree-on-cis-macos-runner-and-track-the-lost-runner-as-a-fault-of-its-own.md)
 - [0157. Take the C ABI to version 7 with a service's timers](decisions/0157-take-the-c-abi-to-version-7-with-a-services-timers.md)
 - [0161. Hold a member's vote floor until it has joined the live log, and then clear it](decisions/0161-hold-a-members-vote-floor-until-it-has-joined-the-live-log-and-then-clear-it.md)
+- [0162. Refuse in a generated client an integer argument its parameter cannot hold, before the ABI is called](decisions/0162-refuse-in-a-generated-client-an-integer-argument-its-parameter-cannot-hold-before-the-abi-is-called.md)
