@@ -312,6 +312,11 @@ export class ClusterService {
   poll(handler: ServiceHandler, fragmentLimit: number): number;
   /** One of `constants.CAVALRY_CLUSTER_REPLY_*`, or -1 from outside the handler. */
   reply(sessionId: number | bigint, message: Buffer | Uint8Array): number;
+  /** `constants.CAVALRY_CLUSTER_TIMER_SCHEDULED` or `_REFUSED`, or -1 from outside the handler.
+   * A number is an integer no greater in magnitude than `Number.MAX_SAFE_INTEGER`; any int64 is a bigint. */
+  scheduleTimer(correlationId: number | bigint, deadline: number | bigint): number;
+  /** 0, or -1 from outside the handler. */
+  cancelTimer(correlationId: number | bigint): number;
   fault(): { code: number; sessionId: number; position: number };
   position(): number;
   answers(): boolean;

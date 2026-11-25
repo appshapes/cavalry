@@ -30,9 +30,14 @@
 #define MESSAGE "hello"
 #define MESSAGE_LENGTH 5
 /* The timer each service's program schedules when it takes the message: its id, and
- * how long after the message's entry it is due, in the cluster's time. */
+ * how long after the message's entry it is due, in the cluster's time. A second, and
+ * not the 50 ms this round had first: a service tells its member of a timer only once
+ * the poll that took the entry has sent the six commands of its first timer, some 25 ms
+ * on a laptop and more on a busy host, so the event of a timer that was wrongly due at
+ * once is stamped about as late as a deadline of 50 ms, 49 ms after the message in a run
+ * of the Python round, and that margin would let it pass. */
 #define TIMER_ID 7
-#define TIMER_AFTER_MS 50
+#define TIMER_AFTER_MS 1000
 
 /* A bound on a wait, `milliseconds` from now. */
 static struct timespec after(long milliseconds) {
