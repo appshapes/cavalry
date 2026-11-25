@@ -10,18 +10,27 @@ starts a cluster of its own, three `cavalry run` members on the loopback with fi
 ports counted from <first port> in 10000 to 19999, as run.sh counts its own, and follows
 the page:
 
-1. The program runs beside each of the three members. Each prints lines of the page's
-   shape, a deadline, the position it was handed over at and how late; the first is the
-   page's first, a tick at the page's position; and the three programs print the same
-   lines, each deadline at one position.
-2. The program beside member 0 is stopped with the signal Ctrl-C sends and run again:
-   it prints its earlier lines again, unchanged, from the log's start.
+1. As a reader's cluster has, this one runs for more than three seconds before the
+   program starts, so that both of the program's first deadlines are past.
+2. The program runs beside each of the three members. Each prints the page's opening:
+   a tick and a tock at one position, the log's end then, the tick 1,000 ms later than
+   the tock; and then a tick at a position some timer events above. The three programs
+   print the same lines. The page's own example lines are held to the same shape.
+3. The program beside the member that leads is stopped with the signal Ctrl-C sends and
+   run again. It prints every line it printed before, unchanged, from the log's start,
+   and then two lines that it had not printed, which another member's program prints
+   too. The leader appends one event at the most while no service runs beside it, the
+   timer it was last told of, so the second of the two came after the restart: the
+   program goes on with the others.
 
-It exits 1 with what it found otherwise. The cluster is its own because the page's first
-position is that of a cluster that has committed nothing else. What differs from the
-page: the directories and the ports, and the wait for the election by `cavalry doctor`.
-Every wait is bounded at 60 s, and every process it started is stopped by its own
-process id when it ends. Python 3.9 standard library only (ADR 0003).
+It exits 1 with what it found otherwise. The cluster is its own so that the log holds
+nothing but its first entry when the program starts. What differs from the page: the
+directories and the ports, the wait for the election by `cavalry doctor`, the wait of
+step 1 where a reader's cluster is minutes old, and the choice of the leader's program
+for the restart, the case in which the other programs wait. That no line comes before
+its deadline is not checked here: the program prints a deadline only once the cluster's
+time has passed it. Every wait is bounded at 60 s, and every process it started is
+stopped by its own process id when it ends. Python 3.9 standard library only (ADR 0003).
 """
 
 import os
@@ -35,7 +44,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 PAGE = os.path.join("docs", "how-to", "schedule-a-services-timer.md")
 MEMBERS = 3
 WAIT_SECONDS = 60.0
-LINES = 3   # how many lines each program is read for: a tick, a tock and a tick, four seconds of the page
+PAST_SECONDS = 3.5    # how long the cluster runs before the program: past its deadlines of 2 s and 3 s
+LINES = 3             # the page's opening: a tick and a tock at once, then a tick
+FIRST_POSITION = 96   # where a log that holds one new leadership term ends
+EVENT_BYTES = 64      # a timer event in the log
 LINE = re.compile(r"(tick|tock) at position (\d+), (\d+) ms after its deadline")
 
 
@@ -44,29 +56,55 @@ def fail(what):
     sys.exit(1)
 
 
+def opening(lines, whose):
+    """Fails unless `lines` open as the page says: a tick and a tock at one position, the
+    tick 1,000 ms later than the tock, since both deadlines were counted from one entry
+    and handed over with one event; then a tick, some timer events above. Returns the
+    first position."""
+    read = []
+    for line in lines[:LINES]:
+        match = LINE.fullmatch(line)
+        if match is None:
+            fail(f"{whose} `{line}`, which is no line of the shape `tick at position P, N ms after its deadline`")
+        read.append((match.group(1), int(match.group(2)), int(match.group(3))))
+    (first, at, late), (second, at_too, late_too), (third, later, _) = read
+    if (first, second, third) != ("tick", "tock", "tick") or at != at_too or late != late_too + 1000:
+        fail(f"{whose} {lines[:LINES]}; the opening is a tick and a tock at one position, the tick 1,000 ms later "
+             f"than the tock, and then a tick")
+    if later <= at or (later - at) % EVENT_BYTES != 0:
+        fail(f"{whose} {lines[:LINES]}; the third line's position is not one or more timer events, of "
+             f"{EVENT_BYTES} bytes each, above the first's")
+    return at
+
+
 def page():
     """The page's program, and the lines it says the reader will see."""
     with open(os.path.join(ROOT, PAGE), encoding="utf-8") as f:
         text = f.read()
     blocks = re.findall(r"^   ```python\n(.*?)^   ```$", text, flags=re.S | re.M)
     said = [match.group(0) for match in LINE.finditer(" ".join(text.split()))]
-    if len(blocks) != 1 or len(said) < LINES or not said[0].startswith("tick at position "):
+    if len(blocks) != 1 or len(said) < LINES:
         fail(f"the page has not one Python block indented by three spaces, or not {LINES} lines of the shape "
-             "`tick at position P, N ms after its deadline`, the first a tick; keep these shapes so this test "
-             "can find them")
+             "`tick at position P, N ms after its deadline`; keep these shapes so this test can find them")
+    opening(said, "the page says the reader will see")
     program = "\n".join(line[3:] if line.startswith("   ") else line for line in blocks[0].split("\n"))
     return program, said
 
 
+def printed(path):
+    """The whole lines of the file a program prints to."""
+    with open(path, encoding="utf-8") as f:
+        return f.read().split("\n")[:-1]
+
+
 def wait_for_lines(process, path, count, what):
-    """The first `count` lines of the file `process` prints to, once it has printed them. A
+    """The lines of the file `process` prints to, once it has printed `count` of them. A
     program that ended before them fails at once, with what it printed."""
     deadline = time.monotonic() + WAIT_SECONDS
     while True:
-        with open(path, encoding="utf-8") as f:
-            lines = f.read().split("\n")
-        if len(lines) > count:
-            return lines[:count]
+        lines = printed(path)
+        if len(lines) >= count:
+            return lines
         if process.poll() is not None:
             fail(f"{what}: the program ended with code {process.returncode} before its line {count}; "
                  f"it printed {lines}")
@@ -107,6 +145,13 @@ def main():
     def member_dir(member):
         return os.path.join(directory, f"member-{member}")
 
+    def doctor(member):
+        """What `cavalry doctor` prints beside one member."""
+        return subprocess.run(
+            [binary, "doctor", "--dir", member_dir(member), "--log-dir", member_dir(member) + "-log"],
+            capture_output=True, text=True, timeout=WAIT_SECONDS, check=False,
+            env=dict(environment, CAVALRY_CLUSTER_MEMBER_ID=str(member))).stdout
+
     def run_service(member, name):
         """The page's step 2: the program beside one member, its output in a file."""
         path = os.path.join(directory, name)
@@ -128,50 +173,58 @@ def main():
                     env=dict(environment, CAVALRY_CLUSTER_MEMBER_ID=str(member))))
         deadline = time.monotonic() + WAIT_SECONDS
         while True:
-            doctor = subprocess.run(
-                [binary, "doctor", "--dir", member_dir(1), "--log-dir", member_dir(1) + "-log"],
-                capture_output=True, text=True, timeout=WAIT_SECONDS, check=False,
-                env=dict(environment, CAVALRY_CLUSTER_MEMBER_ID="1"))
-            if "election closed" in doctor.stdout:
+            said_by = [doctor(member) for member in range(MEMBERS)]
+            leaders = [member for member in range(MEMBERS) if "the leader in term" in said_by[member]]
+            if len(leaders) == 1 and all("election closed" in said for said in said_by):
+                leader = leaders[0]
                 break
             if time.monotonic() > deadline:
-                fail(f"member 1 did not close its election in {WAIT_SECONDS:.0f} s; doctor said: {doctor.stdout}")
+                fail(f"the three members did not close one election in {WAIT_SECONDS:.0f} s; doctor said: {said_by}")
             time.sleep(0.1)
 
-        # 1. The program beside each member: the same lines, of the page's shape.
-        services = [run_service(member, f"service-{member}.out") for member in range(MEMBERS)]
-        printed = [wait_for_lines(process, path, LINES, f"the program beside member {member}")
-                   for member, (process, path) in enumerate(services)]
-        read = []
-        for line in printed[0]:
-            match = LINE.fullmatch(line)
-            if match is None:
-                fail(f"the program beside member 0 printed `{line}`, which is no line of the page's shape, "
-                     f"`{said[0]}`: a deadline handed over before its time prints a number below 0")
-            read.append((match.group(1), int(match.group(2)), int(match.group(3))))
-        if printed[0][0].split(",")[0] != said[0].split(",")[0]:
-            fail(f"the program's first line is `{printed[0][0]}`, and the page says `{said[0]}` for a cluster "
-                 f"that has committed nothing else: another deadline, or another position")
-        if [position for _, position, _ in read] != sorted(position for _, position, _ in read):
-            fail(f"the program beside member 0 was handed its deadlines at positions that fall: {printed[0]}")
-        for member in range(1, MEMBERS):
-            if printed[member] != printed[0]:
-                fail(f"the program beside member {member} printed {printed[member]} and the one beside member 0 "
-                     f"{printed[0]}; the page says the same lines beside every member")
+        # 1. A cluster that has run for a while: past both of the program's first deadlines.
+        time.sleep(PAST_SECONDS)
 
-        # 2. Ctrl-C, and the program again: its earlier lines, from the log's start.
-        stop(services[0][0], signal.SIGINT)
-        again, path = run_service(0, "service-0-again.out")
-        replayed = wait_for_lines(again, path, LINES, "the program's second run beside member 0")
-        if replayed != printed[0]:
-            fail(f"the program's second run printed {replayed}, and its first {printed[0]}; the page says the "
-                 f"lines it printed before, unchanged")
+        # 2. The program beside each member: the page's opening, the same beside each.
+        services = [run_service(member, f"service-{member}.out") for member in range(MEMBERS)]
+        first = [wait_for_lines(process, path, LINES, f"the program beside member {member}")[:LINES]
+                 for member, (process, path) in enumerate(services)]
+        at = opening(first[0], "the program beside member 0 printed")
+        if at != FIRST_POSITION:
+            fail(f"the program's first lines are at position {at}: {first[0]}; a log that holds one new "
+                 f"leadership term and nothing else ends at {FIRST_POSITION}")
+        for member in range(1, MEMBERS):
+            if first[member] != first[0]:
+                fail(f"the program beside member {member} printed {first[member]} and the one beside member 0 "
+                     f"{first[0]}; the page says the same lines beside every member")
+
+        # 3. Ctrl-C beside the leader, and the program again: its earlier lines from the
+        # log's start, and then two it had not printed, which another program prints too.
+        # The leader's member holds one timer and nobody schedules it again while its
+        # service is stopped, so one event at the most is appended meanwhile, and the
+        # second new line is of an event appended once the service had told it again.
+        other = (leader + 1) % MEMBERS
+        more = 2
+        stop(services[leader][0], signal.SIGINT)
+        before = [line for line in printed(services[leader][1]) if LINE.fullmatch(line)]
+        again, path = run_service(leader, f"service-{leader}-again.out")
+        replayed = wait_for_lines(again, path, len(before) + more, f"the program's second run beside member {leader}")
+        if replayed[:len(before)] != before:
+            fail(f"the program's second run beside member {leader} printed {replayed[:len(before)]}, and its first "
+                 f"{before}; the page says the lines it printed before, unchanged")
+        others = wait_for_lines(services[other][0], services[other][1], len(before) + more,
+                                f"the program beside member {other}, after the leader's program ran again")
+        if others[:len(before) + more] != replayed[:len(before) + more]:
+            fail(f"after its second run the program beside member {leader}, the leader, printed "
+                 f"{replayed[:len(before) + more]} and the one beside member {other} {others[:len(before) + more]}; "
+                 f"the page says it goes on with the others")
     finally:
         for process in reversed(started):
             stop(process, signal.SIGINT if process.args[0] == sys.executable else signal.SIGTERM)
 
-    print(f"conformance/python: {PAGE}: its program printed {printed[0]} beside each of three members of its "
-          "own, and the same again when the one beside member 0 was run again")
+    print(f"conformance/python: {PAGE}: its program printed {first[0]} beside each of three members of its own; "
+          f"stopped beside member {leader}, the leader, and run again, it printed its {len(before)} lines again and "
+          f"then {replayed[len(before):len(before) + more]}, as the program beside member {other} did")
     print(f"conformance/python: {PAGE} ok")
 
 

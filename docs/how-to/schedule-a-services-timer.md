@@ -1,14 +1,16 @@
 # Schedule a timer in a cluster's service
 
-A how-to page: one task, have a cluster's service act at a time: expire a session,
-close an auction, send what is due ([glossary](../glossary.md), "service", "timer"
-and "timer event"). A service never reads a clock of its own, since every member's
-service must reach the same state from the same log. It schedules a timer in the
-cluster's time, and when the time has come the cluster's leader appends a timer
-event, which every member's service is handed at one position. The page uses the
-Python client; each of the five clients has these calls, in one shape, and its
-README's "A service's timers" has them (`clients/python`, `node`, `go`, `jvm` and
-`dotnet`), and in Rust they are `Replies::schedule_timer` and `cancel_timer`
+A how-to page: one task, have a cluster's service do something at a set time: expire
+a session, close an auction, send what is due ([glossary](../glossary.md), "service",
+"cluster time", "timer" and "timer event"). A service never reads a clock of its
+own, since every member's service must reach the same state from the same log. It
+schedules a timer in the cluster's time. When that time has come, the cluster's
+leader appends a timer event to the log, and every member's service is handed it at
+one position.
+
+The page uses the Python client. Each of the five clients has these calls, in one
+shape: see "A service's timers" in the README of `clients/python`, `node`, `go`,
+`jvm` or `dotnet`. In Rust they are `Replies::schedule_timer` and `cancel_timer`
 (`crates/cavalry-client/README.md`). What a service and its member do is
 [`spec/cluster.md`](../reference/cluster.md), "Timers"
 ([ADR 0151](../decisions/0151-give-a-clusters-service-timers-that-every-service-decides-from-the-log.md)).
@@ -49,14 +51,6 @@ In Aeron, these are a service's `scheduleTimer` and `cancelTimer`, and its
    due = []                               # the program's own deadlines, the earliest first
 
 
-   def arm(service):
-       # One timer, for the earliest deadline, whatever the count of deadlines.
-       if due:
-           service.schedule_timer(TIMER, due[0][0])
-       else:
-           service.cancel_timer(TIMER)
-
-
    def on_entry(body, entry, service):
        if entry.type == cavalry.CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM and entry.position == 0:
            # The first entry of every log: the program's first deadlines, counted from it.
@@ -71,7 +65,8 @@ In Aeron, these are a service's `scheduleTimer` and `cancelTimer`, and its
                heapq.heappush(due, (entry.timestamp + EVERY[what], what))
        else:
            return
-       arm(service)
+       # One timer, for the earliest deadline, whatever the count of deadlines.
+       service.schedule_timer(TIMER, due[0][0])
 
 
    with cavalry.Client(sys.argv[1]) as client:
@@ -89,21 +84,27 @@ In Aeron, these are a service's `scheduleTimer` and `cancelTimer`, and its
            service.close()   # a service is closed before its client
    ```
 
-   Three things in it are the rules of a timer:
+   Four things in it are the rules of a timer:
 
-   - **It schedules and cancels from inside the handler, and nowhere else.** Its
-     deadlines are counted from `entry.timestamp`, the cluster's time, and from no
-     clock of the program's. So the timers are a function of the log, as the
-     program's state is, and the same beside every member.
+   - **It schedules from inside the handler, and nowhere else.** Its deadlines are
+     counted from `entry.timestamp`, the cluster's time, and from no clock of the
+     program's. So the timers are a function of the log, as the program's state
+     is, and the same beside every member. `service.cancel_timer(TIMER)` takes a
+     timer back, from inside the handler too; this program always has a deadline,
+     so it never cancels.
    - **It schedules its first timer at the first entry it is handed.** Every log
      begins with a new leadership term at position 0, which a service that reads
      the log from its start is handed first.
    - **It keeps its deadlines in its own state, and one timer for the earliest.** A
      service holds at most 1,024 pending timers, and a schedule beyond them answers
      `CAVALRY_CLUSTER_TIMER_REFUSED`. A program with one deadline for each session,
-     order or lease has more than that: it keeps them as this one keeps `due`, and
-     when it is handed its timer it acts on every deadline that has come and
+     order or lease has more than that. It keeps them as this one keeps `due`.
+     When it is handed its timer, it acts on every deadline that has come and
      schedules the timer again for the earliest that is left.
+   - **Its handler takes every entry.** A handler that returns `cavalry.ABORT`, or
+     raises, is handed its entry again, and the service puts its timers back as
+     they were before that handling. The program's own state, `due` here, is the
+     program's to put back. A handler that can abort changes its state last.
 
 2. Run it beside each member, in three terminals:
 
@@ -113,39 +114,52 @@ In Aeron, these are a service's `scheduleTimer` and `cancelTimer`, and its
    PYTHONPATH=clients/python python3 tick_service.py /tmp/cavalry-member-2
    ```
 
-   You will see the same lines in each of the three terminals, once the third
-   program runs. On a cluster that was started a moment ago and has committed
-   nothing else, they begin `tick at position 96, 1 ms after its deadline`, then
-   `tock at position 160, 1 ms after its deadline` a second later, then `tick at
-   position 224, 1 ms after its deadline`, and a line follows each second or two
-   for as long as the programs run. The positions are higher on a cluster that has
-   committed more, and the milliseconds differ from line to line. On a cluster that
-   ran for a while before the programs started, the first tick and the first tock
-   come at once, at one position, and are late by as long as the cluster ran: a
-   deadline in the past is due at once.
+   You will see two lines at once, as soon as a program runs beside the member
+   that leads, such as `tick at position 192, 141873 ms after its deadline` and
+   `tock at position 192, 140873 ms after its deadline`. The program counted its
+   first deadlines from the log's first entry, two and three seconds after the
+   cluster elected its first leader. A cluster that has run for longer than that
+   is past both, and a deadline in the past is due at once: the two are handed
+   over with one timer event, late by as long as the cluster ran. The position is
+   where the log ended then: 96 on a cluster that has elected one leader and
+   committed nothing else, and 96 more for each leader it has elected since, so
+   192 here.
 
-   The leader appends a timer's event when the service beside it has told it of
-   the timer, so nothing is printed until a program runs beside the member that
-   leads. A service beside another member is handed the same events, and tells its
-   own member of the same timers for the day that member leads.
+   From then on a line follows each second or two: `tick at position 256, 1 ms
+   after its deadline` two seconds after the first two, `tock at position 320, 0
+   ms after its deadline` a second later, and so on. Each line's position is 64
+   above the last, the size of a timer event in the log. Now and then it is 128
+   above: a leader that is told of a timer again while that timer's event is on its
+   way appends a second event, and every service passes that one over.
 
-3. Stop one of the programs with Ctrl-C and run it again, as in step 2. It prints
-   the lines it printed before, from the first, with the same positions and the
-   same milliseconds, and then goes on beside the two others: it read the log from
-   its start, and its timers and its deadlines are what the log makes them.
+   Every program prints the same lines, and one that starts later prints the
+   earlier ones at once: it reads them from the log. The leader appends a timer's
+   event only when the service beside it has told it of the timer, so nothing is
+   printed until a program runs beside the member that leads. A service beside
+   another member is handed the same events. It tells its own member of the same
+   timers, so that the member has them if it becomes the leader.
+
+3. Stop the program beside one member with Ctrl-C, which prints a
+   `KeyboardInterrupt` traceback, and run it again as in step 2. It prints the
+   lines it printed before, from the first, with the same positions and the same
+   milliseconds: it read the log from its start, and its timers and its deadlines
+   are what the log makes them. Then it goes on with the two others.
+
+   If the program you stopped ran beside the member that leads, the two others
+   print one more line at the most and then wait: no service tells the leader of
+   the next timer. They go on when the program runs again, and that first line is
+   late by as long as the program was stopped.
+
+4. Stop the three programs with Ctrl-C when you have seen enough. The log keeps a
+   timer event for each line they printed.
 
 ## How to verify it worked
 
 - The three terminals show the same lines: each deadline was handed to every
   member's service at one position of the log.
-- No line says a number below 0: a timer is never handed over before its
-  deadline. Its event is stamped with the leader's clock when the leader appended
-  it, a millisecond or so after the deadline on an idle laptop.
+- The first tick is late by 1,000 ms more than the first tock, to the millisecond:
+  both were counted from one entry and handed over with one event.
 - The program of step 3 printed its earlier lines again, unchanged.
-- The counters of the member that leads say the same
-  ([the counters reference](../reference/counters.md)): `cluster.timer_events`
-  rises by one for each event it appended, and `cluster.service_timers` reads 1
-  beside every member, the one timer this program holds for its two deadlines.
 - `just conformance` runs this page's program as these steps do, in
   `conformance/python/howto_timers.py`, and runs the two calls beside three members
   in `conformance/python/cluster.py`.
@@ -161,7 +175,11 @@ In Aeron, these are a service's `scheduleTimer` and `cancelTimer`, and its
 - **Two terminals print and one does not.** The program in the third runs beside a
   member that has not caught up, or beside a driver that is no member: doctor
   prints no `cluster-member` line for such a driver.
-- **A program prints `ended at position 224: code 102` and ends**, with its own
+- **The lines stop in every terminal.** The program beside the member that leads
+  has stopped, or the cluster is electing a leader. Timers wait while no member
+  leads and while no service runs beside the leader, and are late by that long:
+  step 3. `cavalry doctor` with the leader's directory says which it is.
+- **A program prints `ended at position 256: code 102` and ends**, with its own
   position. A poll failed, and the program ends on a poll that fails. Code 102 is
   `CAVALRY_ERR_CLOSED`: the service's client is closed, as it is when the member's
   driver stops. Start the member again, then the program. Any other code is in
@@ -172,18 +190,19 @@ In Aeron, these are a service's `scheduleTimer` and `cancelTimer`, and its
 - **A schedule or a cancel answers −1.** It was called from outside the handler,
   where there is no entry whose time and position the timer could follow. Call it
   while the handler handles an entry.
-- **`OverflowError` or `TypeError` from a schedule.** The id or the deadline is no
-  int64: a deadline counted in a `float`, such as `entry.timestamp + 0.5 * 1000`,
-  or an id above 2^63 − 1. Pass an `int` (`clients/python/README.md`, "A service's
-  timers").
+- **A traceback that ends in `cavalry.HandlerError`, with `OverflowError` or
+  `TypeError` above it as its cause.** The id or the deadline is no int64: a
+  deadline counted in a `float`, such as `entry.timestamp + 0.5 * 1000`, or an id
+  above 2^63 − 1. Pass an `int` (`clients/python/README.md`, "A service's timers").
 - **The lines print again at every start.** That is step 3: a service that takes no
   snapshot reads its member's log from position 0 at every start, its timers'
   events among the entries. [Take a snapshot of a service's
   state](take-a-services-snapshot.md): the service writes its pending timers into
   its snapshot by itself, and the program's own deadlines, `due` here, are part of
   the state the program gives.
-- **A first line is tens of milliseconds late.** The poll in which a program first
-  schedules a timer adds the service's counters and its publication to its member,
-  six commands that wait for the driver, once in the service's life
-  (`clients/python/README.md`, "The call"). A deadline a few milliseconds after the
-  first entry it follows is met late by that much.
+- **A position is 128 above the last, and not 64.** The log holds a timer event
+  that every service passed over, which the leader appended when it was told of a
+  timer again while that timer's first event was on its way. Nothing is wrong, and
+  no program was handed anything for it. `cluster.service_timer_events_passed_over`
+  counts them beside each member ([the counters
+  reference](../reference/counters.md)).

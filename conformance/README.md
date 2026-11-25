@@ -192,11 +192,15 @@ as that page's steps do, in `python/howto.py`, beside three members of its own, 
 fails unless the program prints the three lines the page says a reader will see.
 
 It runs the program of `docs/how-to/schedule-a-services-timer.md` the same way, in
-`python/howto_timers.py`, beside each of three more members of its own. It fails
-unless each program's first three lines have the page's shape, a deadline, the
-position it was handed over at and how late, the first of them the page's first;
-unless the three programs print the same lines; and unless the program beside one
-member, stopped and run again, prints its earlier lines again from the log's start.
+`python/howto_timers.py`, beside each of three more members of its own, which have
+run for more than three seconds, as a reader's cluster has run for longer than the
+program's first deadlines. It fails unless each program opens as the page says, a
+tick and a tock at one position, the tick 1,000 ms later than the tock, and then a
+tick some timer events above, the page's own example lines being held to the same
+shape; unless the three programs print the same lines; and unless the program
+beside the member that leads, stopped and run again, prints its earlier lines again
+from the log's start and then two more that another member's program prints too,
+the second of which the leader appended after the restart.
 
 ## The upgrade gate
 
