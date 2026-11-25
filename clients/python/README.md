@@ -157,8 +157,8 @@ service)` for each committed entry, in order:
 What the handler returns says what becomes of the entry. `None` or `cavalry.CONTINUE`
 takes it, and the poll goes on. `cavalry.BREAK` takes it and ends the poll.
 `cavalry.ABORT` leaves it and ends the poll, and the next poll hands it over again.
-The poll returns the count of entries taken, or −1 when it stopped on a fault, which
-`service.fault()` gives until the next poll.
+The poll returns the count of entries taken, or −1 when it stopped, on a fault or at
+a client its driver closed, which `service.fault()` gives until the next poll.
 
 `service.reply(session_id, message)` answers a session from inside the handler and
 returns what became of the reply: `CAVALRY_CLUSTER_REPLY_SENT`;
@@ -212,10 +212,13 @@ share. From inside the handler:
 When the deadline has come, the handler is handed an entry whose `entry.type` is
 `CAVALRY_CLUSTER_ENTRY_TIMER` and whose `entry.correlation_id` is the timer's id,
 with an empty `body`. Every member's service is handed it once, at one position of
-the log, never before its deadline and never after its cancel; `entry.timestamp`
-is at or after the deadline, and later by as long as the cluster took to commit
-the event. A timer that repeats is scheduled again by the handling of its own
-entry. A deadline at or before the entry's time is due at once.
+the log, never before its deadline and never after its cancel. `entry.timestamp`
+is the leader's clock when it appended the timer's entry, at or after the
+deadline: later by as long as the leader's member took to be told of the timer and
+to reach it, and by more where the cluster had no leader meanwhile. The handler
+is called later again, once the entry is committed and read. A timer that repeats
+is scheduled again by the handling of its own entry. A deadline at or before the
+entry's time is due at once.
 
 ```python
 def on_entry(body, entry, service):
@@ -238,18 +241,29 @@ ADR 0157):
   `cavalry.ABORT`, or raises, is handed its entry again with every timer as it
   was before that handling. The timers are part of what `service.snapshot`
   writes and `service.restore` reads, with no call of the program's.
+- **An id and a deadline are int64.** A value that is no `int` raises `TypeError`,
+  a `float` such as `entry.timestamp + seconds * 1000.0` among them, and an `int`
+  outside −2^63 to 2^63 − 1 raises `OverflowError`, before the ABI is called:
+  `ctypes` would pass such an `int` as its low 64 bits, another timer or a deadline
+  long past, and say nothing. Raised in the handler, it aborts the entry as any
+  exception of the handler's does ("The exception").
 - **At most 1,024 pending.** A program with more deadlines than that keeps them
   in its own state and schedules one timer, for the earliest: when it is handed
   that timer it acts on every deadline that has come and schedules the timer
   again for the earliest that is left.
 - **Every member at version 2 first.** A program schedules its first timer only
-  once every member of its cluster runs version 2 of the cluster protocol
-  (`docs/how-to/upgrade-a-cluster.md`): a member of version 1 does not know a
-  timer.
+  once every member of its cluster, with the service beside it, runs version 2 of
+  the cluster protocol, and from that entry on no member is stepped back to
+  version 1 (`docs/how-to/upgrade-a-cluster.md`): a service of version 1 hands its
+  program no timer, so its program would compute another state from the same log.
 
 Both calls are one ABI call each, which allocates nothing and waits for nothing.
-`conformance/python/cluster.py` schedules a timer and cancels another beside three
-members.
+What they changed is told to the service's member by the poll, once the handler
+has taken the entry, and the poll in which a program first schedules a timer
+sends six commands more, once in a service's life ("The call").
+`conformance/python/cluster.py` schedules timers and cancels one beside three
+members; what it holds, and what rests on the library's own tests, is in
+`conformance/README.md`.
 
 ### A service's snapshot and its start
 
@@ -329,12 +343,14 @@ is the task from its start.
   thread, no copy of a fragment into a new array for the handler. `clients/lint.py`
   reads the per-message functions, `try_claim`, `set_reserved_value`, `commit`,
   `abort`, `offer`, a subscription's and a committed log's `poll` and trampoline, a
-  cluster session's `offer`, `poll` and trampoline, a cluster service's `poll`, `reply`
-  and trampoline, and
+  cluster session's `offer`, `poll` and trampoline, a cluster service's `poll`, `reply`,
+  `schedule_timer`, `cancel_timer` and trampoline, and
   `Header.values` with the `Header` properties that call it, for Python's forms of each (`threading`'s locks,
   `async def`, `await`, `raise`, and building `CavalryError`), in their own bodies and
   in every function of the package they call, such as `_check`; `just lint` fails on
-  any of them. `Header.values()` is None when the ABI refuses the header's pointer,
+  any of them. The one function they may call that raises is `_int64`, the reader
+  of a timer's id and deadline, which refuses a value that is no int64 before the
+  ABI is called ("A service's timers"). `Header.values()` is None when the ABI refuses the header's pointer,
   which inside the handler's call it cannot. Otherwise it is the one frame struct the
   header keeps, rewritten by each call, so copy a field out to keep it.
 - Never raise for an `Offer` code: `try_claim` and `offer` return the position after
@@ -342,7 +358,8 @@ is the task from its start.
   `ADMIN_ACTION`, `CLOSED`, `MAX_POSITION_EXCEEDED`, `ERROR`), as the ABI does; the
   caller branches, as a Rust caller matches `Offer`. A cluster session's `offer`
   returns the same codes, and a cluster service's `reply` returns its
-  `CAVALRY_CLUSTER_REPLY_*` code, or −1 from outside the handler.
+  `CAVALRY_CLUSTER_REPLY_*` code, `schedule_timer` its `CAVALRY_CLUSTER_TIMER_*`
+  code and `cancel_timer` 0, or −1 from outside the handler.
 - Never publish bytes the caller did not offer: `offer` takes `bytes`, or a `ctypes`
   `c_char` array such as `ctypes.create_string_buffer(n)`, which a caller may reuse
   across offers. A `str`, a `bytearray`, a `memoryview` or anything else is refused
@@ -481,9 +498,15 @@ runner checks each function's loader.
 
 A cluster service's poll is the one per-message function that can wait for the driver.
 It sends commands with the service's client when it opens the member's log, at a
-session's opening, where a term's leader changes and at a recording's end, and it
+session's opening, where a term's leader changes and at a recording's end, and six
+more once in a service's life, at the most, its five counters and its publication
+to its member, in the poll in which its program first schedules a timer or the
+service first passes a timer event over. It
 waits for each answer with the GIL held, so every other Python thread of the process
-stops for that wait. It holds the GIL all the same, because releasing it would cost
+stops for that wait. A driver that refuses one of the six is that poll's −1, after
+the entries its handler took are taken, and the service adds them again at a later
+poll (ADR 0159). What a service tells its member of its timers after that, each
+pending timer again every second among it, is offered and waits for nothing. It holds the GIL all the same, because releasing it would cost
 every entry: through `ctypes.CDLL` each call-back takes the GIL back, and beside one
 Python thread that computes, a poll of 10 messages then took 5.8 to 6.3 ms at its p99,
 the interpreter's switch interval of 5 ms and more, against 4.4 to 4.6 µs with the GIL

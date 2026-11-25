@@ -7,11 +7,16 @@ reserved value, the commit and abort, the offer, the poll and the header's value
 the committed log's poll and an entry's position, ADR 0070, and the seven of a cluster
 session and a cluster service, the session's offer, its poll and a reply's values, and
 the service's poll, an entry's values, its reply and its action, ADR 0124, in every
-client) and each trampoline that
+client, and the schedule and the cancel of a service's timer, ADR 0157, in the Python
+client, the first that wraps them) and each trampoline that
 calls the user's handler, hold no lock, no `await` and no raise, in the language's
 forms, and so does every function of the package they call. For Python those
 forms are `threading`'s locks and anything else of `threading`, `async def`, `await`,
-`raise`, and building one of the package's own exceptions. For JavaScript, read from
+`raise`, and building one of the package's own exceptions; a raise in the one argument
+reader, `_int64`, is not one, as a throw in the Node addon's argument readers below is
+none: it refuses a timer's id or deadline that is no int64, which ctypes would pass as
+its low 64 bits, another value, before the ABI is called, and it is held to every other
+form. For JavaScript, read from
 `clients/node/index.js` without a parser, by a tokenizer that drops comments and strings
 and matches braces, they are `async` on the function, `await`, `Promise`, `.then(`,
 `throw`, building one of the package's own `Error` classes, and `Atomics.wait`, the one
@@ -130,6 +135,12 @@ RULES = {
                         ("CommittedLog.poll", "cavalry_committed_log_poll"),
                         ("ClusterSession.poll", "cavalry_cluster_session_poll"),
                         ("ClusterService.poll", "cavalry_cluster_service_poll")],
+        # The argument reader: it may raise, for an argument the ABI's parameter cannot
+        # take, before the ABI is called, as the Node addon's readers throw. A timer's id
+        # and its deadline are int64, and ctypes passes a Python int outside that range
+        # as its low 64 bits with nothing said (ADR 0157; clients/python/README.md, "A
+        # service's timers").
+        "readers": ["_int64"],
     },
     # The Node client calls the ABI through its addon (clients/node/README.md): the addon's
     # `poll` is the one `cavalry_subscription_poll` call, and the header's fields are read
@@ -521,6 +532,12 @@ def python_findings(language: str, path: str, rules: dict) -> list[str]:
     for name in rules["functions"]:
         if name not in found:
             findings.append(f"{language}: the per-message function {name} is not in {path}; {HELP}")
+    # The argument readers, whose raise is no raise on the path; one the rules name and
+    # the package does not have is a stale rule.
+    readers = set(rules.get("readers", ()))
+    for reader in sorted(readers - set(package.functions)):
+        findings.append(f"{language}: the argument reader {reader} is not in {path}; the generator renamed it or "
+                        f"the rules are stale; {HELP}")
     # Each poll and the ABI call after which it may raise: a subscription's, and since
     # ABI version 2 a committed log's.
     raise_after = raise_after_of(rules)
@@ -543,6 +560,8 @@ def python_findings(language: str, path: str, rules: dict) -> list[str]:
             for k, how in package.reach(what).items():
                 if kind == "call-allowed" and k == "raise":
                     continue  # a helper poll calls after the ABI has returned may raise the handler's exception
+                if what in readers and k == "raise":
+                    continue  # an argument reader refuses what the ABI's parameter cannot take
                 findings.append(f"{where} calls {what} at line {line}, and {how}: {WHY[k]}; {HELP}")
     return findings
 

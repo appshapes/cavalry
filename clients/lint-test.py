@@ -227,6 +227,53 @@ class Clients(unittest.TestCase):
         self.assertIn("ClusterService.reply", finding)
         self.assertIn("raises", finding)
 
+    def test_a_raise_in_a_cluster_services_timer_calls_fails(self):
+        """The schedule and the cancel of a timer are per-message functions (ADR 0157): a
+        code is returned, never raised, in their own bodies."""
+        self.edit("    def schedule_timer(self, correlation_id, deadline):\n",
+                  "    def schedule_timer(self, correlation_id, deadline):\n        raise RuntimeError('no')\n")
+        self.edit("    def cancel_timer(self, correlation_id):\n",
+                  "    def cancel_timer(self, correlation_id):\n        raise RuntimeError('no')\n")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for name in ("ClusterService.schedule_timer", "ClusterService.cancel_timer"):
+            self.assertTrue(any(name in f and "raises" in f for f in found), found)
+
+    def test_the_argument_reader_may_raise_and_no_other_helper_of_a_timer_call_may(self):
+        """`_int64` refuses a timer's id or deadline that is no int64 before the ABI is
+        called, and its raise is none on the path, as the Node addon's readers' throw
+        is none. Any other function of the package that a timer call reaches is held to
+        the rule, `_check` among them."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        self.edit("        return self._abi.cavalry_cluster_service_cancel_timer(self._handle, "
+                  "_int64(correlation_id, \"correlation_id\"))\n",
+                  "        _check(self._abi, 'cavalry_cluster_service_cancel_timer', 0)\n"
+                  "        return self._abi.cavalry_cluster_service_cancel_timer(self._handle, "
+                  "_int64(correlation_id, \"correlation_id\"))\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("ClusterService.cancel_timer", finding)
+        self.assertIn("calls _check", finding)
+
+    def test_the_argument_reader_is_held_to_every_other_form(self):
+        """A reader may raise and nothing else: a lock in it is a lock on the path of
+        each function that calls it."""
+        self.edit("def _int64(value, name):\n", "def _int64(value, name):\n    threading.Lock()\n")
+        found = lint.findings(self.tmp)
+        self.assertTrue(found)
+        for name in ("ClusterService.schedule_timer", "ClusterService.cancel_timer"):
+            self.assertTrue(any(name in f and "calls _int64" in f and "threading" in f for f in found), found)
+        self.assertTrue(all("calls _int64" in f for f in found), found)
+
+    def test_an_argument_reader_the_package_does_not_have_is_a_stale_rule(self):
+        self.edit("def _int64(value, name):\n", "def _int64_argument(value, name):\n")
+        self.edit("_int64(correlation_id, \"correlation_id\")", "_int64_argument(correlation_id, \"correlation_id\")",
+                  count=2)
+        self.edit("_int64(deadline, \"deadline\")", "_int64_argument(deadline, \"deadline\")")
+        found = lint.findings(self.tmp)
+        self.assertTrue(any("the argument reader _int64 is not in" in f for f in found), found)
+        # The renamed function is no reader, so its raise is one on the path again.
+        self.assertTrue(any("ClusterService.schedule_timer" in f and "calls _int64_argument" in f for f in found), found)
+
     def test_an_exception_built_in_a_cluster_services_trampoline_fails(self):
         """A value that is no action is kept for `poll` to raise: the trampoline builds no
         exception of the package's for it."""

@@ -360,7 +360,9 @@ class Package(unittest.TestCase):
         """The Python cluster service's timers (ADR 0157): `schedule_timer` and
         `cancel_timer` are one ABI call each, with the service's handle, the id and the
         deadline as they were given, any int64, and each returns what the ABI answered,
-        a timer code, 0 or -1, raising for none of them."""
+        a timer code, 0 or -1, raising for none of them. An id or a deadline that is no
+        int64 is refused before the ABI is called: ctypes would pass an `int` outside
+        the range as its low 64 bits, another timer or another deadline."""
         cavalry = load_package()
 
         class Abi:
@@ -387,6 +389,18 @@ class Package(unittest.TestCase):
         self.assertEqual(service.cancel_timer(7), -1)
         self.assertEqual(abi.calls, [("schedule", 2, most, least), ("schedule", 2, 0, 1_700_000_000_050),
                                      ("schedule", 2, 7, 7), ("cancel", 2, least), ("cancel", 2, 7)])
+        made = list(abi.calls)
+        for refused, error in ((most + 1, OverflowError), (least - 1, OverflowError), (2 ** 64 + 5, OverflowError),
+                               (1.5, TypeError), (7.0, TypeError), ("7", TypeError), (None, TypeError)):
+            for call in (lambda: service.schedule_timer(refused, 7), lambda: service.schedule_timer(7, refused),
+                         lambda: service.cancel_timer(refused)):
+                with self.assertRaises(error) as raised:
+                    call()
+                self.assertIn("an int64", str(raised.exception))
+        self.assertEqual(abi.calls, made)  # nothing reached the ABI
+        # What the reader is for: through ctypes itself such an int is another value.
+        self.assertEqual(ctypes.c_int64(most + 1).value, least)
+        self.assertEqual(ctypes.c_int64(2 ** 64 + 5).value, 5)
 
     def test_a_cluster_sessions_poll_hands_every_reply_over_and_raises_after_it(self):
         """The Python cluster session (ADR 0124): the trampoline reads each reply's values
