@@ -18,7 +18,10 @@ binary's `main`.
   program, which `just replay-check` runs, and `examples/cluster-replay-check.rs` is
   the same gate's program for a cluster: three members in one process, each with a
   service beside it, whose recordings the gate replays and compares with each other
-  and with what the services read. `examples/cluster-service.rs` is a service on its
+  and with what the services read; and `examples/cluster-timers-check.rs` is its
+  program for a service's timers: three members whose programs schedule timers,
+  through a start from a snapshot and a leader's stop, and what each program and a
+  replay from position 0 were handed, which the gate compares. `examples/cluster-service.rs` is a service on its
   own: it prints each entry of the committed log of the member whose driver it is
   given (`docs/how-to/read-the-committed-log.md`). `examples/adder-service.rs` and
   `examples/adder-client.rs` are the cluster tutorial's two programs, a service that

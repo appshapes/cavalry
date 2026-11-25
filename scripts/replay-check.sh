@@ -21,6 +21,14 @@
 # member's service must be the lines of that member's replay. An entry missing,
 # repeated, out of order or changed on any member, or read differently by a service
 # as it committed, fails it.
+#
+# Then a service's timers (ADR 0151): three more members on the loopback, each with a
+# program beside it that schedules a timer at each message, 200 in all; one program
+# starts again from its snapshot, the leader stops with its service while half the
+# timers are pending, and a last program reads one member's log from position 0. The
+# two members left and that replay must each have been handed the same 200 timers,
+# each once, at the same positions and times. A timer missed, handed twice, or handed
+# at another position or time beside any of them fails it.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -34,25 +42,27 @@ export XDG_DATA_HOME="${CAVALRY_DIR}-data"
 work="${CAVALRY_DIR}-out"
 # The three members' driver directories and log directories, made by the program.
 cluster="${CAVALRY_DIR}-cluster"
+# And those of the three members whose services schedule timers.
+timers="${CAVALRY_DIR}-timers"
 # A member is started by these two keys (docs/how-to/run-a-cluster.md); the drivers
 # this script starts are no members, whatever the caller's environment holds.
 unset CAVALRY_CLUSTER_MEMBERS CAVALRY_CLUSTER_MEMBER_ID
-rm -rf "$CAVALRY_DIR" "$XDG_DATA_HOME" "$work" "$cluster"
+rm -rf "$CAVALRY_DIR" "$XDG_DATA_HOME" "$work" "$cluster" "$timers"
 mkdir -p "$work"
 cleanup() {
     if [ -n "${driver_pid:-}" ] && kill -0 "$driver_pid" 2>/dev/null; then
         kill -TERM "$driver_pid" 2>/dev/null || true
         wait "$driver_pid" 2>/dev/null || true
     fi
-    rm -rf "$CAVALRY_DIR" "$XDG_DATA_HOME" "$work" "$cluster"
+    rm -rf "$CAVALRY_DIR" "$XDG_DATA_HOME" "$work" "$cluster" "$timers"
 }
 trap cleanup EXIT
 
 step() { printf '\nreplay-check: %s\n' "$1"; }
 digest() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 
-step "1. build the binary and the two programs"
-cargo build --release -p cavalry --bin cavalry --example replay-check --example cluster-replay-check
+step "1. build the binary and the three programs"
+cargo build --release -p cavalry --bin cavalry --example replay-check --example cluster-replay-check --example cluster-timers-check
 
 cavalry=target/release/cavalry
 step "2. cavalry run, in the background, on $CAVALRY_DIR"
@@ -175,4 +185,31 @@ offered=$(digest "$work/offered.txt"); replayed=$(digest "$work/replayed.txt")
 printf 'offered  %s\nreplayed %s\n' "$offered" "$replayed"
 [ "$offered" = "$replayed" ] || { echo "replay-check: the replayed payloads are not the offered ones" >&2; exit 1; }
 
-printf '\nreplay-check: three equal hashes of one recording, six equal hashes of three members and their services, %s s\n' "$(( $(date +%s) - started ))"
+step "11. 200 timers, each handed over once at one position: through a snapshot's start, a leader's stop, and a replay"
+# Three members and a program beside each that schedules a timer at each message
+# (spec/cluster.md, "The service", "Timers"; ADR 0151). One program starts again from
+# its snapshot, the leader stops while half the timers are pending, and a last program
+# reads the log from position 0. Each writes the timers it was handed, a position, an
+# id and a time on a line: the two members left and the replay must have written the
+# same 200 lines.
+target/release/examples/cluster-timers-check --timers 200 --dir "$timers" 2> "$work/timers.txt" || {
+    cat "$work/timers.txt" >&2; echo "replay-check: the cluster did not hand every timer over" >&2; exit 1; }
+cat "$work/timers.txt"
+first=""
+programs=0
+for name in replay $(sed -n 's/^program=\(member-[0-9]*\) .*/\1/p' "$work/timers.txt"); do
+    path=$(sed -n "s/^program=$name path=\(.*\)$/\1/p" "$work/timers.txt")
+    [ -n "$path" ] && [ -f "$path" ] || { echo "replay-check: no file of the timers handed to $name" >&2; exit 1; }
+    handed=$(wc -l < "$path" | tr -d ' ')
+    hash=$(digest "$path")
+    printf 'timers %s %s %s\n' "$name" "$handed" "$hash"
+    [ "$handed" = 200 ] || { echo "replay-check: $name was handed $handed timers, not 200" >&2; exit 1; }
+    ids=$(cut -d' ' -f2 "$path" | sort -n | uniq | wc -l | tr -d ' ')
+    [ "$ids" = 200 ] || { echo "replay-check: $name was handed $ids different timers in 200 lines: one was handed over twice" >&2; exit 1; }
+    if [ -z "$first" ]; then first=$hash; fi
+    [ "$hash" = "$first" ] || { echo "replay-check: $name was handed other timers, or at other positions or times, than the replay" >&2; exit 1; }
+    programs=$((programs + 1))
+done
+[ "$programs" = 3 ] || { echo "replay-check: $programs programs wrote their timers, not the two members left and the replay" >&2; exit 1; }
+
+printf '\nreplay-check: three equal hashes of one recording, six equal hashes of three members and their services, three equal hashes of 200 timers, %s s\n' "$(( $(date +%s) - started ))"
