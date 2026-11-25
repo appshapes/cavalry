@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # Builds the driver and cavalry-ffi's shared library in release, builds the .NET client with
 # the runner's SDK (.NET 10, every warning an error: no package reference, no native shim),
-# then conformance/dotnet's Quickstart, Readme, CommittedLog, Cluster and Snapshot, starts a driver on a
+# then conformance/dotnet's Quickstart, Readme, CommittedLog, Cluster, Snapshot and Closed, starts a driver on a
 # directory of its own, runs Quickstart through clients/dotnet with the runner's runtime,
 # then clients/dotnet/README.md's example through Readme; then starts three cluster members
 # on the loopback, each a `cavalry run` in a member's role, and runs CommittedLog beside
 # one of them, member 1 unless it joined late (conformance/log-member.sh), the client's
 # committed log against a cluster (spec/c-abi.md, version 2; ADR 0070), and then Cluster,
 # the cluster round: the client's service beside each member and its session on the first
-# driver (spec/c-abi.md, versions 4 and 5; ADR 0124), and then Snapshot, the
+# driver (spec/c-abi.md, versions 4, 5 and 7; ADR 0124; ADR 0157), and then Snapshot, the
 # snapshot round: a service's snapshot and its start from one beside the same three
-# members, on the log the cluster round left (spec/c-abi.md, version 6; ADR 0149); and
-# cleans up.
+# members, on the log the cluster round left (spec/c-abi.md, version 6; ADR 0149); then
+# Closed, the closed round: a service's poll after its driver's stop, on the first driver,
+# which the program stops itself (ADR 0155); and cleans up.
 # `just conformance` runs this after conformance/jvm
 # (clients/README.md; ADR 0046, card 209).
 set -euo pipefail
@@ -48,6 +49,7 @@ dotnet build -c Release conformance/dotnet/Readme/Readme.csproj
 dotnet build -c Release conformance/dotnet/CommittedLog/CommittedLog.csproj
 dotnet build -c Release conformance/dotnet/Cluster/Cluster.csproj
 dotnet build -c Release conformance/dotnet/Snapshot/Snapshot.csproj
+dotnet build -c Release conformance/dotnet/Closed/Closed.csproj
 
 echo "conformance/dotnet: cavalry run, in the background, on $CAVALRY_DIR"
 target/release/cavalry run &
@@ -152,3 +154,10 @@ dotnet conformance/dotnet/Snapshot/bin/Release/net10.0/Snapshot.dll "$cluster" t
     cat "$cluster"/member-*.out >&2 || true
     exit 1
 }
+
+# The closed round, last, since it stops the first driver: a poll of a service whose
+# client is closed is one answer, -1 with CAVALRY_ERR_CLOSED (spec/c-abi.md, "cluster
+# service"; ADR 0155). The program sends the driver its SIGTERM, by the process id.
+echo "conformance/dotnet: run Closed, a service's poll after its driver's stop, on $CAVALRY_DIR"
+dotnet conformance/dotnet/Closed/bin/Release/net10.0/Closed.dll "$driver_pid"
+wait "$driver_pid" 2>/dev/null || true
