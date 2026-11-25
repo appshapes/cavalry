@@ -940,7 +940,7 @@ function main(udpPort) {
       ["a claim of a length below zero", "length", RangeError, () => ipcPub.tryClaim(-1)],
       ["a poll with a BigInt fragment limit below zero", "fragmentLimit", RangeError, () => ipcSub.poll(() => {}, -1n)],
       // A typed array of a kind the addon does not name: its length in bytes would be a
-      // guess, and for a Float16Array the guess was four times its bytes. Node 23 added it.
+      // guess, and for a Float16Array the guess was four times its bytes. Node has it from 24.
       ...(typeof Float16Array === "function"
         ? [["an offer of a Float16Array", "buffer", TypeError, () => ipcPub.offer(new Float16Array(5))]] : [])]) {
       let answered;

@@ -124,7 +124,7 @@ session and waits for that for 20 s at most; it throws `CavalryError` with
 `CAVALRY_ERR_CLUSTER_MEMBERS`, `CAVALRY_ERR_CLUSTER_REFUSED`,
 `CAVALRY_ERR_CLUSTER_VERSION` or `CAVALRY_ERR_CLUSTER_CONNECT_TIMEOUT`.
 
-`session.offer(message)` sends the leader a `Buffer`, or any typed array, of at most
+`session.offer(message)` sends the leader a `Buffer`, or another typed array, of at most
 `session.maxMessageLength` bytes, and returns the position after the message on the
 session's publication to the leader, or a publication's result code below zero:
 `cavalry.CLOSED` for a session that is closed, and `cavalry.ERROR` with
@@ -429,9 +429,10 @@ members.
   - An int32 parameter (a stream id) takes a number that is an integer from −2^31
     to 2^31 − 1, and no BigInt.
 
-  A value of another type throws a `TypeError`. Each message names the parameter
-  as the ABI names it, `recording_id` for `recordingId`, and its range, says what
-  to pass and names this section; a timer's names "A service's timers". The types
+  A value of another type throws a `TypeError`. Each message names the parameter,
+  as the ABI names it where the package passes the argument straight on,
+  `recording_id` for `recordingId`, and as `fragmentLimit` for a poll's, and its
+  range, says what to pass and names this section; a timer's names "A service's timers". The types
   of `index.d.ts` say `number | bigint` for each int64 and each count, so the
   follow length, `constants.CAVALRY_FOLLOW_LENGTH`, a BigInt, is a length
   `startReplay` takes: as the number `2 ** 63` it is refused, where N-API held it
@@ -450,9 +451,11 @@ members.
   `ArrayBuffer`, a `DataView` or a typed array, and the length is the bytes it
   holds: the addon multiplies a typed array's element count by the width of its
   kind. A kind the addon does not name is refused with a `TypeError` that says to
-  pass a `Uint8Array` over the same bytes. `Float16Array`, which Node 23 added, is
-  such a kind: before, the addon took its elements for 8 bytes wide and handed the
-  ABI four times its length.
+  pass a `Uint8Array` over the same bytes. `Float16Array`, which Node has from
+  version 24, is such a kind: before, the addon took its elements for 8 bytes wide
+  and handed the ABI four times its length. The refusal does not wait for N-API to
+  name the kind, which Node 24.0 to 24.13 do not: a kind N-API leaves unsaid is
+  refused as one the addon does not name.
 - Never throw for an `Offer` code: `tryClaim` and `offer` return the position after
   the frame or the code below zero (`NOT_CONNECTED`, `BACK_PRESSURED`, `ADMIN_ACTION`,
   `CLOSED`, `MAX_POSITION_EXCEEDED`, `ERROR`), as the ABI does; the caller branches.

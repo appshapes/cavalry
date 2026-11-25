@@ -373,8 +373,9 @@ static void *external_arg(napi_env env, napi_value v, const char *name) {
   return p;
 }
 
-/* Bytes the caller owns: an ArrayBuffer, a Buffer or any typed array, or a DataView, whose
- * memory the ABI reads or writes for the call; null is a NULL pointer. */
+/* Bytes the caller owns: an ArrayBuffer, a Buffer or another typed array of a kind this
+ * function names, or a DataView, whose memory the ABI reads or writes for the call; null is
+ * a NULL pointer. */
 static void *bytes_arg(napi_env env, napi_value v, size_t *length, const char *name) {
   if (is_nullish(env, v)) { if (length) *length = 0; return NULL; }
   bool is;
@@ -382,10 +383,12 @@ static void *bytes_arg(napi_env env, napi_value v, size_t *length, const char *n
   if (napi_is_arraybuffer(env, v, &is) == napi_ok && is) {
     if (napi_get_arraybuffer_info(env, v, &data, &n) != napi_ok) goto bad;
   } else if (napi_is_typedarray(env, v, &is) == napi_ok && is) {
-    napi_typedarray_type t; napi_value ab; size_t offset; void *base;
+    /* The kind begins as none: a runtime whose N-API does not name a kind its JavaScript
+     * has, as Node 24.0 to 24.13 do not name Float16Array, answers ok and leaves it unwritten. */
+    napi_typedarray_type t = (napi_typedarray_type) -1; napi_value ab; size_t offset; void *base;
     if (napi_get_typedarray_info(env, v, &t, &n, &base, &ab, &offset) != napi_ok) goto bad;
     /* The elements' width, for the length in bytes. A kind this addon does not name, one a
-     * later runtime added as Node 23 added Float16Array, is refused: a width guessed for it
+     * later runtime added as Node 24 added Float16Array, is refused: a width guessed for it
      * would hand the ABI another length than the bytes the caller gave. */
     size_t width = (t == napi_int8_array || t == napi_uint8_array || t == napi_uint8_clamped_array) ? 1 :
                    (t == napi_int16_array || t == napi_uint16_array) ? 2 :
@@ -1776,7 +1779,8 @@ class Publication {
    * every one exactly, a number those below 2^53 in magnitude, and a BigInt outside the int64
    * range is refused with RangeError. 0, or -1 with the ABI's error. */
   setReservedValue(value) { return addon.cavalry_buffer_claim_set_reserved_value(this._claim.buffer, value); }
-  /** Offer `message`, a Buffer or any typed array: the position after it, or a code below zero. */
+  /** Offer `message`, a Buffer or another typed array but a Float16Array: the position after
+   * it, or a code below zero. */
   offer(message) { return addon.cavalry_publication_offer(this.handle, message); }
   position() {
     const result = addon.cavalry_publication_position(this.handle);
@@ -2050,7 +2054,7 @@ class ClusterSession {
     this.sessionId = c.int64("session_id");
     this.maxMessageLength = c.size("max_message_length");
   }
-  /** Offer the leader `message`, a Buffer or any typed array, as a publication's `offer` takes
+  /** Offer the leader `message`, a Buffer or another typed array, as a publication's `offer` takes
    * them: the position after it, or a result code below zero. ERROR with CAVALRY_ERR_TOO_LONG
    * as the thread's error is a message longer than `maxMessageLength`, and CLOSED a session
    * that is closed, for the reason `closed()` gives, or whose client is. From inside this
@@ -2160,7 +2164,7 @@ class ClusterService {
     this._state = addon.registerClusterService(this._entry);
     this._entry._state = this._state;
   }
-  /** From inside the handler: send `message`, a Buffer or any typed array, to the session
+  /** From inside the handler: send `message`, a Buffer or another typed array, to the session
    * `sessionId`, with the leadership term id and the cluster's time of the entry being
    * handled, and return what became of the reply, one of `CAVALRY_CLUSTER_REPLY_*`, never
    * throwing for a code. `_SENT`: it is on its way, or an earlier handling of the same entry

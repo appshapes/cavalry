@@ -38,9 +38,10 @@ C11's `mtx_*`, libuv's `uv_mutex_*` and `uv_rwlock_*`, and N-API's
 `napi_*threadsafe_function*`; and a raise, `napi_throw*` and `napi_fatal_*`, except in the
 argument readers, which throw a TypeError or a RangeError for an argument the ABI's
 parameter cannot take, before the ABI is called. Where a reader is called is held too: by
-a function N-API calls with the caller's arguments, `fn_*`, before the call of the ABI it
-goes on from. A reader called by a trampoline or by a function one calls, where its throw
-would be raised into the ABI's call-back, or after the ABI's call, is a finding. A call reaches the package's own functions by name: a
+a function the addon gives N-API in its table of properties, which N-API calls with the
+caller's arguments, itself and before the call of the ABI it goes on from. A reader called
+by a trampoline or by a function one calls, where its throw would be raised into the ABI's
+call-back, a reader reached through a helper, and one after the ABI's call, are findings. A call reaches the package's own functions by name: a
 module function, a class's `__init__` or `constructor`, a method of the same class
 through `self` or `this`, and any other method by its name in any class of the package.
 The one raise allowed is in `poll`, a subscription's, a committed log's, a cluster
@@ -896,39 +897,78 @@ class CModule:
                 yield "call", base + body.count("\n", 0, m.start()) + 1, name
 
     ABI_CALL = re.compile(r"(?<![\w$])cavalry_[a-z0-9_]+\s*\(")
+    CALL = re.compile(r"(?<![\w$])([A-Za-z_]\w*)\s*\(")
+    ENTRY = re.compile(r",\s*NULL\s*,\s*([A-Za-z_]\w*)\s*,\s*NULL\s*,\s*NULL\s*,\s*NULL\s*,\s*napi_default\b")
 
-    def misplaced_readers(self, label: str, seen=None) -> list[str]:
-        """Each call of an argument reader that `label` or a function it calls makes where
-        a reader's throw is no refusal of an argument: in a function that N-API does not
-        call with the caller's arguments, a trampoline or what it calls, where the throw
-        would be raised into the ABI's call-back; and in an entry function, `fn_*`, on a
-        line after its first call of the ABI that the function goes on from, where the
-        ABI has already acted. A call of the ABI in a `return` statement is not one: the
-        function ends there, as a poll from inside a handler does at the ABI's refusal. A
-        reader's own calls of other readers are its own."""
+    def calls(self, label: str) -> list[tuple[int, int, str]]:
+        """(offset in the body, line, callee) for each call `label` makes of the module's
+        own functions, in the order of the text."""
+        _, body, start = self.functions[label]
+        base = line_of(self.code, start) - 1
+        return [(m.start(), base + body.count("\n", 0, m.start()) + 1, m.group(1)) for m in self.CALL.finditer(body)
+                if m.group(1) in self.functions and m.group(1) != label and m.group(1) not in C_WORDS]
+
+    def reaches_abi(self, label: str, seen=None) -> bool:
+        """Whether `label`, or a function of the module it calls that is no reader, calls the ABI."""
+        seen = set() if seen is None else seen
+        if label in seen or label in self.readers:
+            return False
+        seen.add(label)
+        return (self.ABI_CALL.search(self.functions[label][1]) is not None
+                or any(self.reaches_abi(callee, seen) for _, _, callee in self.calls(label)))
+
+    def readers_below(self, label: str, seen=None) -> list[str]:
+        """How `label`, a function that is no reader, or a function it calls, calls a reader."""
         seen = set() if seen is None else seen
         if label in seen or label in self.readers:
             return []
         seen.add(label)
+        found = []
+        for _, line, callee in self.calls(label):
+            if callee in self.readers:
+                found.append(f"{label} calls the argument reader {callee} at line {line}")
+            else:
+                found.extend(f"{label} calls {callee} at line {line}, and {how}"
+                             for how in self.readers_below(callee, seen))
+        return found
+
+    def misplaced_readers(self, label: str) -> list[str]:
+        """Each call of an argument reader that the per-message function `label`, or a
+        function it calls, makes where a reader's throw is no refusal of an argument. A
+        reader is for an entry function, one the addon gives N-API in its table of
+        properties, which N-API calls with the caller's arguments; the function calls it
+        itself, and before the first call of the ABI that it goes on from. So these are
+        findings: a reader called by a function that is no entry, a trampoline or what it
+        calls, where the throw would be raised into the ABI's call-back, whatever the
+        function is named; a reader that an entry function reaches through a helper; and
+        a reader after the ABI's call, by the text's order and not by its lines. The ABI
+        is called by `cavalry_*(` and by a function of the addon that reaches one. A call
+        of the ABI in a `return` statement is not one the function goes on from: it ends
+        there, as a poll from inside a handler does at the ABI's refusal. The lint reads
+        the text: a call through a function pointer or a macro is not seen."""
+        entry = label in set(self.ENTRY.findall(self.code))
         _, body, start = self.functions[label]
         base = line_of(self.code, start) - 1
-        abi_line = None
-        for abi in self.ABI_CALL.finditer(body):
-            statement = body[max(body.rfind(c, 0, abi.start()) for c in ";{}") + 1:abi.start()]
+        calls = self.calls(label)
+        abi_at = None
+        for at in sorted([m.start() for m in self.ABI_CALL.finditer(body)]
+                         + [at for at, _, callee in calls if self.reaches_abi(callee)]):
+            statement = body[max(body.rfind(c, 0, at) for c in ";{}") + 1:at]
             if not re.search(r"(?<![\w$])return(?![\w$])", statement):
-                abi_line = base + body.count("\n", 0, abi.start()) + 1
+                abi_at = at
                 break
         found = []
-        for kind, line, what in self.forms(label):
-            if kind != "call":
-                continue
-            if what not in self.readers:
-                found.extend(self.misplaced_readers(what, seen))
-            elif not label.startswith("fn_"):
-                found.append(f"{label} calls the argument reader {what} at line {line}, and N-API does not call "
+        for at, line, callee in calls:
+            if callee not in self.readers:
+                found.extend(f"{label} calls {callee} at line {line}, and {how}: a reader is called by the function "
+                             f"N-API calls with the caller's arguments, and by no function between"
+                             for how in self.readers_below(callee))
+            elif not entry:
+                found.append(f"{label} calls the argument reader {callee} at line {line}, and N-API does not call "
                              f"{label} with a caller's arguments: a reader's throw there is raised into a call-back")
-            elif abi_line is not None and line > abi_line:
-                found.append(f"{label} calls the argument reader {what} at line {line}, after its call of the ABI at "
+            elif abi_at is not None and at > abi_at:
+                abi_line = base + body.count("\n", 0, abi_at) + 1
+                found.append(f"{label} calls the argument reader {callee} at line {line}, after its call of the ABI at "
                              f"line {abi_line}: a reader refuses an argument before the ABI is called")
         return found
 
