@@ -258,7 +258,9 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   version 2 of the cluster protocol, and from that entry on no member is stepped
   back: a service of version 1 hands its program no timer, so the two would
   compute two states from one log (`spec/cluster.md`, "Versions and the upgrade"). A service
-  written through the C ABI has no timer yet.
+  written through the C ABI has the same timers at version 7 of the ABI
+  (`cavalry_cluster_service_schedule_timer`; ADR 0157); the five clients' packages
+  do not wrap them yet.
 - Starts a service from its snapshot: `ClusterService::restore(client)`, called
   before the first poll, asks the member for the newest snapshot of a service that
   it lists, plays its recording back through the member's driver, and answers

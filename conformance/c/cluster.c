@@ -1,9 +1,11 @@
-/* The C runner's cluster round (work item 229; spec/c-abi.md, versions 4 and 5; ADR
- * 0122, ADR 0123): a C program over crates/cavalry-ffi/include/cavalry.h that runs a
- * cluster's service beside each of three members and holds a session with the
- * cluster, and checks that one message is handed to all three services as the same
- * entry and answered once, by the service beside the leader, with the entry's term
- * and the cluster's time. conformance/c/run.sh starts the three members, builds,
+/* The C runner's cluster round (work item 229; spec/c-abi.md, versions 4, 5 and 7;
+ * ADR 0122, ADR 0123, ADR 0157): a C program over crates/cavalry-ffi/include/cavalry.h
+ * that runs a cluster's service beside each of three members and holds a session
+ * with the cluster, and checks that one message is handed to all three services as
+ * the same entry and answered once, by the service beside the leader, with the
+ * entry's term and the cluster's time; and that the timer each service's program
+ * schedules at that message is handed to all three once, with its id, at one
+ * position and no earlier than its deadline. conformance/c/run.sh starts the three members, builds,
  * links and runs it; just conformance runs that.
  *
  *     cluster-c <cluster directory> <members string> <response channel>
