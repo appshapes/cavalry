@@ -48,6 +48,7 @@ PER_MESSAGE_DOTNET = ("Publication.TryClaim", "Publication.SetReservedValue", "P
                       "ClusterEntryValues.Position", "ClusterEntryValues.LeadershipTermId",
                       "ClusterEntryValues.Timestamp", "ClusterEntryValues.SessionId", "ClusterEntryValues.Type",
                       "ClusterEntryValues.LeaderMemberId", "ClusterEntryValues.TimedOut",
+                      "ClusterEntryValues.CorrelationId",
                       "Header.FrameLength", "Header.Version", "Header.Flags", "Header.Type",
                       "Header.TermOffset", "Header.SessionId", "Header.StreamId", "Header.TermId", "Header.ReservedValue")
 
@@ -2065,6 +2066,11 @@ public sealed class ClusterEntryValues
     /// <summary>Whether the leader closed the session of a session close event for the
     /// session timeout.</summary>
     public bool TimedOut => values.timed_out != 0;
+
+    /// <summary>The id of the timer that is handed over, for an entry whose type is
+    /// <see cref="Abi.CLUSTER_ENTRY_TIMER"/>, and 0 for every other entry, where it says
+    /// nothing.</summary>
+    public long CorrelationId => values.correlation_id;
 }
 '''
 

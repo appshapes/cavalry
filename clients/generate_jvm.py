@@ -53,7 +53,7 @@ PER_MESSAGE_JVM = ("Publication.tryClaim", "Publication.setReservedValue", "Publ
                    "ClusterReplyValues.timestamp", "ClusterEntryValues.position",
                    "ClusterEntryValues.leadershipTermId", "ClusterEntryValues.timestamp",
                    "ClusterEntryValues.sessionId", "ClusterEntryValues.type", "ClusterEntryValues.leaderMemberId",
-                   "ClusterEntryValues.timedOut", "Header.frameLength",
+                   "ClusterEntryValues.timedOut", "ClusterEntryValues.correlationId", "Header.frameLength",
                    "Header.version", "Header.flags", "Header.type", "Header.termOffset", "Header.sessionId",
                    "Header.streamId", "Header.termId", "Header.reservedValue")
 
@@ -2412,6 +2412,13 @@ public final class ClusterEntryValues {
      * timeout. */
     public boolean timedOut() {
         return values.get(JAVA_BOOLEAN, Abi.cavalry_cluster_entry_values_t_timed_out);
+    }
+
+    /** The id of the timer that is handed over, for an entry whose type is
+     * {@code Abi.CLUSTER_ENTRY_TIMER}, and 0 for every other entry, where it says
+     * nothing. */
+    public long correlationId() {
+        return values.get(JAVA_LONG, Abi.cavalry_cluster_entry_values_t_correlation_id);
     }
 }
 '''

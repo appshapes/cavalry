@@ -5,7 +5,7 @@ The `extern "C"` ABI and its cbindgen header. Data plane, and the other crate wh
 
 ## What this does
 
-- Exposes the client API as a C ABI, `spec/c-abi.md` version 6, declared by the
+- Exposes the client API as a C ABI, `spec/c-abi.md` version 7, declared by the
   committed header `include/cavalry.h`, so one Rust core serves every language. The
   thin clients under `clients/` for Python, Node, Go, the JVM and .NET are generated
   over it and released together.
@@ -53,6 +53,22 @@ The `extern "C"` ABI and its cbindgen header. Data plane, and the other crate wh
   the entry's leader answers. The poll holds the client it was called with: a
   function that takes that client is refused from inside the handler
   (`spec/cluster.md`, "The service" and "Replies"; ADR 0118; ADR 0123).
+- Gives a service's program its timers, in C. From inside the handler
+  `cavalry_cluster_service_schedule_timer(service, correlation_id, deadline)`
+  schedules a timer, with any id the program chooses and a deadline in the
+  cluster's time, and `cavalry_cluster_service_cancel_timer(service,
+  correlation_id)` cancels one. When the deadline has come the handler is handed
+  an entry whose `type` is `CAVALRY_CLUSTER_ENTRY_TIMER` and whose `correlation_id`
+  is the timer's id: once, at one position beside every member, never before its
+  deadline and never after its cancel. A schedule answers
+  `CAVALRY_CLUSTER_TIMER_SCHEDULED`, or `CAVALRY_CLUSTER_TIMER_REFUSED` where the
+  service holds its 1,024 pending timers and the id is none of them; a program
+  with more deadlines than that keeps them in its own state and schedules one
+  timer for the earliest. Both calls send nothing, wait for nothing and allocate
+  nothing, and a handler that aborts its entry is handed it again with every timer
+  as it was. A program schedules its first timer only once every member of its
+  cluster runs version 2 of the cluster protocol (`spec/c-abi.md`, version 7;
+  `spec/cluster.md`, "The service", "Timers"; ADR 0151; ADR 0157).
 - Takes a service's snapshot and starts a service from one, for a program in C. The
   poll ends after the leader's request for a snapshot, which the handler is handed
   with the type `CAVALRY_CLUSTER_ENTRY_SNAPSHOT`; `cavalry_cluster_service_snapshot_due`
@@ -103,11 +119,16 @@ the only implementation and the C ABI is a thin layer over it
   `cavalry_committed_log_entry_position`, `cavalry_cluster_session_offer`,
   `cavalry_cluster_session_poll`, `cavalry_cluster_reply_values`,
   `cavalry_cluster_service_poll`, `cavalry_cluster_entry_values`,
-  `cavalry_cluster_service_reply` and `cavalry_cluster_service_action`. The
+  `cavalry_cluster_service_reply`, `cavalry_cluster_service_schedule_timer`,
+  `cavalry_cluster_service_cancel_timer` and `cavalry_cluster_service_action`. The
   thread-local error is a fixed buffer, and `tests/allocations.rs` counts across
-  all sixteen. A service's poll sends a command to the driver at a session's
+  all eighteen. A service's poll sends a command to the driver at a session's
   opening, where its answering changes and at a recording's end, and none for a
-  session message.
+  session message. Once in a service's life it sends six more at the most, in the
+  poll in which its program first schedules a timer or the service first passes a
+  timer event over, after that poll's entries: its five counters and its
+  publication to its member, where a snapshot has not added them already
+  (`spec/cluster.md`, "What a service tells its member").
 - Hand a function a header's values that the header does not carry. A header is of
   four kinds, by the poll that made it, and a function asked for what a kind lacks
   sets `CAVALRY_ERR_WRONG_HEADER` or `CAVALRY_ERR_NO_POSITION` and fills nothing
@@ -220,7 +241,7 @@ Running it prints one line, such as `received "hello" from session -1716223105`.
 program built against another version of the header is refused at its first call:
 
 ```text
-cavalry_context_init refused (abi-version): the program was built against ABI version 5 and this library is version 6; rebuild the program against this library's header; see docs/reference/c-abi.md#versions-and-what-a-reader-rejects
+cavalry_context_init refused (abi-version): the program was built against ABI version 6 and this library is version 7; rebuild the program against this library's header; see docs/reference/c-abi.md#versions-and-what-a-reader-rejects
 ```
 
 A session with a cluster is the same calls in C, in this order. The block is

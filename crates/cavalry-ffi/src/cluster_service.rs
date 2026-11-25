@@ -46,8 +46,8 @@ pub struct cavalry_cluster_service_t {
     /// from inside it, and read when it returns.
     action: i32,
     /// The `Replies` of the entry being handled, for the run of the C handler alone:
-    /// null whenever no handler of this service runs, which is how a reply or an
-    /// action from outside the handler is told.
+    /// null whenever no handler of this service runs, which is how a reply, an
+    /// action, or a schedule or a cancel of a timer from outside the handler is told.
     replies: *mut Replies<'static>,
     /// The program's state that `cavalry_cluster_service_restore` gave, which the
     /// caller reads through the pointer it was given until the service's next poll or
@@ -91,6 +91,10 @@ pub struct cavalry_cluster_entry_values_t {
     /// Whether the leader closed the session of a session close event for the
     /// session timeout, and not the client; `false` for every other entry.
     pub timed_out: bool,
+    /// The id of the timer that is handed over, for an entry whose `type` is
+    /// `CAVALRY_CLUSTER_ENTRY_TIMER`: the id the program scheduled it with. 0 for
+    /// every other entry, where it says nothing: a program may give a timer any id.
+    pub correlation_id: i64,
 }
 
 /// Reads the state word through the handle's pointer, without a reference to the
@@ -146,6 +150,7 @@ fn release(state: Option<Vec<u8>>) {
 
 /// An entry's values, as the struct holds them.
 fn values_of(committed: &Committed<'_>) -> cavalry_cluster_entry_values_t {
+    let mut correlation_id = 0;
     let (r#type, session_id, leader_member_id, timed_out) = match committed.entry {
         Entry::SessionMessage { session_id, .. } => {
             (CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE, session_id, -1, false)
@@ -171,13 +176,15 @@ fn values_of(committed: &Committed<'_>) -> cavalry_cluster_entry_values_t {
         // The poll ends after it, and the program gives its state once the poll has
         // returned (ADR 0131, ADR 0146).
         Entry::Snapshot => (CAVALRY_CLUSTER_ENTRY_SNAPSHOT, -1, -1, false),
-        // A timer event is an entry of no kind at this version of the C ABI,
-        // whichever way it reaches here (`spec/c-abi.md`, "Constants"; ADR 0159).
-        // One the service passes over comes as `Other`. One handed over comes as
-        // `Timer`: no program behind this version can schedule a timer, but a C
-        // service that restored a snapshot holding timers has them pending. The
-        // version that gives the calls names the entry (ADR 0151).
-        Entry::Timer { .. } | Entry::Other => (CAVALRY_CLUSTER_ENTRY_OTHER, -1, -1, false),
+        // A timer of the program's, handed over: its id is the entry's one value
+        // of its own (ADR 0157).
+        Entry::Timer {
+            correlation_id: timer,
+        } => {
+            correlation_id = timer;
+            (CAVALRY_CLUSTER_ENTRY_TIMER, -1, -1, false)
+        }
+        Entry::Other => (CAVALRY_CLUSTER_ENTRY_OTHER, -1, -1, false),
     };
     cavalry_cluster_entry_values_t {
         position: committed.position,
@@ -187,6 +194,7 @@ fn values_of(committed: &Committed<'_>) -> cavalry_cluster_entry_values_t {
         r#type,
         leader_member_id,
         timed_out,
+        correlation_id,
     }
 }
 
@@ -243,12 +251,7 @@ pub unsafe extern "C" fn cavalry_cluster_service(
     }
     // SAFETY: `client` is non-null, checked above, a live handle used from one thread
     // at a time ("Threads"), and held by no poll, checked above.
-    let mut made = unsafe { cavalry_mut(client) }.cluster_service();
-    // A program behind this version of the C ABI has no call that schedules a
-    // timer, and the page says a timer event is an entry of no kind it knows
-    // (`spec/c-abi.md`, "Codes"): it is handed every one as `_OTHER`, as before
-    // the service's library had timers (ADR 0151).
-    made.hand_passed_over_timer_events_as_other();
+    let made = unsafe { cavalry_mut(client) }.cluster_service();
     // SAFETY: `service` is non-null and writable.
     unsafe {
         *service = handle::give(cavalry_cluster_service_t {
@@ -275,7 +278,14 @@ pub unsafe extern "C" fn cavalry_cluster_service(
 /// opens the member's log, follows the log's sessions, and holds a publication to
 /// each open session while the service answers. Those are commands sent with
 /// `client`, which the poll holds for its run: none of them is sent, and nothing is
-/// allocated, for a session message.
+/// allocated, for a session message. Once in a service's life the poll sends six
+/// more at the most, its five counters and its publication to its member, after the
+/// entries of the poll in which its program first schedules a timer or the service
+/// first passes a timer event over, where a snapshot has not added them already; the
+/// driver's refusal of one is that poll's error, after the entries the handler took
+/// are taken. A timer event whose timer is not pending, or not yet due, is handed to
+/// no handler: the service takes it, so it is among the entries the poll's count
+/// holds, and a poll may return more than its handler was called.
 ///
 /// A poll with a closed `client`, as when the member's driver has stopped, is −1 with
 /// `CAVALRY_ERR_CLOSED`, whatever the service held and whatever the poll was doing
@@ -329,7 +339,8 @@ pub unsafe extern "C" fn cavalry_cluster_service_poll(
     // action and the pointer to the entry's `Replies` are written through their own
     // fields too, which the borrowed service does not hold; the pointer is derived
     // from the exclusive reference the Rust poll hands this closure, is used by
-    // `cavalry_cluster_service_reply` only while the C handler runs, during which the
+    // `cavalry_cluster_service_reply`, `cavalry_cluster_service_schedule_timer` and
+    // `cavalry_cluster_service_cancel_timer` only while the C handler runs, during which the
     // closure does not touch that reference, and is null again before the closure
     // returns it to the poll.
     let result = unsafe {
@@ -521,6 +532,94 @@ pub unsafe extern "C" fn cavalry_cluster_service_reply(
             CAVALRY_CLUSTER_REPLY_TOO_LONG
         }
     }
+}
+
+/// From inside the service's handler: schedules the timer `correlation_id`, any id
+/// the program chooses, for `deadline` in the cluster's time, the clock of an entry's
+/// `timestamp`, as the Rust `Replies::schedule_timer` does (`spec/cluster.md`, "The
+/// service", "Timers"; ADR 0151). When that time has come the leader appends a timer
+/// event, and the handler is handed an entry whose `type` is
+/// `CAVALRY_CLUSTER_ENTRY_TIMER` and whose `correlation_id` is this id, once, at one
+/// position beside every member. A deadline at or before the entry's time is due at
+/// once, and a schedule of an id that is pending sets its deadline and makes no
+/// second timer. Returns `CAVALRY_CLUSTER_TIMER_SCHEDULED`, or
+/// `CAVALRY_CLUSTER_TIMER_REFUSED` where the service holds its 1,024 pending timers
+/// and the id is none of them, which changes nothing: a program with more deadlines
+/// than that keeps them in its own state and schedules one timer for the earliest.
+/// The checks run in this order and stop at the first refusal: a null `service` is
+/// −1 with `CAVALRY_ERR_NULL`; then a call from outside the handler is −1 with
+/// `CAVALRY_ERR_CLUSTER_NO_ENTRY`, whatever its arguments. Nothing here allocates,
+/// and nothing waits: the service tells its member after the handler has taken the
+/// entry, and a handler that aborts its entry is handed it again with every timer as
+/// it was before that handling.
+///
+/// A program schedules its first timer only once every member of its cluster, with
+/// the service beside it, runs version 2 of the cluster protocol (`spec/cluster.md`,
+/// "Versions and the upgrade").
+///
+/// # Safety
+///
+/// `service` is null or a live handle, and the call is made by the thread that polls
+/// it or by no poll's handler at all.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cavalry_cluster_service_schedule_timer(
+    service: *mut cavalry_cluster_service_t,
+    correlation_id: i64,
+    deadline: i64,
+) -> c_int {
+    if service.is_null() {
+        error::null("cavalry_cluster_service_schedule_timer", "service");
+        return -1;
+    }
+    // SAFETY: a live handle, by the caller's convention; the read touches the pointer
+    // field alone, which a running poll does not borrow.
+    let replies = unsafe { ptr::addr_of!((*service).replies).read() };
+    if replies.is_null() {
+        no_entry("cavalry_cluster_service_schedule_timer");
+        return -1;
+    }
+    // SAFETY: the pointer is not null, so this service's poll is inside its C handler
+    // and this call came from it: the pointer names the `Replies` the Rust poll handed
+    // the closure for the entry being handled, which the closure does not touch until
+    // the handler returns, so this is the one reference to it.
+    match unsafe { (*replies).schedule_timer(correlation_id, deadline) } {
+        Ok(()) => CAVALRY_CLUSTER_TIMER_SCHEDULED,
+        Err(_) => CAVALRY_CLUSTER_TIMER_REFUSED,
+    }
+}
+
+/// From inside the service's handler: the timer `correlation_id` is pending no more,
+/// as after the Rust `Replies::cancel_timer`: its event, where the log holds one, is
+/// handed to no program. A timer that is not pending is no error. Returns 0. The
+/// checks are `cavalry_cluster_service_schedule_timer`'s, in the same order: a null
+/// `service` is −1 with `CAVALRY_ERR_NULL`; then a call from outside the handler is
+/// −1 with `CAVALRY_ERR_CLUSTER_NO_ENTRY`. Nothing here allocates, and nothing waits.
+///
+/// # Safety
+///
+/// `service` is null or a live handle, and the call is made by the thread that polls
+/// it or by no poll's handler at all.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cavalry_cluster_service_cancel_timer(
+    service: *mut cavalry_cluster_service_t,
+    correlation_id: i64,
+) -> c_int {
+    if service.is_null() {
+        error::null("cavalry_cluster_service_cancel_timer", "service");
+        return -1;
+    }
+    // SAFETY: a live handle, by the caller's convention; the read touches the pointer
+    // field alone, which a running poll does not borrow.
+    let replies = unsafe { ptr::addr_of!((*service).replies).read() };
+    if replies.is_null() {
+        no_entry("cavalry_cluster_service_cancel_timer");
+        return -1;
+    }
+    // SAFETY: as `cavalry_cluster_service_schedule_timer`: the pointer is not null, so
+    // this call came from inside this service's handler, and this is the one reference
+    // to the `Replies` of the entry being handled.
+    unsafe { (*replies).cancel_timer(correlation_id) };
+    0
 }
 
 /// From inside the service's handler: says what the handler does with the entry it

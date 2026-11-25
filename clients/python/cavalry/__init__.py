@@ -25,7 +25,7 @@ import threading
 from . import _abi
 from ._abi import *  # noqa: F401,F403  the header's constants, as the ABI names them
 
-ABI_VERSION = 6
+ABI_VERSION = 7
 
 # The result codes a message path returns instead of raising (spec/c-abi.md, "Result
 # codes"), under the names Aeron's C client uses without the prefix.
@@ -1020,7 +1020,8 @@ class ClusterService:
     `memoryview` into the log valid for the call and empty for every other entry;
     `entry` is the one `cavalry_cluster_entry_values_t` this object keeps, filled for
     each entry, with its `position`, `leadership_term_id`, `timestamp`, `session_id`,
-    `type`, one of `CAVALRY_CLUSTER_ENTRY_*`, `leader_member_id` and `timed_out`; and
+    `type`, one of `CAVALRY_CLUSTER_ENTRY_*`, `leader_member_id`, `timed_out` and
+    `correlation_id`, a timer's id for an entry of the type `CAVALRY_CLUSTER_ENTRY_TIMER`; and
     `service` is this object, for `service.reply(session_id, message)`. What the handler
     returns says what becomes of the entry: None or `CONTINUE` takes it and the poll goes
     on, `BREAK` takes it and ends the poll, and `ABORT` leaves it, ends the poll, and has

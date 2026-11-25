@@ -38,7 +38,7 @@ public final class Abi {
     }
 
     public static final String DIR_ENV = "CAVALRY_DIR"; // CAVALRY_DIR_ENV
-    public static final int ABI_VERSION = 6; // CAVALRY_ABI_VERSION
+    public static final int ABI_VERSION = 7; // CAVALRY_ABI_VERSION
     public static final int MAX_IMAGES = 256; // CAVALRY_MAX_IMAGES
     public static final int SERVICE_LOG_STREAM_ID = 104; // CAVALRY_SERVICE_LOG_STREAM_ID
     public static final int NULL_POSITION = -1; // CAVALRY_NULL_POSITION
@@ -122,6 +122,9 @@ public final class Abi {
     public static final int CLUSTER_ENTRY_NEW_LEADERSHIP_TERM = 4; // CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM
     public static final int CLUSTER_ENTRY_OTHER = 5; // CAVALRY_CLUSTER_ENTRY_OTHER
     public static final int CLUSTER_ENTRY_SNAPSHOT = 6; // CAVALRY_CLUSTER_ENTRY_SNAPSHOT
+    public static final int CLUSTER_ENTRY_TIMER = 7; // CAVALRY_CLUSTER_ENTRY_TIMER
+    public static final int CLUSTER_TIMER_SCHEDULED = 1; // CAVALRY_CLUSTER_TIMER_SCHEDULED
+    public static final int CLUSTER_TIMER_REFUSED = 2; // CAVALRY_CLUSTER_TIMER_REFUSED
     public static final int CLUSTER_RESTORED_NO_MEMBER = 1; // CAVALRY_CLUSTER_RESTORED_NO_MEMBER
     public static final int CLUSTER_RESTORED_FROM_START = 2; // CAVALRY_CLUSTER_RESTORED_FROM_START
     public static final int CLUSTER_RESTORED_STATE = 3; // CAVALRY_CLUSTER_RESTORED_STATE
@@ -149,7 +152,8 @@ public final class Abi {
         JAVA_INT.withName("type"),
         JAVA_INT.withName("leader_member_id"),
         JAVA_BOOLEAN.withName("timed_out"),
-        MemoryLayout.paddingLayout(7));
+        MemoryLayout.paddingLayout(7),
+        JAVA_LONG.withName("correlation_id"));
     static final StructLayout cavalry_fault_t = MemoryLayout.structLayout(
         JAVA_INT.withName("code"),
         JAVA_INT.withName("session_id"),
@@ -221,6 +225,7 @@ public final class Abi {
     static final long cavalry_cluster_entry_values_t_type = 32;
     static final long cavalry_cluster_entry_values_t_leader_member_id = 36;
     static final long cavalry_cluster_entry_values_t_timed_out = 40;
+    static final long cavalry_cluster_entry_values_t_correlation_id = 48;
     static final long cavalry_fault_t_code = 0;
     static final long cavalry_fault_t_session_id = 4;
     static final long cavalry_fault_t_position = 8;
@@ -297,6 +302,8 @@ public final class Abi {
     static final MethodHandle cavalry_cluster_service_poll;
     static final MethodHandle cavalry_cluster_entry_values;
     static final MethodHandle cavalry_cluster_service_reply;
+    static final MethodHandle cavalry_cluster_service_schedule_timer;
+    static final MethodHandle cavalry_cluster_service_cancel_timer;
     static final MethodHandle cavalry_cluster_service_action;
     static final MethodHandle cavalry_cluster_service_fault;
     static final MethodHandle cavalry_cluster_service_position;
@@ -409,6 +416,8 @@ public final class Abi {
         cavalry_cluster_service_poll = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_poll"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS, ADDRESS, JAVA_LONG));
         cavalry_cluster_entry_values = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_entry_values"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
         cavalry_cluster_service_reply = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_reply"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG), Linker.Option.critical(true));
+        cavalry_cluster_service_schedule_timer = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_schedule_timer"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, JAVA_LONG));
+        cavalry_cluster_service_cancel_timer = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_cancel_timer"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
         cavalry_cluster_service_action = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_action"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT));
         cavalry_cluster_service_fault = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_fault"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
         cavalry_cluster_service_position = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_cluster_service_position"), FunctionDescriptor.of(JAVA_LONG, ADDRESS));

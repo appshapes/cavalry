@@ -59,4 +59,11 @@ public final class ClusterEntryValues {
     public boolean timedOut() {
         return values.get(JAVA_BOOLEAN, Abi.cavalry_cluster_entry_values_t_timed_out);
     }
+
+    /** The id of the timer that is handed over, for an entry whose type is
+     * {@code Abi.CLUSTER_ENTRY_TIMER}, and 0 for every other entry, where it says
+     * nothing. */
+    public long correlationId() {
+        return values.get(JAVA_LONG, Abi.cavalry_cluster_entry_values_t_correlation_id);
+    }
 }

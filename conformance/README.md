@@ -39,7 +39,10 @@ otherwise.
 
 The cluster round is a runner's check of a cluster's service and of a session with a
 cluster (`spec/c-abi.md`, versions 4 and 5; `spec/cluster.md`, "Sessions", "The service"
-and "Replies"). Every runner has it: the C runner, in `c/cluster.c`, the Python
+and "Replies"). The C runner's also holds a program's timer (version 7; ADR 0157):
+each service schedules one at the message it takes, and all three are handed it
+once, as an entry of its own kind with the timer's id, at one position and no
+earlier than its deadline. Every runner has the round: the C runner, in `c/cluster.c`, the Python
 runner, in `python/cluster.py`, the Node runner, in `node/cluster.js`, the Go runner,
 in `go/cluster`, the JVM runner, in `jvm/ClusterRound.java`, and the .NET runner, in
 `dotnet/Cluster`. It runs a service beside each of

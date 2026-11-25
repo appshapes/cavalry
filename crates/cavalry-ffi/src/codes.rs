@@ -9,7 +9,7 @@ use std::ffi::c_int;
 /// This page's version: the header's `CAVALRY_ABI_VERSION`, which
 /// `cavalry_context_init` passes to `cavalry_context_init_v` and the library compares
 /// with its own.
-pub const CAVALRY_ABI_VERSION: c_int = 6;
+pub const CAVALRY_ABI_VERSION: c_int = 7;
 /// The environment variable a context's default directory reads.
 pub const CAVALRY_DIR_ENV: &str = "CAVALRY_DIR";
 /// The images a subscription holds at most.
@@ -202,15 +202,27 @@ pub const CAVALRY_CLUSTER_ENTRY_SESSION_OPEN: i32 = 2;
 pub const CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE: i32 = 3;
 /// A committed entry: a leadership term began, led by `leader_member_id`.
 pub const CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM: i32 = 4;
-/// A committed entry that no leader of this version appends and a service of this
-/// version does nothing with: a timer event, a cluster action that suspends or
-/// resumes, or a membership change event.
+/// A committed entry that a service of this version does nothing with: a cluster
+/// action that suspends or resumes, or a membership change event.
 pub const CAVALRY_CLUSTER_ENTRY_OTHER: i32 = 5;
 /// A committed entry: the leader asks for a snapshot here. The poll ends after it, and
 /// the program gives its state to `cavalry_cluster_service_snapshot` before its next
 /// poll, or polls on and takes none. 6, after `CAVALRY_CLUSTER_ENTRY_OTHER`, which
 /// version 5 of the ABI handed this entry over as.
 pub const CAVALRY_CLUSTER_ENTRY_SNAPSHOT: i32 = 6;
+/// A committed entry: a timer of the program's is handed over, with its id in
+/// `correlation_id`. Its event is in the log at or after its deadline, and the
+/// handler is handed it once, at one position beside every member. 7, after the
+/// kinds of version 6, which handed every timer event over as
+/// `CAVALRY_CLUSTER_ENTRY_OTHER`.
+pub const CAVALRY_CLUSTER_ENTRY_TIMER: i32 = 7;
+
+/// A schedule of a timer: the timer is pending with the deadline given.
+pub const CAVALRY_CLUSTER_TIMER_SCHEDULED: c_int = 1;
+/// A schedule of a timer: the service holds 1,024 pending timers and the id is none
+/// of them, so nothing changed. A program with more deadlines than that keeps them
+/// in its own state and schedules one timer for the earliest.
+pub const CAVALRY_CLUSTER_TIMER_REFUSED: c_int = 2;
 
 /// A service's start: the driver hosts no cluster member that has a log yet. Call
 /// `cavalry_cluster_service_restore` again before the first poll.

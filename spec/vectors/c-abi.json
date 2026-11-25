@@ -1,6 +1,6 @@
 {
   "spec": "spec/c-abi.md",
-  "version": 6,
+  "version": 7,
   "generated_by": "spec/vectors/c-abi.py; do not edit by hand",
   "opaque_types": [
     "cavalry_context_t",
@@ -260,6 +260,10 @@
       [
         "bool",
         "timed_out"
+      ],
+      [
+        "int64_t",
+        "correlation_id"
       ]
     ]
   },
@@ -1516,6 +1520,38 @@
       ]
     },
     {
+      "name": "cavalry_cluster_service_schedule_timer",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_cluster_service_t *",
+          "service"
+        ],
+        [
+          "int64_t",
+          "correlation_id"
+        ],
+        [
+          "int64_t",
+          "deadline"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_cluster_service_cancel_timer",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_cluster_service_t *",
+          "service"
+        ],
+        [
+          "int64_t",
+          "correlation_id"
+        ]
+      ]
+    },
+    {
       "name": "cavalry_cluster_service_close",
       "returns": "int",
       "params": [
@@ -1566,7 +1602,7 @@
     }
   ],
   "defines": {
-    "CAVALRY_ABI_VERSION": 6,
+    "CAVALRY_ABI_VERSION": 7,
     "CAVALRY_DIR_ENV": "CAVALRY_DIR",
     "CAVALRY_MAX_IMAGES": 256,
     "CAVALRY_SERVICE_LOG_STREAM_ID": 104,
@@ -1651,6 +1687,9 @@
     "CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM": 4,
     "CAVALRY_CLUSTER_ENTRY_OTHER": 5,
     "CAVALRY_CLUSTER_ENTRY_SNAPSHOT": 6,
+    "CAVALRY_CLUSTER_ENTRY_TIMER": 7,
+    "CAVALRY_CLUSTER_TIMER_SCHEDULED": 1,
+    "CAVALRY_CLUSTER_TIMER_REFUSED": 2,
     "CAVALRY_CLUSTER_RESTORED_NO_MEMBER": 1,
     "CAVALRY_CLUSTER_RESTORED_FROM_START": 2,
     "CAVALRY_CLUSTER_RESTORED_STATE": 3,

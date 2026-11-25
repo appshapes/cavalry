@@ -40,7 +40,7 @@ import (
 // The header's constants, as the ABI names them (spec/c-abi.md), in Go's casing.
 const (
 	DirEnv                            = "CAVALRY_DIR" // CAVALRY_DIR_ENV
-	ABIVersion                        = 6             // CAVALRY_ABI_VERSION
+	ABIVersion                        = 7             // CAVALRY_ABI_VERSION
 	MaxImages                         = 256           // CAVALRY_MAX_IMAGES
 	ServiceLogStreamID                = 104           // CAVALRY_SERVICE_LOG_STREAM_ID
 	NullPosition                      = -1            // CAVALRY_NULL_POSITION
@@ -124,6 +124,9 @@ const (
 	ClusterEntryNewLeadershipTerm     = 4             // CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM
 	ClusterEntryOther                 = 5             // CAVALRY_CLUSTER_ENTRY_OTHER
 	ClusterEntrySnapshot              = 6             // CAVALRY_CLUSTER_ENTRY_SNAPSHOT
+	ClusterEntryTimer                 = 7             // CAVALRY_CLUSTER_ENTRY_TIMER
+	ClusterTimerScheduled             = 1             // CAVALRY_CLUSTER_TIMER_SCHEDULED
+	ClusterTimerRefused               = 2             // CAVALRY_CLUSTER_TIMER_REFUSED
 	ClusterRestoredNoMember           = 1             // CAVALRY_CLUSTER_RESTORED_NO_MEMBER
 	ClusterRestoredFromStart          = 2             // CAVALRY_CLUSTER_RESTORED_FROM_START
 	ClusterRestoredState              = 3             // CAVALRY_CLUSTER_RESTORED_STATE
@@ -877,6 +880,9 @@ type ClusterEntryValues struct {
 	// TimedOut is whether the leader closed the session of a session close event for the
 	// session timeout.
 	TimedOut bool
+	// CorrelationID is the id of the timer that is handed over, for an entry whose Type
+	// is ClusterEntryTimer, and 0 for every other entry, where it says nothing.
+	CorrelationID int64
 }
 
 // Frame is a frame's header as cavalry_header_values reads it (spec/frame.md).

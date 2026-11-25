@@ -1216,10 +1216,6 @@ pub struct ClusterService {
     /// When the service last sent its member every pending timer, on its own
     /// monotonic clock.
     refreshed_at_ns: i64,
-    /// Whether a timer event that is passed over is handed to the handler as
-    /// [`Entry::Other`]: what version 6 of the C ABI says of a timer event, whose
-    /// programs have no call that schedules a timer.
-    passed_over_as_other: bool,
 }
 
 /// What a service has counted of its timers: the events it passed over and the
@@ -1311,19 +1307,7 @@ impl ClusterService {
             timer_counters: None,
             history_read: false,
             refreshed_at_ns: 0,
-            passed_over_as_other: false,
         }
-    }
-
-    /// Hands a timer event that this service passes over to the handler as
-    /// [`Entry::Other`], as a service did before it had timers. For the C ABI
-    /// below the version that gives a program the calls, whose page says that a
-    /// timer event is an entry of no kind the program knows (`spec/c-abi.md`,
-    /// "Codes"): a program there can schedule no timer, so every timer event is
-    /// one it passes over. The event is counted as passed over all the same.
-    #[doc(hidden)]
-    pub fn hand_passed_over_timer_events_as_other(&mut self) {
-        self.passed_over_as_other = true;
     }
 
     /// Starts the service from the newest snapshot of a service that its member
@@ -1603,7 +1587,6 @@ impl ClusterService {
             timer_counts,
             history_read,
             refreshed_at_ns,
-            passed_over_as_other,
             ..
         } = self;
         let (Some(log), Some(member)) = (log.as_mut(), member.as_mut()) else {
@@ -1778,22 +1761,14 @@ impl ClusterService {
                 // A timer event is handed over only when its timer is pending with a
                 // deadline at or before the event's time. Every other one is passed
                 // over: taken, counted, and no handler's.
-                let mut passed_over_as_entry = false;
                 let entry = match entry {
                     Entry::Timer { correlation_id }
                         if timers.begin_event(correlation_id, timestamp)
                             != TimerEventIs::Handed =>
                     {
                         timers.end_entry(true);
-                        if !*passed_over_as_other {
-                            timer_counts.passed_over = timer_counts.passed_over.saturating_add(1);
-                            return Action::Continue;
-                        }
-                        // Handed to the program as an entry of no kind, and counted
-                        // when the program takes it: one it aborts is read again.
-                        passed_over_as_entry = true;
-                        timers.begin_entry();
-                        Entry::Other
+                        timer_counts.passed_over = timer_counts.passed_over.saturating_add(1);
+                        return Action::Continue;
                     }
                     Entry::Timer { .. } => entry,
                     _ => {
@@ -1829,9 +1804,6 @@ impl ClusterService {
                     .cancels_dropped
                     .saturating_add(i64::try_from(dropped).unwrap_or(i64::MAX));
                 if action != Action::Abort {
-                    if passed_over_as_entry {
-                        timer_counts.passed_over = timer_counts.passed_over.saturating_add(1);
-                    }
                     for session in sessions.iter_mut().filter(|session| session.open) {
                         session.taken();
                     }

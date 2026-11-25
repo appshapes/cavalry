@@ -91,6 +91,9 @@ export const constants: {
   CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM: number;
   CAVALRY_CLUSTER_ENTRY_OTHER: number;
   CAVALRY_CLUSTER_ENTRY_SNAPSHOT: number;
+  CAVALRY_CLUSTER_ENTRY_TIMER: number;
+  CAVALRY_CLUSTER_TIMER_SCHEDULED: number;
+  CAVALRY_CLUSTER_TIMER_REFUSED: number;
   CAVALRY_CLUSTER_RESTORED_NO_MEMBER: number;
   CAVALRY_CLUSTER_RESTORED_FROM_START: number;
   CAVALRY_CLUSTER_RESTORED_STATE: number;
@@ -300,6 +303,9 @@ export class ClusterEntryValues {
   readonly type: number | undefined;
   readonly leaderMemberId: number | undefined;
   readonly timedOut: boolean | undefined;
+  /** A timer's id, for an entry of the type `constants.CAVALRY_CLUSTER_ENTRY_TIMER`: a
+   * BigInt, exact over the whole int64 range, since it is any id the program chose. */
+  readonly correlationId: bigint | undefined;
 }
 
 export class ClusterService {

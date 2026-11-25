@@ -927,6 +927,7 @@ static napi_value fn_entryField(napi_env env, napi_callback_info info) {
       case 4: return make_int32(env, s->entry.type);
       case 5: return make_int32(env, s->entry.leader_member_id);
       case 6: return make_bool(env, s->entry.timed_out);
+      case 7: return make_bigint64(env, s->entry.correlation_id);
       default: break;
     }
   }
@@ -1249,6 +1250,30 @@ static napi_value fn_cavalry_cluster_service_reply(napi_env env, napi_callback_i
   size_t length = 0; const uint8_t *buffer = (const uint8_t *) bytes_arg(env, argv[2], &length, "buffer");
   if (arg_failed) return NULL;
   int result = cavalry_cluster_service_reply(service, session_id, buffer, length);
+  return make_int32(env, (int32_t) result);
+}
+
+static napi_value fn_cavalry_cluster_service_schedule_timer(napi_env env, napi_callback_info info) {
+  size_t argc = 3; napi_value argv[3];
+  if (!read_args(env, info, 3, &argc, argv, "cavalry_cluster_service_schedule_timer")) return NULL;
+  cavalry_cluster_service_t *service = (cavalry_cluster_service_t *) external_arg(env, argv[0], "service");
+  if (arg_failed) return NULL;
+  int64_t correlation_id = (int64_t) int64_arg(env, argv[1], "correlation_id");
+  if (arg_failed) return NULL;
+  int64_t deadline = (int64_t) int64_arg(env, argv[2], "deadline");
+  if (arg_failed) return NULL;
+  int result = cavalry_cluster_service_schedule_timer(service, correlation_id, deadline);
+  return make_int32(env, (int32_t) result);
+}
+
+static napi_value fn_cavalry_cluster_service_cancel_timer(napi_env env, napi_callback_info info) {
+  size_t argc = 2; napi_value argv[2];
+  if (!read_args(env, info, 2, &argc, argv, "cavalry_cluster_service_cancel_timer")) return NULL;
+  cavalry_cluster_service_t *service = (cavalry_cluster_service_t *) external_arg(env, argv[0], "service");
+  if (arg_failed) return NULL;
+  int64_t correlation_id = (int64_t) int64_arg(env, argv[1], "correlation_id");
+  if (arg_failed) return NULL;
+  int result = cavalry_cluster_service_cancel_timer(service, correlation_id);
   return make_int32(env, (int32_t) result);
 }
 
@@ -1999,6 +2024,8 @@ static napi_value init(napi_env env, napi_value exports) {
     { "cavalry_cluster_service", NULL, fn_cavalry_cluster_service, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_cluster_entry_values", NULL, fn_cavalry_cluster_entry_values, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_cluster_service_reply", NULL, fn_cavalry_cluster_service_reply, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_cluster_service_schedule_timer", NULL, fn_cavalry_cluster_service_schedule_timer, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_cluster_service_cancel_timer", NULL, fn_cavalry_cluster_service_cancel_timer, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_cluster_service_action", NULL, fn_cavalry_cluster_service_action, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_cluster_service_fault", NULL, fn_cavalry_cluster_service_fault, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_cluster_service_position", NULL, fn_cavalry_cluster_service_position, NULL, NULL, NULL, napi_default, NULL },

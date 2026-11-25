@@ -140,7 +140,9 @@ service)` for each committed entry, in order:
   is empty for every other entry.
 - `entry` carries the entry's values: `entry.type`, one of
   `CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE`, `_SESSION_OPEN`, `_SESSION_CLOSE`,
-  `_NEW_LEADERSHIP_TERM`, `_OTHER` and `_SNAPSHOT`; `entry.position`;
+  `_NEW_LEADERSHIP_TERM`, `_OTHER`, `_SNAPSHOT` and `_TIMER`, a timer of the program's
+  with its id in `entry.correlation_id`, which this package's programs are handed
+  none of yet, since it does not wrap the calls that schedule one; `entry.position`;
   `entry.leadership_term_id`;
   `entry.timestamp`, the cluster's time, the one clock a service reads, so that every
   member's service reaches the same state; `entry.session_id`, −1 where the entry has
@@ -394,10 +396,11 @@ runners'.
 
 ### The call
 
-The package opens the library twice, which the loader maps once. The sixteen
+The package opens the library twice, which the loader maps once. The eighteen
 per-message functions of `crates/cavalry-ffi/README.md`, a committed log's poll and an
 entry's position, a cluster session's offer, its poll and a reply's values, and a
-cluster service's poll, an entry's values, its reply and its action among them, come
+cluster service's poll, an entry's values, its reply, its action and the two calls
+of its timers among them, come
 through `ctypes.PyDLL`,
 which keeps the GIL held across the foreign call, so an offer, a claim, a commit or
 abort and a poll's call-backs run with no GIL release and re-acquire pair per message.

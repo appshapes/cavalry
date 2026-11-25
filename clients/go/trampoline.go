@@ -116,7 +116,7 @@ func cavalryGoReply(slot C.uintptr_t, buffer *C.uint8_t, length C.size_t, leader
 //export cavalryGoClusterEntry
 func cavalryGoClusterEntry(slot C.uintptr_t, buffer *C.uint8_t, length C.size_t, position C.int64_t,
 	leadershipTermID C.int64_t, timestamp C.int64_t, sessionID C.int64_t, entryType C.int32_t,
-	leaderMemberID C.int32_t, timedOut C.int32_t) C.int32_t {
+	leaderMemberID C.int32_t, timedOut C.int32_t, correlationID C.int64_t) C.int32_t {
 	s := held(slot)
 	if s == nil {
 		return ActionAbort
@@ -133,5 +133,6 @@ func cavalryGoClusterEntry(slot C.uintptr_t, buffer *C.uint8_t, length C.size_t,
 	e.Type = int32(entryType)
 	e.LeaderMemberID = int32(leaderMemberID)
 	e.TimedOut = timedOut != 0
+	e.CorrelationID = int64(correlationID)
 	return C.int32_t(s.deliverClusterEntry(body))
 }

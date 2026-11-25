@@ -1225,6 +1225,7 @@ static napi_value fn_entryField(napi_env env, napi_callback_info info) {
       case 4: return make_int32(env, s->entry.type);
       case 5: return make_int32(env, s->entry.leader_member_id);
       case 6: return make_bool(env, s->entry.timed_out);
+      case 7: return make_bigint64(env, s->entry.correlation_id);
       default: break;
     }
   }
@@ -2006,11 +2007,14 @@ class ClusterEntryValues {
    * reaches the same state; `sessionId`, the session of a session's message, open or close,
    * and -1 for every other entry; `type`, one of `CAVALRY_CLUSTER_ENTRY_*`; `leaderMemberId`,
    * the member that leads the term a new leadership term event begins, and -1 for every other
-   * entry; and `timedOut`, whether the leader closed the session of a session close event for
-   * the session timeout. The addon's trampoline reads them all with one ABI call,
+   * entry; `timedOut`, whether the leader closed the session of a session close event for
+   * the session timeout; and `correlationId`, the id of the timer that is handed over, for an
+   * entry whose `type` is `CAVALRY_CLUSTER_ENTRY_TIMER`, and 0 for every other entry, where
+   * it says nothing. The addon's trampoline reads them all with one ABI call,
    * `cavalry_cluster_entry_values`, into the struct it keeps for the service, before the
    * handler runs, and each getter reads one of them through the addon; outside the call every
-   * getter is undefined. `timedOut` is a boolean and the rest are numbers. */
+   * getter is undefined. `timedOut` is a boolean, `correlationId` is a BigInt, since a
+   * timer's id is any int64 its program chose, and the rest are numbers. */
   constructor(state) { this._state = state; }
   get position() { return addon.entryField(this._state, 0); }
   get leadershipTermId() { return addon.entryField(this._state, 1); }
@@ -2019,6 +2023,7 @@ class ClusterEntryValues {
   get type() { return addon.entryField(this._state, 4); }
   get leaderMemberId() { return addon.entryField(this._state, 5); }
   get timedOut() { return addon.entryField(this._state, 6); }
+  get correlationId() { return addon.entryField(this._state, 7); }
 }
 
 class ClusterService {
@@ -2426,6 +2431,9 @@ export class ClusterEntryValues {
   readonly type: number | undefined;
   readonly leaderMemberId: number | undefined;
   readonly timedOut: boolean | undefined;
+  /** A timer's id, for an entry of the type `constants.CAVALRY_CLUSTER_ENTRY_TIMER`: a
+   * BigInt, exact over the whole int64 range, since it is any id the program chose. */
+  readonly correlationId: bigint | undefined;
 }
 
 export class ClusterService {

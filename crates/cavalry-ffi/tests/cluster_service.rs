@@ -96,6 +96,8 @@ struct Handed {
     reply: Option<i32>,
     /// What the handler said it does with the entry.
     action: i32,
+    /// The values' `correlation_id`: a timer's id, for an entry of that kind.
+    correlation: i64,
 }
 
 /// One call made from inside the handler: its name, what it returned, and the
@@ -139,6 +141,10 @@ struct Served {
     /// probe found.
     others: Option<Others>,
     probed: Vec<Probed>,
+    /// What each call of `cavalry_cluster_service_schedule_timer` and
+    /// `cavalry_cluster_service_cancel_timer` from inside the handler answered, in
+    /// the order of the calls, at each handling that settled its reply.
+    timers: Vec<i32>,
     /// The message of the thread's error after the reply that was too long.
     too_long: String,
     /// The message of the thread's error after `cavalry_cluster_reply_values` refused
@@ -358,6 +364,14 @@ unsafe fn probe_from_inside(served: &mut Served, header: *const cavalry_header_t
             "cavalry_cluster_service_action, another service",
             || i64::from(cavalry_cluster_service_action(second, CAVALRY_ACTION_ABORT)),
         ));
+        found.push(probe(
+            "cavalry_cluster_service_schedule_timer, another service",
+            || i64::from(cavalry_cluster_service_schedule_timer(second, 1, 1)),
+        ));
+        found.push(probe(
+            "cavalry_cluster_service_cancel_timer, another service",
+            || i64::from(cavalry_cluster_service_cancel_timer(second, 1)),
+        ));
         // What does not reach the client is allowed: a close with no client, and any
         // call on another handle.
         found.push(probe(
@@ -471,6 +485,7 @@ unsafe extern "C" fn serve(
             entry_position: cavalry_committed_log_entry_position(header),
             reply: None,
             action: CAVALRY_ACTION_CONTINUE,
+            correlation: values.correlation_id,
         };
         if values.r#type == CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE && values.session_id >= 0 {
             let mut answer = [0u8; 64];
@@ -510,6 +525,37 @@ unsafe extern "C" fn serve(
                     "{}",
                     errmsg()
                 );
+            }
+            // A program's timers, by its messages: `timer` schedules timer 77 for
+            // 50 ms after the entry; `cancel` schedules timer 78 and cancels it;
+            // `fill` schedules 1,024 timers that are due in no test's time, and one
+            // more.
+            if payload == b"timer" {
+                served.timers.push(cavalry_cluster_service_schedule_timer(
+                    served.service,
+                    77,
+                    values.timestamp + 50,
+                ));
+            } else if payload == b"cancel" {
+                served.timers.push(cavalry_cluster_service_schedule_timer(
+                    served.service,
+                    78,
+                    values.timestamp + 50,
+                ));
+                served
+                    .timers
+                    .push(cavalry_cluster_service_cancel_timer(served.service, 78));
+            } else if payload == b"fill" {
+                for id in 0..=1_024 {
+                    let scheduled = cavalry_cluster_service_schedule_timer(
+                        served.service,
+                        1_000 + id,
+                        i64::MAX / 2,
+                    );
+                    if id >= 1_023 {
+                        served.timers.push(scheduled);
+                    }
+                }
             }
         }
         served.handed.push(handed);
@@ -628,6 +674,7 @@ impl Cluster {
                         breaks: false,
                         others: None,
                         probed: Vec::new(),
+                        timers: Vec::new(),
                         too_long: String::new(),
                         wrong_header: String::new(),
                     }),
@@ -1088,6 +1135,16 @@ fn a_service_takes_each_entry_answers_its_session_and_holds_its_client_while_it_
             CAVALRY_ERR_CLUSTER_NO_ENTRY,
         ),
         (
+            "cavalry_cluster_service_schedule_timer, another service",
+            -1,
+            CAVALRY_ERR_CLUSTER_NO_ENTRY,
+        ),
+        (
+            "cavalry_cluster_service_cancel_timer, another service",
+            -1,
+            CAVALRY_ERR_CLUSTER_NO_ENTRY,
+        ),
+        (
             "cavalry_cluster_service_close, another service, no client",
             0,
             untouched,
@@ -1417,6 +1474,7 @@ fn a_service_refuses_what_the_page_says_and_outlives_its_client() {
             breaks: false,
             others: None,
             probed: Vec::new(),
+            timers: Vec::new(),
             too_long: String::new(),
             wrong_header: String::new(),
         };
@@ -1440,7 +1498,7 @@ fn a_service_refuses_what_the_page_says_and_outlives_its_client() {
             (0, 0, CAVALRY_NULL_POSITION)
         );
 
-        // The handler's two calls, from outside a handler: no entry to answer. The
+        // The handler's calls, from outside a handler: no entry to answer. The
         // page's order: a null comes first, then the call from outside the handler,
         // whatever its other arguments, then an action that is none.
         assert_eq!(
@@ -1449,6 +1507,28 @@ fn a_service_refuses_what_the_page_says_and_outlives_its_client() {
         );
         refused(CAVALRY_ERR_CLUSTER_NO_ENTRY, "a reply outside the handler");
         assert!(errmsg().contains("cavalry_cluster_service_reply refused (cluster-no-entry)"));
+        // A timer's two calls are the handler's too: a null first, then the call
+        // from outside the handler, whatever its arguments.
+        assert_eq!(cavalry_cluster_service_schedule_timer(service, 1, 1), -1);
+        refused(
+            CAVALRY_ERR_CLUSTER_NO_ENTRY,
+            "a schedule of a timer outside the handler",
+        );
+        assert!(
+            errmsg().contains("cavalry_cluster_service_schedule_timer refused (cluster-no-entry)")
+        );
+        assert_eq!(cavalry_cluster_service_cancel_timer(service, 1), -1);
+        refused(
+            CAVALRY_ERR_CLUSTER_NO_ENTRY,
+            "a cancel of a timer outside the handler",
+        );
+        assert_eq!(
+            cavalry_cluster_service_schedule_timer(ptr::null_mut(), 1, 1),
+            -1
+        );
+        refused(CAVALRY_ERR_NULL, "a schedule of a timer with no service");
+        assert_eq!(cavalry_cluster_service_cancel_timer(ptr::null_mut(), 1), -1);
+        refused(CAVALRY_ERR_NULL, "a cancel of a timer with no service");
         let long = [7u8; 1_345];
         assert_eq!(
             cavalry_cluster_service_reply(service, 1, long.as_ptr(), long.len()),
@@ -1607,81 +1687,105 @@ fn a_subscriptions_header_carries_no_entrys_values() {
     driver.close().expect("the driver closes");
 }
 
-/// A timer event reaches a service of this version of the ABI as an entry of no
-/// kind, `CAVALRY_CLUSTER_ENTRY_OTHER`, every one of them, as it did before the
-/// Rust library had timers: the Rust library hands its program the event of a timer
-/// that is pending and due as `Entry::Timer` and passes every other over, and the
-/// service that the C ABI makes is handed those too (`spec/c-abi.md`, "Constants";
-/// ADR 0159). The timer here is one that no program scheduled: the leader is told
-/// of it by hand on the consensus module stream, and appends its event.
+/// A program schedules a timer from inside its handler and is handed it, as an entry
+/// of the kind `CAVALRY_CLUSTER_ENTRY_TIMER` with the timer's id, once, at one
+/// position beside every member, never before its deadline; a timer it cancels is
+/// handed to no service; and the 1,025th timer is refused (`spec/c-abi.md`, version
+/// 7; `spec/cluster.md`, "The service", "Timers"; ADR 0157).
 #[test]
-fn a_timer_event_reaches_a_service_as_an_entry_of_no_kind() {
-    use cavalry_proto::cluster::{CONSENSUS_MODULE_STREAM_ID, Message};
-
-    let mut cluster = Cluster::start("timer-event");
-    let leader = cluster.members[0].id;
-    let leader_dir = cluster._dir.path().join(format!("member-{leader}"));
-    let mut beside =
-        cavalry_client::Cavalry::connect_to(&leader_dir).expect("a client of the leader's driver");
-    let mut stream = beside
-        .add_exclusive_publication("cavalry:ipc", CONSENSUS_MODULE_STREAM_ID)
-        .expect("a publication on the consensus module stream");
-    let mut bytes = [0u8; 64];
-    let length = Message::ScheduleTimer {
-        correlation_id: 77,
-        deadline: 1,
-    }
-    .write(&mut bytes)
-    .expect("a schedule timer");
-    cluster.run_until(
-        "the consensus module stream takes the schedule timer",
-        |_| stream.offer(&bytes[..length]).is_ok(),
-    );
-    let others = |cluster: &Cluster, member: usize| {
-        cluster.members[member]
-            .served
-            .handed
+fn a_program_schedules_a_timer_and_is_handed_it_once_beside_every_member() {
+    let mut cluster = Cluster::start("timers");
+    let mut session = cluster.connect_session();
+    let took = |cluster: &Cluster, payload: &[u8]| {
+        cluster
+            .members
             .iter()
-            .filter(|handed| handed.r#type == CAVALRY_CLUSTER_ENTRY_OTHER)
-            .count()
+            .all(|member| member.took(payload).len() == 1)
     };
-    cluster.run_until("every service is handed the timer's event", |cluster| {
-        (0..cluster.members.len()).all(|member| others(cluster, member) == 1)
-    });
-    // One event, handed once to each service, with no payload and no session.
-    for member in &cluster.members {
-        let event: Vec<&Handed> = member
+    let timers = |member: &Member| -> Vec<(i64, i64, i64)> {
+        member
             .served
             .handed
             .iter()
-            .filter(|handed| handed.r#type == CAVALRY_CLUSTER_ENTRY_OTHER)
-            .collect();
-        assert_eq!(event.len(), 1, "member {}", member.id);
-        assert!(event[0].payload.is_empty(), "member {}", member.id);
+            .filter(|handed| handed.r#type == CAVALRY_CLUSTER_ENTRY_TIMER)
+            .map(|handed| (handed.position, handed.correlation, handed.timestamp))
+            .collect()
+    };
+
+    // A timer, and one that is scheduled and cancelled in the same handling.
+    cluster.offer(&mut session, b"cancel");
+    cluster.offer(&mut session, b"timer");
+    cluster.converse(
+        &mut session,
+        "every service took both messages",
+        |cluster, _| took(cluster, b"cancel") && took(cluster, b"timer"),
+    );
+    cluster.converse(
+        &mut session,
+        "every service is handed the timer",
+        |cluster, _| {
+            cluster
+                .members
+                .iter()
+                .all(|member| !timers(member).is_empty())
+        },
+    );
+    let scheduled_at = cluster.members[0].took(b"timer")[0].timestamp;
+    let first = timers(&cluster.members[0]);
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert_eq!(first[0].1, 77, "the id the program gave it");
+    assert!(
+        first[0].2 >= scheduled_at + 50,
+        "never before its deadline: the event's time is {} and the deadline {}",
+        first[0].2,
+        scheduled_at + 50
+    );
+    for member in &cluster.members {
+        assert_eq!(timers(member), first, "member {}", member.id);
+        // In the order of the log: the timer of `cancel` scheduled and cancelled, then
+        // the timer of `timer` scheduled. What each call answered.
         assert_eq!(
-            event[0].position, event[0].entry_position,
+            member.served.timers,
+            [
+                CAVALRY_CLUSTER_TIMER_SCHEDULED,
+                0,
+                CAVALRY_CLUSTER_TIMER_SCHEDULED
+            ],
             "member {}",
             member.id
         );
-    }
-    let positions: Vec<i64> = cluster
-        .members
-        .iter()
-        .filter_map(|member| {
+        // Every other entry's `correlation_id` is 0.
+        assert!(
             member
                 .served
                 .handed
                 .iter()
-                .find(|handed| handed.r#type == CAVALRY_CLUSTER_ENTRY_OTHER)
-                .map(|handed| handed.position)
-        })
-        .collect();
-    assert!(
-        positions.windows(2).all(|pair| pair[0] == pair[1]),
-        "one position beside every member: {positions:?}"
-    );
+                .filter(|handed| handed.r#type != CAVALRY_CLUSTER_ENTRY_TIMER)
+                .all(|handed| handed.correlation == 0),
+            "member {}",
+            member.id
+        );
+    }
 
-    drop(stream);
-    beside.close().expect("the client closes");
+    // A service holds 1,024 pending timers: the 1,025th is refused, beside every
+    // member alike, and timer 78, cancelled, was handed to nobody meanwhile.
+    cluster.offer(&mut session, b"fill");
+    cluster.converse(&mut session, "every service took the fill", |cluster, _| {
+        took(cluster, b"fill")
+    });
+    for member in &cluster.members {
+        assert_eq!(
+            member.served.timers[3..],
+            [
+                CAVALRY_CLUSTER_TIMER_SCHEDULED,
+                CAVALRY_CLUSTER_TIMER_REFUSED
+            ],
+            "member {}: the 1,024th and the 1,025th",
+            member.id
+        );
+        assert_eq!(timers(member), first, "member {}", member.id);
+    }
+
+    session.close();
     cluster.stop();
 }

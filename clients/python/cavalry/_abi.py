@@ -14,7 +14,7 @@ from ctypes import (CFUNCTYPE, POINTER, Structure, c_bool, c_char_p, c_int, c_in
 # The defines, the header's constants (spec/c-abi.md, "Constants", "Result codes",
 # "Error codes").
 CAVALRY_DIR_ENV = "CAVALRY_DIR"
-CAVALRY_ABI_VERSION = 6
+CAVALRY_ABI_VERSION = 7
 CAVALRY_MAX_IMAGES = 256
 CAVALRY_SERVICE_LOG_STREAM_ID = 104
 CAVALRY_NULL_POSITION = -1
@@ -98,6 +98,9 @@ CAVALRY_CLUSTER_ENTRY_SESSION_CLOSE = 3
 CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM = 4
 CAVALRY_CLUSTER_ENTRY_OTHER = 5
 CAVALRY_CLUSTER_ENTRY_SNAPSHOT = 6
+CAVALRY_CLUSTER_ENTRY_TIMER = 7
+CAVALRY_CLUSTER_TIMER_SCHEDULED = 1
+CAVALRY_CLUSTER_TIMER_REFUSED = 2
 CAVALRY_CLUSTER_RESTORED_NO_MEMBER = 1
 CAVALRY_CLUSTER_RESTORED_FROM_START = 2
 CAVALRY_CLUSTER_RESTORED_STATE = 3
@@ -142,6 +145,7 @@ class cavalry_cluster_entry_values_t(Structure):
         ("type", c_int32),
         ("leader_member_id", c_int32),
         ("timed_out", c_bool),
+        ("correlation_id", c_int64),
     ]
 
 
@@ -304,6 +308,8 @@ FUNCTIONS = {
     "cavalry_cluster_service_poll": (c_int, [c_void_p, c_void_p, cavalry_fragment_handler_t, c_void_p, c_size_t]),
     "cavalry_cluster_entry_values": (c_int, [c_void_p, POINTER(cavalry_cluster_entry_values_t)]),
     "cavalry_cluster_service_reply": (c_int, [c_void_p, c_int64, c_char_p, c_size_t]),
+    "cavalry_cluster_service_schedule_timer": (c_int, [c_void_p, c_int64, c_int64]),
+    "cavalry_cluster_service_cancel_timer": (c_int, [c_void_p, c_int64]),
     "cavalry_cluster_service_action": (c_int, [c_void_p, c_int32]),
     "cavalry_cluster_service_fault": (c_int, [c_void_p, POINTER(cavalry_fault_t)]),
     "cavalry_cluster_service_position": (c_int64, [c_void_p]),
@@ -397,6 +403,8 @@ PER_MESSAGE = (
     "cavalry_cluster_service_poll",
     "cavalry_cluster_entry_values",
     "cavalry_cluster_service_reply",
+    "cavalry_cluster_service_schedule_timer",
+    "cavalry_cluster_service_cancel_timer",
     "cavalry_cluster_service_action",
 )
 

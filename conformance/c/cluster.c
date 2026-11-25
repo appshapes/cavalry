@@ -1,9 +1,11 @@
-/* The C runner's cluster round (work item 229; spec/c-abi.md, versions 4 and 5; ADR
- * 0122, ADR 0123): a C program over crates/cavalry-ffi/include/cavalry.h that runs a
- * cluster's service beside each of three members and holds a session with the
- * cluster, and checks that one message is handed to all three services as the same
- * entry and answered once, by the service beside the leader, with the entry's term
- * and the cluster's time. conformance/c/run.sh starts the three members, builds,
+/* The C runner's cluster round (work item 229; spec/c-abi.md, versions 4, 5 and 7;
+ * ADR 0122, ADR 0123, ADR 0157): a C program over crates/cavalry-ffi/include/cavalry.h
+ * that runs a cluster's service beside each of three members and holds a session
+ * with the cluster, and checks that one message is handed to all three services as
+ * the same entry and answered once, by the service beside the leader, with the
+ * entry's term and the cluster's time; and that the timer each service's program
+ * schedules at that message is handed to all three once, with its id, at one
+ * position and no earlier than its deadline. conformance/c/run.sh starts the three members, builds,
  * links and runs it; just conformance runs that.
  *
  *     cluster-c <cluster directory> <members string> <response channel>
@@ -27,6 +29,10 @@
 #define WAIT_SECONDS 60
 #define MESSAGE "hello"
 #define MESSAGE_LENGTH 5
+/* The timer each service's program schedules when it takes the message: its id, and
+ * how long after the message's entry it is due, in the cluster's time. */
+#define TIMER_ID 7
+#define TIMER_AFTER_MS 50
 
 /* A bound on a wait, `milliseconds` from now. */
 static struct timespec after(long milliseconds) {
@@ -76,6 +82,11 @@ typedef struct {
     /* From inside the handler: a service's header carries no frame and no reply's
      * values, it carries its entry's position, and the poll holds its client. */
     int no_frame, no_reply_values, one_position, client_held;
+    /* The program's timer (spec/c-abi.md, version 7; ADR 0157): what the schedule
+     * answered, how many timers the handler was handed, and the last one's values. */
+    int scheduled;
+    int timers;
+    cavalry_cluster_entry_values_t timer;
 } served_t;
 
 /* The services' handler. It answers a session's message with its member's id, a colon
@@ -86,6 +97,11 @@ static void on_entry(void *clientd, const uint8_t *buffer, size_t length,
     cavalry_cluster_entry_values_t values;
     if (cavalry_cluster_entry_values(header, &values) != 0) fail("cavalry_cluster_entry_values");
     s->entries++;
+    if (values.type == CAVALRY_CLUSTER_ENTRY_TIMER) {
+        s->timers++;
+        s->timer = values;
+        return;
+    }
     if (values.type != CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE || values.session_id < 0) return;
     if (length > sizeof s->payload) wrong("a session message longer than this round sends");
     uint8_t answer[sizeof s->payload + 2];
@@ -112,6 +128,11 @@ static void on_entry(void *clientd, const uint8_t *buffer, size_t length,
                          cavalry_errcode() == CAVALRY_ERR_WRONG_HEADER;
     s->one_position = cavalry_committed_log_entry_position(header) == values.position;
     s->client_held = !cavalry_is_closed(s->client) && cavalry_errcode() == CAVALRY_ERR_POLLING;
+    /* The program's state changes at the entry it took: a timer, due a little after
+     * it. Every member's service makes the same call at the same entry. */
+    s->scheduled = cavalry_cluster_service_schedule_timer(s->service, TIMER_ID,
+                                                          values.timestamp + TIMER_AFTER_MS);
+    if (s->scheduled < 0) fail("cavalry_cluster_service_schedule_timer");
 }
 
 /* What the session's handler was handed. */
@@ -165,7 +186,7 @@ int main(int argc, char **argv) {
         CHECK(cavalry_init(&served[i].client, served[i].context));
         CHECK(cavalry_cluster_service(&served[i].service, served[i].client));
     }
-    /* The handler's two calls are for the handler: from here there is no entry. */
+    /* The handler's calls are for the handler: from here there is no entry. */
     if (cavalry_cluster_service_reply(served[0].service, 1, (const uint8_t *) "x", 1) != -1 ||
         cavalry_errcode() != CAVALRY_ERR_CLUSTER_NO_ENTRY)
         wrong("a reply from outside the handler was not refused with CAVALRY_ERR_CLUSTER_NO_ENTRY");
@@ -256,6 +277,47 @@ int main(int argc, char **argv) {
            "beside member %d\n",
            constants.session_id, served[leader].message.position,
            served[leader].message.leadership_term_id, leader);
+
+    /* 5b. The timer that each service's program scheduled at the message is handed to
+     * every service once, as an entry of its own kind with the timer's id, at one
+     * position, and at no time before its deadline (spec/c-abi.md, version 7;
+     * spec/cluster.md, "The service", "Timers"; ADR 0157). */
+    until = after(WAIT_SECONDS * 1000L);
+    while (served[0].timers == 0 || served[1].timers == 0 || served[2].timers == 0) {
+        if (passed(&until)) wrong("the timer was not handed to three services in 60 s");
+        cycle(served, session, &answered);
+    }
+    /* A second handing of the same event would come in this time. A second event,
+     * which a refresh of the leader's member can make a second later, is passed over
+     * by every service, the timer being pending no more. */
+    until = after(300);
+    while (!passed(&until)) cycle(served, session, &answered);
+    for (int i = 0; i < MEMBERS; i++) {
+        const served_t *s = &served[i];
+        if (s->scheduled != CAVALRY_CLUSTER_TIMER_SCHEDULED)
+            wrong("a service's schedule of its timer was not answered CAVALRY_CLUSTER_TIMER_SCHEDULED");
+        if (s->timers != 1) wrong("a service was handed its timer more than once");
+        if (s->timer.correlation_id != TIMER_ID) wrong("a service was handed another timer's id");
+        if (s->timer.position != served[0].timer.position ||
+            s->timer.timestamp != served[0].timer.timestamp)
+            wrong("the services were handed the timer at different positions or times");
+        if (s->timer.timestamp < s->message.timestamp + TIMER_AFTER_MS)
+            wrong("a service was handed the timer before its deadline");
+        if (s->timer.position <= s->message.position)
+            wrong("a service was handed the timer at or before the entry that scheduled it");
+    }
+    if (cavalry_cluster_service_schedule_timer(served[0].service, TIMER_ID, 0) != -1 ||
+        cavalry_errcode() != CAVALRY_ERR_CLUSTER_NO_ENTRY)
+        wrong("a schedule of a timer from outside the handler was not refused with "
+              "CAVALRY_ERR_CLUSTER_NO_ENTRY");
+    if (cavalry_cluster_service_cancel_timer(served[0].service, TIMER_ID) != -1 ||
+        cavalry_errcode() != CAVALRY_ERR_CLUSTER_NO_ENTRY)
+        wrong("a cancel of a timer from outside the handler was not refused with "
+              "CAVALRY_ERR_CLUSTER_NO_ENTRY");
+    printf("conformance/c: timer %d, scheduled by each service at the message for %d ms later, "
+           "handed to three services once, at position %" PRId64 ", %" PRId64 " ms after the message\n",
+           TIMER_ID, TIMER_AFTER_MS, served[0].timer.position,
+           served[0].timer.timestamp - served[0].message.timestamp);
 
     /* 6. The session before its client, and each service before its own. */
     CHECK(cavalry_cluster_session_close(session));

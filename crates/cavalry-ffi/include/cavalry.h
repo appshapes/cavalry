@@ -21,7 +21,7 @@
  `cavalry_context_init` passes to `cavalry_context_init_v` and the library compares
  with its own.
  */
-#define CAVALRY_ABI_VERSION 6
+#define CAVALRY_ABI_VERSION 7
 
 /*
  The images a subscription holds at most.
@@ -450,9 +450,8 @@
 #define CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM 4
 
 /*
- A committed entry that no leader of this version appends and a service of this
- version does nothing with: a timer event, a cluster action that suspends or
- resumes, or a membership change event.
+ A committed entry that a service of this version does nothing with: a cluster
+ action that suspends or resumes, or a membership change event.
  */
 #define CAVALRY_CLUSTER_ENTRY_OTHER 5
 
@@ -463,6 +462,27 @@
  version 5 of the ABI handed this entry over as.
  */
 #define CAVALRY_CLUSTER_ENTRY_SNAPSHOT 6
+
+/*
+ A committed entry: a timer of the program's is handed over, with its id in
+ `correlation_id`. Its event is in the log at or after its deadline, and the
+ handler is handed it once, at one position beside every member. 7, after the
+ kinds of version 6, which handed every timer event over as
+ `CAVALRY_CLUSTER_ENTRY_OTHER`.
+ */
+#define CAVALRY_CLUSTER_ENTRY_TIMER 7
+
+/*
+ A schedule of a timer: the timer is pending with the deadline given.
+ */
+#define CAVALRY_CLUSTER_TIMER_SCHEDULED 1
+
+/*
+ A schedule of a timer: the service holds 1,024 pending timers and the id is none
+ of them, so nothing changed. A program with more deadlines than that keeps them
+ in its own state and schedules one timer for the earliest.
+ */
+#define CAVALRY_CLUSTER_TIMER_REFUSED 2
 
 /*
  A service's start: the driver hosts no cluster member that has a log yet. Call
@@ -678,6 +698,12 @@ typedef struct {
    session timeout, and not the client; `false` for every other entry.
    */
   bool timed_out;
+  /*
+   The id of the timer that is handed over, for an entry whose `type` is
+   `CAVALRY_CLUSTER_ENTRY_TIMER`: the id the program scheduled it with. 0 for
+   every other entry, where it says nothing: a program may give a timer any id.
+   */
+  int64_t correlation_id;
 } cavalry_cluster_entry_values_t;
 
 /*
@@ -1211,7 +1237,14 @@ int cavalry_cluster_service(cavalry_cluster_service_t **service,
  opens the member's log, follows the log's sessions, and holds a publication to
  each open session while the service answers. Those are commands sent with
  `client`, which the poll holds for its run: none of them is sent, and nothing is
- allocated, for a session message.
+ allocated, for a session message. Once in a service's life the poll sends six
+ more at the most, its five counters and its publication to its member, after the
+ entries of the poll in which its program first schedules a timer or the service
+ first passes a timer event over, where a snapshot has not added them already; the
+ driver's refusal of one is that poll's error, after the entries the handler took
+ are taken. A timer event whose timer is not pending, or not yet due, is handed to
+ no handler: the service takes it, so it is among the entries the poll's count
+ holds, and a poll may return more than its handler was called.
 
  A poll with a closed `client`, as when the member's driver has stopped, is −1 with
  `CAVALRY_ERR_CLOSED`, whatever the service held and whatever the poll was doing
@@ -1269,6 +1302,55 @@ int cavalry_cluster_service_reply(cavalry_cluster_service_t *service,
                                   int64_t session_id,
                                   const uint8_t *buffer,
                                   size_t length);
+
+/*
+ From inside the service's handler: schedules the timer `correlation_id`, any id
+ the program chooses, for `deadline` in the cluster's time, the clock of an entry's
+ `timestamp`, as the Rust `Replies::schedule_timer` does (`spec/cluster.md`, "The
+ service", "Timers"; ADR 0151). When that time has come the leader appends a timer
+ event, and the handler is handed an entry whose `type` is
+ `CAVALRY_CLUSTER_ENTRY_TIMER` and whose `correlation_id` is this id, once, at one
+ position beside every member. A deadline at or before the entry's time is due at
+ once, and a schedule of an id that is pending sets its deadline and makes no
+ second timer. Returns `CAVALRY_CLUSTER_TIMER_SCHEDULED`, or
+ `CAVALRY_CLUSTER_TIMER_REFUSED` where the service holds its 1,024 pending timers
+ and the id is none of them, which changes nothing: a program with more deadlines
+ than that keeps them in its own state and schedules one timer for the earliest.
+ The checks run in this order and stop at the first refusal: a null `service` is
+ −1 with `CAVALRY_ERR_NULL`; then a call from outside the handler is −1 with
+ `CAVALRY_ERR_CLUSTER_NO_ENTRY`, whatever its arguments. Nothing here allocates,
+ and nothing waits: the service tells its member after the handler has taken the
+ entry, and a handler that aborts its entry is handed it again with every timer as
+ it was before that handling.
+
+ A program schedules its first timer only once every member of its cluster, with
+ the service beside it, runs version 2 of the cluster protocol (`spec/cluster.md`,
+ "Versions and the upgrade").
+
+ # Safety
+
+ `service` is null or a live handle, and the call is made by the thread that polls
+ it or by no poll's handler at all.
+ */
+int cavalry_cluster_service_schedule_timer(cavalry_cluster_service_t *service,
+                                           int64_t correlation_id,
+                                           int64_t deadline);
+
+/*
+ From inside the service's handler: the timer `correlation_id` is pending no more,
+ as after the Rust `Replies::cancel_timer`: its event, where the log holds one, is
+ handed to no program. A timer that is not pending is no error. Returns 0. The
+ checks are `cavalry_cluster_service_schedule_timer`'s, in the same order: a null
+ `service` is −1 with `CAVALRY_ERR_NULL`; then a call from outside the handler is
+ −1 with `CAVALRY_ERR_CLUSTER_NO_ENTRY`. Nothing here allocates, and nothing waits.
+
+ # Safety
+
+ `service` is null or a live handle, and the call is made by the thread that polls
+ it or by no poll's handler at all.
+ */
+int cavalry_cluster_service_cancel_timer(cavalry_cluster_service_t *service,
+                                         int64_t correlation_id);
 
 /*
  From inside the service's handler: says what the handler does with the entry it

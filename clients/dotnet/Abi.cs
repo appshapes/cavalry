@@ -23,7 +23,7 @@ public static unsafe partial class Abi
     internal const string Library = "cavalry_ffi";
 
     public const string DIR_ENV = "CAVALRY_DIR"; // CAVALRY_DIR_ENV
-    public const int ABI_VERSION = 6; // CAVALRY_ABI_VERSION
+    public const int ABI_VERSION = 7; // CAVALRY_ABI_VERSION
     public const int MAX_IMAGES = 256; // CAVALRY_MAX_IMAGES
     public const int SERVICE_LOG_STREAM_ID = 104; // CAVALRY_SERVICE_LOG_STREAM_ID
     public const int NULL_POSITION = -1; // CAVALRY_NULL_POSITION
@@ -107,6 +107,9 @@ public static unsafe partial class Abi
     public const int CLUSTER_ENTRY_NEW_LEADERSHIP_TERM = 4; // CAVALRY_CLUSTER_ENTRY_NEW_LEADERSHIP_TERM
     public const int CLUSTER_ENTRY_OTHER = 5; // CAVALRY_CLUSTER_ENTRY_OTHER
     public const int CLUSTER_ENTRY_SNAPSHOT = 6; // CAVALRY_CLUSTER_ENTRY_SNAPSHOT
+    public const int CLUSTER_ENTRY_TIMER = 7; // CAVALRY_CLUSTER_ENTRY_TIMER
+    public const int CLUSTER_TIMER_SCHEDULED = 1; // CAVALRY_CLUSTER_TIMER_SCHEDULED
+    public const int CLUSTER_TIMER_REFUSED = 2; // CAVALRY_CLUSTER_TIMER_REFUSED
     public const int CLUSTER_RESTORED_NO_MEMBER = 1; // CAVALRY_CLUSTER_RESTORED_NO_MEMBER
     public const int CLUSTER_RESTORED_FROM_START = 2; // CAVALRY_CLUSTER_RESTORED_FROM_START
     public const int CLUSTER_RESTORED_STATE = 3; // CAVALRY_CLUSTER_RESTORED_STATE
@@ -137,6 +140,7 @@ public static unsafe partial class Abi
         public int type;
         public int leader_member_id;
         public byte timed_out;
+        public long correlation_id;
     }
 
     /// <summary>`cavalry_fault_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills, laid out as C lays it out.</summary>
@@ -325,6 +329,12 @@ public static unsafe partial class Abi
 
     [LibraryImport(Library)]
     internal static partial int cavalry_cluster_service_reply(nint service, long session_id, byte* buffer, nuint length);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_cluster_service_schedule_timer(nint service, long correlation_id, long deadline);
+
+    [LibraryImport(Library)]
+    internal static partial int cavalry_cluster_service_cancel_timer(nint service, long correlation_id);
 
     [LibraryImport(Library)]
     internal static partial int cavalry_cluster_service_action(nint service, int action);

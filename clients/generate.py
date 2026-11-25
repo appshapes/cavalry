@@ -53,6 +53,8 @@ PER_MESSAGE = (
     "cavalry_cluster_service_poll",
     "cavalry_cluster_entry_values",
     "cavalry_cluster_service_reply",
+    "cavalry_cluster_service_schedule_timer",
+    "cavalry_cluster_service_cancel_timer",
     "cavalry_cluster_service_action",
 )
 
@@ -1338,7 +1340,8 @@ class ClusterService:
     `memoryview` into the log valid for the call and empty for every other entry;
     `entry` is the one `cavalry_cluster_entry_values_t` this object keeps, filled for
     each entry, with its `position`, `leadership_term_id`, `timestamp`, `session_id`,
-    `type`, one of `CAVALRY_CLUSTER_ENTRY_*`, `leader_member_id` and `timed_out`; and
+    `type`, one of `CAVALRY_CLUSTER_ENTRY_*`, `leader_member_id`, `timed_out` and
+    `correlation_id`, a timer's id for an entry of the type `CAVALRY_CLUSTER_ENTRY_TIMER`; and
     `service` is this object, for `service.reply(session_id, message)`. What the handler
     returns says what becomes of the entry: None or `CONTINUE` takes it and the poll goes
     on, `BREAK` takes it and ends the poll, and `ABORT` leaves it, ends the poll, and has

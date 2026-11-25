@@ -153,7 +153,9 @@ opens the member's log when the member has one, and calls
   It has no bytes for every other entry.
 - `entry` is a `ClusterEntryValues`: `entry.type()`, one of
   `Abi.CLUSTER_ENTRY_SESSION_MESSAGE`, `_SESSION_OPEN`, `_SESSION_CLOSE`,
-  `_NEW_LEADERSHIP_TERM`, `_OTHER` and `_SNAPSHOT`; `entry.position()`;
+  `_NEW_LEADERSHIP_TERM`, `_OTHER`, `_SNAPSHOT` and `_TIMER`, a timer of the program's
+  with its id in `entry.correlationId()`, which this package's programs are handed
+  none of yet, since it does not wrap the calls that schedule one; `entry.position()`;
   `entry.leadershipTermId()`;
   `entry.timestamp()`, the cluster's time, the one clock a service reads, so that
   every member's service reaches the same state; `entry.sessionId()`, −1 where the
