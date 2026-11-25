@@ -303,8 +303,9 @@ export class ClusterEntryValues {
   readonly type: number | undefined;
   readonly leaderMemberId: number | undefined;
   readonly timedOut: boolean | undefined;
-  /** A timer's id, for an entry of the type `constants.CAVALRY_CLUSTER_ENTRY_TIMER`. */
-  readonly correlationId: number | undefined;
+  /** A timer's id, for an entry of the type `constants.CAVALRY_CLUSTER_ENTRY_TIMER`: a
+   * BigInt, exact over the whole int64 range, since it is any id the program chose. */
+  readonly correlationId: bigint | undefined;
 }
 
 export class ClusterService {

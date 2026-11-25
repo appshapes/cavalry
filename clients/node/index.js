@@ -1064,7 +1064,8 @@ class ClusterEntryValues {
    * it says nothing. The addon's trampoline reads them all with one ABI call,
    * `cavalry_cluster_entry_values`, into the struct it keeps for the service, before the
    * handler runs, and each getter reads one of them through the addon; outside the call every
-   * getter is undefined. `timedOut` is a boolean and the rest are numbers. */
+   * getter is undefined. `timedOut` is a boolean, `correlationId` is a BigInt, since a
+   * timer's id is any int64 its program chose, and the rest are numbers. */
   constructor(state) { this._state = state; }
   get position() { return addon.entryField(this._state, 0); }
   get leadershipTermId() { return addon.entryField(this._state, 1); }

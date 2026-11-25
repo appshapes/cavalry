@@ -1225,7 +1225,7 @@ static napi_value fn_entryField(napi_env env, napi_callback_info info) {
       case 4: return make_int32(env, s->entry.type);
       case 5: return make_int32(env, s->entry.leader_member_id);
       case 6: return make_bool(env, s->entry.timed_out);
-      case 7: return make_int64(env, s->entry.correlation_id);
+      case 7: return make_bigint64(env, s->entry.correlation_id);
       default: break;
     }
   }
@@ -2013,7 +2013,8 @@ class ClusterEntryValues {
    * it says nothing. The addon's trampoline reads them all with one ABI call,
    * `cavalry_cluster_entry_values`, into the struct it keeps for the service, before the
    * handler runs, and each getter reads one of them through the addon; outside the call every
-   * getter is undefined. `timedOut` is a boolean and the rest are numbers. */
+   * getter is undefined. `timedOut` is a boolean, `correlationId` is a BigInt, since a
+   * timer's id is any int64 its program chose, and the rest are numbers. */
   constructor(state) { this._state = state; }
   get position() { return addon.entryField(this._state, 0); }
   get leadershipTermId() { return addon.entryField(this._state, 1); }
@@ -2430,8 +2431,9 @@ export class ClusterEntryValues {
   readonly type: number | undefined;
   readonly leaderMemberId: number | undefined;
   readonly timedOut: boolean | undefined;
-  /** A timer's id, for an entry of the type `constants.CAVALRY_CLUSTER_ENTRY_TIMER`. */
-  readonly correlationId: number | undefined;
+  /** A timer's id, for an entry of the type `constants.CAVALRY_CLUSTER_ENTRY_TIMER`: a
+   * BigInt, exact over the whole int64 range, since it is any id the program chose. */
+  readonly correlationId: bigint | undefined;
 }
 
 export class ClusterService {

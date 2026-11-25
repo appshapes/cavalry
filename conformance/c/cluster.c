@@ -186,7 +186,7 @@ int main(int argc, char **argv) {
         CHECK(cavalry_init(&served[i].client, served[i].context));
         CHECK(cavalry_cluster_service(&served[i].service, served[i].client));
     }
-    /* The handler's two calls are for the handler: from here there is no entry. */
+    /* The handler's calls are for the handler: from here there is no entry. */
     if (cavalry_cluster_service_reply(served[0].service, 1, (const uint8_t *) "x", 1) != -1 ||
         cavalry_errcode() != CAVALRY_ERR_CLUSTER_NO_ENTRY)
         wrong("a reply from outside the handler was not refused with CAVALRY_ERR_CLUSTER_NO_ENTRY");

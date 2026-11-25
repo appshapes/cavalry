@@ -396,10 +396,11 @@ runners'.
 
 ### The call
 
-The package opens the library twice, which the loader maps once. The sixteen
+The package opens the library twice, which the loader maps once. The eighteen
 per-message functions of `crates/cavalry-ffi/README.md`, a committed log's poll and an
 entry's position, a cluster session's offer, its poll and a reply's values, and a
-cluster service's poll, an entry's values, its reply and its action among them, come
+cluster service's poll, an entry's values, its reply, its action and the two calls
+of its timers among them, come
 through `ctypes.PyDLL`,
 which keeps the GIL held across the foreign call, so an offer, a claim, a commit or
 abort and a poll's call-backs run with no GIL release and re-acquire pair per message.

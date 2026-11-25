@@ -168,7 +168,7 @@ service)` for each committed entry, in order:
 - `entry` carries the entry's values: `entry.type`, one of
   `constants.CAVALRY_CLUSTER_ENTRY_SESSION_MESSAGE`, `_SESSION_OPEN`,
   `_SESSION_CLOSE`, `_NEW_LEADERSHIP_TERM`, `_OTHER`, `_SNAPSHOT` and `_TIMER`, a timer
-  of the program's with its id in `entry.correlationId`, which this package's programs
+  of the program's with its id in `entry.correlationId`, a BigInt, which this package's programs
   are handed none of yet, since it does not wrap the calls that schedule one;
   `entry.position`;
   `entry.leadershipTermId`; `entry.timestamp`, the cluster's time, the one clock a

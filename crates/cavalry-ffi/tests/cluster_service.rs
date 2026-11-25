@@ -1498,7 +1498,7 @@ fn a_service_refuses_what_the_page_says_and_outlives_its_client() {
             (0, 0, CAVALRY_NULL_POSITION)
         );
 
-        // The handler's two calls, from outside a handler: no entry to answer. The
+        // The handler's calls, from outside a handler: no entry to answer. The
         // page's order: a null comes first, then the call from outside the handler,
         // whatever its other arguments, then an action that is none.
         assert_eq!(

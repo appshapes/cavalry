@@ -1547,7 +1547,7 @@ class NodePackage(unittest.TestCase):
         for i, (field, make) in enumerate((("position", "make_int64"), ("leadership_term_id", "make_int64"),
                                            ("timestamp", "make_int64"), ("session_id", "make_int64"),
                                            ("type", "make_int32"), ("leader_member_id", "make_int32"),
-                                           ("timed_out", "make_bool"), ("correlation_id", "make_int64"))):
+                                           ("timed_out", "make_bool"), ("correlation_id", "make_bigint64"))):
             self.assertIn(f"      case {i}: return {make}(env, s->entry.{field});", entry)
         # Every field of the two structs has its getter: a field the header gains is a
         # getter to add.

@@ -279,8 +279,9 @@ pub unsafe extern "C" fn cavalry_cluster_service(
 /// each open session while the service answers. Those are commands sent with
 /// `client`, which the poll holds for its run: none of them is sent, and nothing is
 /// allocated, for a session message. Once in a service's life the poll sends six
-/// more, its five counters and its publication to its member, after its program
-/// first schedules a timer or the service first passes a timer event over; the
+/// more at the most, its five counters and its publication to its member, after the
+/// entries of the poll in which its program first schedules a timer or the service
+/// first passes a timer event over, where a snapshot has not added them already; the
 /// driver's refusal of one is that poll's error, after the entries the handler took
 /// are taken. A timer event whose timer is not pending, or not yet due, is handed to
 /// no handler: the service takes it, so it is among the entries the poll's count
