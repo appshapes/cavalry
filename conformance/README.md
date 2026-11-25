@@ -241,8 +241,12 @@ production have run, constants of the script: 620a2e29, the pin of Brigade's ser
 0.9.0, which they ran until 2026-11-24, and d265af82, the pin of server 0.10.0, which
 they run since. `CAVALRY_DIRECTORY_FROM=<commit>` names one other in their place, which
 writes one directory alone, in the pinned shape or, with
-`CAVALRY_DIRECTORY_SHAPE=moved-to`, in server 0.10.0's. ADR 0141 says when a tree is
-added.
+`CAVALRY_DIRECTORY_SHAPE=moved-to`, in server 0.10.0's. On CI's macOS runner the script
+builds 620a2e29 alone and writes server 0.9.0's directory alone, as it did before work
+item 441: with the three directories written all seven ways, that runner lost
+communication with GitHub partway through `just conformance` in 2 of its first 4 jobs.
+Linux, which the servers in production run, writes all seven, and work item 441 stays
+open until macOS does again. ADR 0141 says when a tree is added.
 [ADR 0156](../docs/decisions/0156-hold-in-the-upgrade-gate-every-directory-a-server-holds-each-trees-alone-and-the-trees-in-turn.md)
 says when it goes, in place of ADR 0141's rule for that.
 Each older tree is exported with `git archive` into `target/upgrade/<its first 8 hex
