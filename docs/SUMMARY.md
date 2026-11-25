@@ -52,6 +52,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [C ABI](reference/c-abi.md)
 - [Cluster protocol](reference/cluster.md)
 - [Configuration](reference/config.md)
+- [Decisions, by what each decided](reference/decisions.md)
 - [Glossary](glossary.md)
 
 # Decisions
@@ -221,3 +222,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0162. Refuse in a generated client an integer argument its parameter cannot hold, before the ABI is called](decisions/0162-refuse-in-a-generated-client-an-integer-argument-its-parameter-cannot-hold-before-the-abi-is-called.md)
 - [0163. Clear a vote floor only on a leader's answer to the present run](decisions/0163-clear-a-vote-floor-only-on-a-leaders-answer-to-the-present-run.md)
 - [0164. Refuse a count below zero in the Go, the JVM and the .NET client, before the ABI is called](decisions/0164-refuse-a-count-below-zero-in-the-go-the-jvm-and-the-dotnet-client-before-the-abi-is-called.md)
+- [0165. Index the decisions in the book's search by what each decided, and leave their pages out](decisions/0165-index-the-decisions-in-the-books-search-by-what-each-decided-and-leave-their-pages-out.md)

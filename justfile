@@ -32,7 +32,9 @@ test *ARGS: test-scripts
 # and a fake `gh` (card 262), and the counters lint's reading of the counters that a
 # sentence of counters.toml names (work item 230), and the script that points Brigade's
 # server at this tree, against a made-up checkout and a fake `cargo`, with the nightly
-# workflow that runs it (work item 362). Standard library only, no network.
+# workflow that runs it (work item 362), and the book's pages of the decisions and the
+# check of its search index, on a made-up book and made-up indexes (work item 474).
+# Standard library only, no network.
 test-scripts:
     python3 scripts/release-notes-email-test.py
     python3 scripts/release-notes-test.py
@@ -44,6 +46,7 @@ test-scripts:
     python3 scripts/brigade-server-patch-test.py
     python3 scripts/tidy-test.py
     python3 scripts/gen-counters-test.py
+    python3 scripts/decisions-index-test.py
     python3 clients/generate-test.py
     python3 clients/lint-test.py
 
@@ -228,10 +231,16 @@ lint-config:
     python3 scripts/gen-config.py --check
 
 # rustdoc with warnings denied; the mdBook under target/book with any warning denied;
-# the book's Rust code blocks; and every relative link and anchor in docs/ and the
-# READMEs (scripts/lint-docs.py links). External links are `just docs-links`, not a
-# gate: a site going down is not a bug in this repository (ADR 0006). The mdbook
-# version named below is the one CI pins in .github/workflows/ci.yml; bump both.
+# the built book's search index (scripts/decisions-index.py --check; ADR 0165): every
+# decision is found by its number, its title and the words of its Decision section,
+# through the pages the book's preprocessor makes, no decision's own page is in the
+# index, and the index's file is under an early bound set well under the size at which
+# mdBook warns, with the size printed on every run; the book's Rust code blocks; and
+# every relative link and anchor in docs/ and the READMEs (scripts/lint-docs.py links).
+# External links are `just docs-links`, not a gate: a site going down is not a bug in
+# this repository (ADR 0006). The mdbook version named below is the one CI pins in
+# .github/workflows/ci.yml; bump both, and scripts/decisions-index.py reads that
+# version's search index.
 docs:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -240,6 +249,7 @@ docs:
     out=$(mdbook build 2>&1) || { printf '%s\n' "$out" >&2; exit 1; }
     printf '%s\n' "$out"
     if grep -qE '(^ *|\[)(WARN|ERROR)(\]| )' <<<"$out"; then echo "docs: mdbook warned; warnings are denied" >&2; exit 1; fi
+    python3 scripts/decisions-index.py --check target/book
     mdbook test
     python3 scripts/lint-docs.py links
 
