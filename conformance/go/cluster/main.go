@@ -1,5 +1,5 @@
-// The Go client's cluster round (spec/c-abi.md, versions 4 and 5; ADR 0122, ADR 0123, ADR
-// 0124): Client.ClusterService and ClusterService beside each of three cluster members
+// The Go client's cluster round (spec/c-abi.md, versions 4, 5 and 7; ADR 0122, ADR 0123,
+// ADR 0124, ADR 0157): Client.ClusterService and ClusterService beside each of three cluster members
 // that conformance/go/run.sh started with `cavalry run`, and Client.ConnectCluster and
 // ClusterSession on the runner's first driver, the one at CAVALRY_DIR, as
 // conformance/python/cluster.py runs it through clients/python.
@@ -756,23 +756,30 @@ func main() {
 	// type with the timers' ids, at one position each and none earlier than its deadline,
 	// and the cancelled one to none. Step 10 holds the "once" for a timer refresh interval
 	// and more. From outside the handler both calls are refused: the thread's error, set
-	// to another code first, and the service's Err both say so.
+	// to another code first, and the service's Err both say so. Err is kept until the next
+	// failure, so it must name the ABI function of this call, and not the one before it.
 	for _, call := range []struct {
-		name   string
-		answer func() int32
+		name, function string
+		answer         func() int32
 	}{
-		{"ScheduleTimer", func() int32 { return services[0].service.ScheduleTimer(1, 1) }},
-		{"CancelTimer", func() int32 { return services[0].service.CancelTimer(1) }},
+		{"ScheduleTimer", "cavalry_cluster_service_schedule_timer",
+			func() int32 { return services[0].service.ScheduleTimer(1, 1) }},
+		{"CancelTimer", "cavalry_cluster_service_cancel_timer",
+			func() int32 { return services[0].service.CancelTimer(1) }},
 	} {
 		runtime.LockOSThread()
 		setAnotherError()
 		answer, thread := call.answer(), cavalry.Errcode()
 		runtime.UnlockOSThread()
-		kept := services[0].service.Err()
-		if answer != -1 || thread != cavalry.ErrClusterNoEntry || codeOf(kept) != cavalry.ErrClusterNoEntry ||
-			!strings.Contains(fmt.Sprint(kept), "timer") {
+		var kept *cavalry.Error
+		if !errors.As(services[0].service.Err(), &kept) {
+			kept = &cavalry.Error{}
+		}
+		if answer != -1 || thread != cavalry.ErrClusterNoEntry || kept.Code != cavalry.ErrClusterNoEntry ||
+			kept.Fn != call.function {
 			fail("%s from outside the handler answered %d with the thread's error %d and Err %v, not -1 with "+
-				"ErrClusterNoEntry as both, Err naming the timer's function", call.name, answer, thread, kept)
+				"ErrClusterNoEntry as both, Err that of %s", call.name, answer, thread, services[0].service.Err(),
+				call.function)
 		}
 	}
 	offer(session, timerMessage, services, a)

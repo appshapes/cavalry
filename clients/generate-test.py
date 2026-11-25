@@ -2344,7 +2344,7 @@ class GoPackage(unittest.TestCase):
     def test_a_cluster_services_trampoline_passes_the_action_on_and_aborts_what_the_abi_refuses(self):
         """Invariant 1, for a cluster service in the Go client (ADR 0124). shim.c is compiled
         with the runner's `cc` against GO_SHIM_HARNESS, a stand-in for the ABI and for the
-        Go side. The service's trampoline reads the entry's seven values in C and hands
+        Go side. The service's trampoline reads the entry's eight values in C and hands
         them to the Go side, and passes the ABI the action the Go side returned:
         CAVALRY_ACTION_CONTINUE makes no call, CAVALRY_ACTION_BREAK takes the entry and ends
         the poll, and CAVALRY_ACTION_ABORT, the handler's own or the Go side's answer for a

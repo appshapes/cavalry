@@ -553,9 +553,10 @@ of its timers after that, each pending timer again every second among it, is
 offered and waits for nothing. The runner's cluster round reports the waits. On this
 laptop (Apple M5 Pro), in each of 10 runs, 7 of about 42,600 polls of three services
 took over 1 ms, where 4 of about 17,900 did in each of 25 runs before the round
-scheduled a timer. The report names the longest poll alone: in every run it was a poll in which a service's program first scheduled a timer, 22.7 to 37.8 ms with its six commands, where
-the longest before, in 23 of the 25 runs a poll that opened a member's log, took 7.2
-to 11.5 ms. The program's other goroutines run meanwhile.
+scheduled a timer. The report names the longest poll alone: in every run it was a
+poll in which a service's program first scheduled a timer, 22.7 to 37.8 ms with its
+six commands, where the longest before, in 23 of the 25 runs a poll that opened a
+member's log, took 7.2 to 11.5 ms. The program's other goroutines run meanwhile.
 
 ### Threads
 

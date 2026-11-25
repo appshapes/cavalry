@@ -571,7 +571,7 @@ func TestTheEntryTrampolineHandsThePositionOnAndCallsNoHandlerForASlotTheTableDo
 // one past the table and an empty slot call no handler, and an entry there is answered
 // ActionAbort, since no handler took it. A session's slot hands its handler the reply's
 // two values in the one struct the session keeps. A service's slot hands its handler the
-// entry's seven values in the one struct the service keeps, and the service, and answers
+// entry's eight values in the one struct the service keeps, and the service, and answers
 // what the handler returned, whatever it is: the C trampoline passes it to the ABI, which
 // refuses what is no action. A handler that panics is counted, with its value kept, and
 // its entry is answered ActionAbort; and a slot of another kind, a session's for an entry
@@ -846,7 +846,7 @@ func cavalryGoReply(slot C.uintptr_t, buffer *C.uint8_t, length C.size_t, leader
 }
 
 // cavalryGoClusterEntry is the fragment handler of a cluster service's poll: slot is the
-// service's 1-based index in the table, and the seven values are the entry's, which the C
+// service's 1-based index in the table, and the eight values are the entry's, which the C
 // trampoline read from the header before it called here, so this function makes no cgo
 // call. It writes them into the one ClusterEntryValues the service keeps, and returns the
 // entry's action, which the C trampoline passes to the ABI: what the handler returned, or
@@ -1614,12 +1614,12 @@ type EntryHandler func(body []byte, header *Header, position int64)
 // values.
 type ReplyHandler func(body []byte, reply *ClusterReplyValues)
 
-// ServiceHandler receives each committed entry a cluster service's poll hands over: body
-// is a session message's payload, a slice into the log, valid for the call, and nil for
-// every other entry; entry is the entry's values; and service is the service that was
-// polled, for its Reply. What it returns is the entry's action: ActionContinue takes the
-// entry and the poll goes on, ActionBreak takes it and ends the poll, and ActionAbort
-// leaves it, ends the poll, and has the next poll hand it over again.
+// ServiceHandler receives each committed entry a cluster service's poll hands over: body is a
+// session message's payload, a slice into the log, valid for the call, and nil for every other
+// entry; entry is the entry's values; and service is the service that was polled, for its
+// Reply, ScheduleTimer and CancelTimer. What it returns is the entry's action: ActionContinue
+// takes the entry and the poll goes on, ActionBreak takes it and ends the poll, and
+// ActionAbort leaves it, ends the poll, and has the next poll hand it over again.
 type ServiceHandler func(body []byte, entry *ClusterEntryValues, service *ClusterService) int32
 
 // ClusterReplyValues is what a reply carries beside its payload, as
@@ -2322,8 +2322,9 @@ func (v *ClusterService) CancelTimer(correlationID int64) int32 {
 // log yet (or -1, with Err saying why: a fault, which Fault reads; ErrClosed for a client
 // that its driver closed, as when the member's driver has stopped, which Fault reads too
 // and every poll after it answers again, so that a program's loop ends on it; or, with Fault
-// left as it was, ErrPolling for a poll from inside a handler of this service, which the
-// ABI refuses and which touches nothing here). A timer event whose timer is not pending, or
+// left as it was, ErrNull for a poll after the program's own Client.Close, which freed the
+// client, and ErrPolling for a poll from inside a handler of this service, which the ABI
+// refuses and which touches nothing here). A timer event whose timer is not pending, or
 // not yet due, is taken and handed to no handler, so the count may be more than the handler
 // was called. The poll is the service's duty cycle: it opens the member's log, follows the
 // log's sessions, and holds a publication to each open session while the service answers.
