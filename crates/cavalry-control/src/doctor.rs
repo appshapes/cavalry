@@ -1021,10 +1021,13 @@ fn counters_checks(
     }
     // The adds held behind an endpoint that is closing each take a slot of their
     // registry until they run (ADR 0049, ADR 0153, ADR 0154), so a registry can refuse
-    // an add with code 10 while fewer are registered than it holds. A wait is one
-    // receiver or sender cycle while the driver keeps up, so a held add seen here at all
-    // is a thread that is behind. The gauges say what holds now, so a driver that has
-    // stopped has nothing held, whatever it left in them.
+    // an add with code 10 while fewer are registered than it holds. A wait is a
+    // receiver or sender cycle or a few while the driver keeps up, so a held add seen
+    // here at all is a thread that is behind. The gauges say what holds now, so a driver
+    // that has stopped has nothing held, whatever it left in them. And they say nothing
+    // of what was held at an earlier refusal: `driver.registry_full` counts every
+    // code 10 since the driver started, so the finding never says a held add took a
+    // slot from a past refusal, only that one can have.
     if running {
         let mut registry_full = None;
         for (name, id, command, registry, holder) in [
@@ -1065,9 +1068,11 @@ fn counters_checks(
             let refused = if full > 0 {
                 format!(
                     "; driver.registry_full is {full}, so an add was refused with code 10 since \
-                     the driver started: if its message named the {registry} registry, these \
-                     held adds took part of its slots, and closing what is not used frees the \
-                     rest"
+                     the driver started: if its message named the {registry} registry, that \
+                     refusal may have come while fewer were registered than the registry \
+                     holds, since held adds take slots too, but the counters do not say \
+                     whether an add was held when it came; closing what is not used frees \
+                     slots either way"
                 )
             } else {
                 String::new()
@@ -1082,12 +1087,12 @@ fn counters_checks(
                 level: Level::Warn,
                 message: format!(
                     "{held} `{command}` {commands} {wait} now for {holder} to close, {holding} a \
-                     slot of the {registry} registry{refused}; a wait lasts one receiver or \
-                     sender cycle while the driver keeps up, and is refused with code 4 at the \
-                     closing endpoint wait, so a held add seen here is a driver thread that is \
-                     behind: give the driver's threads the CPU they need; if a recording of a \
-                     retired image or of a closed publication has not stopped, check \
-                     recording.write_failed and the log directory's disk"
+                     slot of the {registry} registry{refused}; a wait lasts a receiver or \
+                     sender cycle or a few while the driver keeps up, and is refused with \
+                     code 4 at the closing endpoint wait, so a held add seen here is a driver \
+                     thread that is behind: give the driver's threads the CPU they need; if a \
+                     recording of a retired image or of a closed publication has not stopped, \
+                     check recording.write_failed and the log directory's disk"
                 ),
                 doc: DOC_HELD_ADDS,
             });
@@ -5339,11 +5344,14 @@ mod tests {
 
     /// The adds held behind a closing endpoint (ADR 0049, ADR 0153, ADR 0154; work item
     /// 452): none held, no finding; held in either registry, a warning that names how
-    /// many, what holds them, the registry slot each takes and what to do; and with
-    /// `driver.registry_full` above 0 beside them, the warning says that a code 10 on
-    /// that registry is the held adds' and not the registrations'.
+    /// many, what holds them, the registry slot each takes and what to do; with
+    /// `driver.registry_full` above 0 beside them, the warning says that a code 10 naming
+    /// that registry may have come while fewer were registered, and that the counters do
+    /// not say whether an add was held then, since the gauges count what is held now and
+    /// `driver.registry_full` every refusal since the driver started; and nothing once the
+    /// driver has stopped.
     #[test]
-    fn held_adds_are_a_finding_that_tells_a_registry_full_of_them_from_one_of_registrations() {
+    fn held_adds_are_a_warning_that_names_their_registry_and_what_to_do() {
         let dir = TestDir::new("held-adds");
         let counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
@@ -5396,9 +5404,12 @@ mod tests {
                 "1 `add publication` command waits now for a receive endpoint on the \
                  publication's control address whose last subscription was removed to close, \
                  holding a slot of the publications registry; driver.registry_full is 2"
-            ) && publications
-                .message
-                .contains("if its message named the publications registry, these held adds took part of its slots"),
+            ) && publications.message.contains(
+                "if its message named the publications registry, that refusal may have come \
+                 while fewer were registered than the registry holds, since held adds take \
+                 slots too, but the counters do not say whether an add was held when it came; \
+                 closing what is not used frees slots either way"
+            ) && !publications.message.contains("took part of its slots"),
             "{}",
             publications.message
         );
