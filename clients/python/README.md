@@ -221,7 +221,9 @@ while restored == cavalry.CAVALRY_CLUSTER_RESTORED_NO_MEMBER:
 if state is not None:
     load(state)                        # the program's own: bytes to its state
 while running:
-    service.poll(on_entry, 10)
+    if service.poll(on_entry, 10) < 0:
+        report(service.fault())        # the poll stopped: (code, session_id, position)
+        break
     if service.snapshot_due() is not None:
         try:
             service.snapshot(dump())   # the program's own: its state to bytes
@@ -229,6 +231,11 @@ while running:
             report(failed)             # nothing committed is lost: poll on, and the
                                        # next request asks again
 ```
+
+A poll that returns −1 has stopped, and the loop ends on it: code 102,
+`CAVALRY_ERR_CLOSED`, is the close of the service's client, which every poll after it
+answers again, as when the member's driver has stopped (ADR 0155). A loop that does
+not look at what the poll returned polls a stopped driver for ever.
 
 The state must be a function of the entries the handler was handed, and of nothing
 else: every member's service gives its own, and a start from any of them must reach
