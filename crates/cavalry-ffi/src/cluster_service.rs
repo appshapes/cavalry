@@ -254,8 +254,8 @@ pub unsafe extern "C" fn cavalry_cluster_service(
 
 /// Reads up to `fragment_limit` committed entries of the member's log and hands
 /// `handler` each, with `clientd`; returns the entries the handler took, or −1 with
-/// the error and in `cavalry_cluster_service_fault`; 0 while the driver hosts no
-/// member that has a log yet. A session message's payload is the handler's `buffer`
+/// the error and in `cavalry_cluster_service_fault`; 0 while the driver, one that
+/// runs, hosts no member that has a log yet. A session message's payload is the handler's `buffer`
 /// and `length`, and every other entry has a `length` of 0. The header carries the
 /// entry's values, which `cavalry_cluster_entry_values` fills. From inside the
 /// handler `cavalry_cluster_service_reply` answers a session and
@@ -899,7 +899,9 @@ pub unsafe extern "C" fn cavalry_cluster_service_restore(
 /// `client` it is the Rust handle's drop: the publications, the counters and the log's
 /// subscription are closed with no answer waited for, the replay is left to the
 /// driver, and the function returns 0, which is how a service is closed after its
-/// client's `cavalry_close`. The handle is freed whatever the function returns, with
+/// client's `cavalry_close`. With a `client` that is closed, as when its driver has
+/// stopped, it returns 0 too: a driver that is gone cannot be told, and that is no
+/// error of a close (ADR 0155). The handle is freed whatever the function returns, with
 /// one exception: a call from inside the service's own handler, or from inside the
 /// handler of another service whose poll holds `client`, is refused with
 /// `CAVALRY_ERR_POLLING` and frees nothing.

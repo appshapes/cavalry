@@ -132,8 +132,9 @@ pub struct cavalry_header_values_t {
 pub struct cavalry_fault_t {
     /// `CAVALRY_ERR_FAULT_IMAGE`, `_IMAGES_FULL`, `_CLOSED`, or 0. From a cluster
     /// service's poll it is whichever code `cavalry_errcode` gave after that poll:
-    /// one of those three, `CAVALRY_ERR_CLUSTER_ENTRY`, or the client's or the
-    /// driver's.
+    /// one of the first two, `CAVALRY_ERR_CLUSTER_ENTRY`, or the client's or the
+    /// driver's, which for a client that is closed is `CAVALRY_ERR_CLOSED` and never
+    /// `_FAULT_CLOSED` (ADR 0155).
     pub code: i32,
     /// The image's session id for 120 and 121, else 0.
     pub session_id: i32,

@@ -1262,7 +1262,7 @@ impl Cavalry {
                 Ok(())
             }
             // The ring's own look at the driver's heartbeat, which the conductor
-            // takes within its next millisecond: the same finding, so the same
+            // takes at its next look: the same finding, so the same
             // close, and one error for a driver that is gone whichever looks first
             // (ADR 0155).
             Err(CommandRingError::DriverClosed) => Err(self.closed_for(Closed::DriverClosed)),

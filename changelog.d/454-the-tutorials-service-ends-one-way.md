@@ -7,7 +7,8 @@
   held and when it polled. A command that tells its caller how it went and finds
   the driver gone on the command ring now closes the client and returns
   `ClientError::Closed`, where it returned `ClientError::CommandRing` until the
-  client's conductor saw the same. The tutorial's `adder-service` ends on the one
+  client's conductor saw the same. A service's close at a client that is closed is
+  no error, as a publication's is none. The tutorial's `adder-service` ends on the one
   error with the line the tutorial shows, where `just quickstart` failed now and
   then for the other endings, and the Python service of
   `docs/how-to/take-a-services-snapshot.md` ends on a poll that failed, where it

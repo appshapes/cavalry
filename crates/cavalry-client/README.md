@@ -198,7 +198,8 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   `ClusterError::Client(ClientError::Closed(reason))`, whatever the service held and
   whatever the poll was doing when it met the close, so a program's loop ends on
   that error and needs no other look at its client, as
-  `crates/cavalry/examples/adder-service.rs` does (ADR 0155).
+  `crates/cavalry/examples/adder-service.rs` does, and `ClusterService::close` at
+  that client is `Ok`: a driver that is gone cannot be told (ADR 0155).
 - Takes a snapshot of a service's state: the leader asks every member for a
   snapshot with an entry of the log, which a service hands its program as
   `Entry::Snapshot`. The poll that hands it over ends after it, so the program's

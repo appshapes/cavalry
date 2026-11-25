@@ -1288,7 +1288,8 @@ impl ClusterService {
     /// the [`Replies`] it may answer a session through. The handler's [`Action`]
     /// says whether the entry is taken: [`Action::Abort`] leaves it for the next
     /// poll, which is what a [`Reply::Retry`] asks for. Returns how many entries
-    /// were taken; 0 while the driver hosts no member that has a log yet.
+    /// were taken; 0 while the driver, one that runs, hosts no member that has a
+    /// log yet.
     ///
     /// Which entries a service answers. An entry is answered by one service: the one
     /// beside the member that led the entry's term, which the term's new leadership
@@ -1771,7 +1772,22 @@ impl ClusterService {
     }
 
     /// Closes the service: its read of the log, its publications and its counter.
+    /// A driver that is gone cannot be told, and that is not an error here, as it
+    /// is none of a publication's close: at a client that is closed the service
+    /// drops what it held and the close is `Ok` (ADR 0155).
     pub fn close(mut self, client: &mut Cavalry) -> Result<(), ClusterError> {
+        if client.closed().is_some() {
+            return Ok(());
+        }
+        match self.close_handles(client) {
+            Err(_) if client.closed().is_some() => Ok(()),
+            closed => closed,
+        }
+    }
+
+    /// The close, for a client that was open when it began. What it has not closed
+    /// when it returns an error, the service's drop closes with no answer waited for.
+    fn close_handles(&mut self, client: &mut Cavalry) -> Result<(), ClusterError> {
         for session in self.sessions.iter_mut() {
             if let Some(publication) = session.publication.take() {
                 publication.close()?;

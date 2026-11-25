@@ -288,10 +288,9 @@ fn a_client_connects_while_the_driver_creates_its_files() {
     }
 }
 
-/// A command sent in the millisecond between a driver's close and the conductor's
-/// next look at the heartbeat finds the close itself, on the command ring. It is the
-/// client's close then, as it is a millisecond later, and not the ring's refusal
-/// (ADR 0155).
+/// A command sent between a driver's close and the conductor's next look at the
+/// heartbeat finds the close itself, on the command ring. It is the client's close
+/// then, as it is after that look, and not the ring's refusal (ADR 0155).
 #[test]
 fn a_command_that_finds_the_driver_closed_is_the_clients_close() {
     for round in 0..20 {

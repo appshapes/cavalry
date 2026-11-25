@@ -63,11 +63,17 @@ when the client is closed by the time the work returns. A command that finds the
 driver gone on the command ring, `CommandRingError::DriverClosed` or
 `CommandRingError::DriverTimeout`, closes the client for that reason, as the
 conductor does on the same reading at its next look, and returns
-`ClientError::Closed`: that is each command that tells its caller how it went. The
-removes a handle sends as it closes, and the client's own close, send and take no
-answer, as before. `cavalry_cluster_service_poll` is −1 with `CAVALRY_ERR_CLOSED`
-for a closed client, `spec/c-abi.md` says so in the row of the call, and the
-tutorial's service ends on that one error with its one line.
+`ClientError::Closed`: that is each command that tells its caller how it went, and
+the remove with which a client gives back a counter it could not map, whose answer
+it drops. The removes a handle sends as it closes, and the client's own close,
+write to the ring themselves and take no answer, as before.
+`cavalry_cluster_service_poll` is −1 with `CAVALRY_ERR_CLOSED` for a closed client,
+`spec/c-abi.md` says so in the row of the call, and the tutorial's service ends on
+that one error with its one line. And a service's close at a client that is closed
+is no error, as a publication's is none: a driver that is gone cannot be told, so
+`ClusterService::close` drops what it held and returns `Ok`, and
+`cavalry_cluster_service_close` 0. A program that ends on the poll's one error
+closes its service as it always does.
 
 The C ABI stays at version 6. Its number counts the header: no function, argument,
 struct or define changes, so a package generated from version 6 loads this library
@@ -80,7 +86,7 @@ answers it had promised. The page's versions section says the same.
 **Change the example alone, to take the poll's `ClientError::Closed` as the close
 that `closed()` gives.** It was the first form of this change, and an independent
 read of it found the other two errors and the 0: the example would still have ended
-with the library's line in the millisecond of the third answer and on the second,
+with the library's line in the moment of the third answer and on the second,
 and the sentence written for `poll`, that a close is an error only where the poll
 has a command, was not true. Fifty runs of the tutorial's script passed on both
 runners with that form, against one failure in fifty without it, so the runs did
@@ -98,8 +104,8 @@ forgets must end, and an error ends it. `Subscription::poll` of a closed client 
 an error too, the fault `Fault::Closed`.
 
 **Give the service's poll the one error and leave the commands as they were.** The
-poll would have had to report a close that `Cavalry::closed()` denied for up to a
-millisecond, or wait for the conductor. The command ring's writer has read the
+poll would have had to report a close that `Cavalry::closed()` denied until the
+conductor's next look, or wait for the conductor. The command ring's writer has read the
 heartbeat that the conductor closes on: closing on that reading is the same
 decision made by the first thread that can make it.
 
@@ -125,9 +131,13 @@ makes wrong. What it costs is under "Consequences".
   took. Run without the poll's change, the first failed with no error in 10 s while
   the client said `Some(DriverClosed)`, and the second with `Ok(0)` from the poll
   after its first error.
+- `crates/cavalry-client/tests/cluster_service.rs`,
+  `a_service_closes_with_no_error_at_a_client_that_is_closed`: a service that reads
+  its member's log, its driver closed, one poll, and then its close. Run without
+  the close's change it failed with `Client(Closed(DriverClosed))` from the close.
 - `conformance/c/closed.c`, the C runner's closed round: a service beside a driver
-  with no member, the driver stopped, and the first poll that fails and the three
-  after it held to −1 with `CAVALRY_ERR_CLOSED`.
+  with no member, the driver stopped, the first poll that fails and the three
+  after it held to −1 with `CAVALRY_ERR_CLOSED`, and the service's close to 0.
 - The tutorial's script with a pause of 300 ms at the top of the example's loop, on
   a laptop: `master`'s example fails step 7 with the library's line, as on the
   runner; the example of this change passes its ten steps.
@@ -144,7 +154,8 @@ makes wrong. What it costs is under "Consequences".
   so, and `spec/c-abi.md` and the client crate's README. Through a generated client
   the arm is a look at what the poll returned: a client's poll returns the −1 and
   raises nothing, so a loop that does not look still polls for ever, as the
-  how-to's did. Its loop now ends on a poll that failed.
+  how-to's did. Its loop now ends on a poll that failed, and its page says what
+  the reader then sees.
 - A program that matched on `ClientError::CommandRing` holding `DriverClosed` or
   `DriverTimeout` for a command, or on `CAVALRY_ERR_COMMAND_RING` with that
   meaning, no longer sees it from a command: it sees `ClientError::Closed`, which

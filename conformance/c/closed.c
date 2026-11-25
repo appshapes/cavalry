@@ -2,7 +2,8 @@
  * 0155): a C program over crates/cavalry-ffi/include/cavalry.h that polls a cluster's
  * service whose driver stops, and checks that the poll of a closed client is one
  * answer, −1 with CAVALRY_ERR_CLOSED, at the first poll that fails and at every poll
- * after it, with the client's reason CAVALRY_CLOSED_DRIVER_CLOSED. The driver hosts no
+ * after it, with the client's reason CAVALRY_CLOSED_DRIVER_CLOSED, and that the
+ * service's close is then 0. The driver hosts no
  * member, so the service holds no log and its poll has no command to send: the case
  * in which a poll of a closed client took nothing and returned 0 for as long as it
  * was called. conformance/c/run.sh builds, links and runs it last, against the
@@ -113,14 +114,15 @@ int main(int argc, char **argv) {
     }
     if (entries != 0) wrong("the handler was called beside a driver with no member", entries);
 
-    /* The closes of a client whose driver is gone may say so: their answers are not
-     * this round's. */
-    (void) cavalry_cluster_service_close(service, client);
+    /* 4. The service closes with no error: a driver that is gone cannot be told. The
+     * close of the client itself may say that its driver is gone, and its answer is
+     * not this round's. */
+    CHECK(cavalry_cluster_service_close(service, client));
     (void) cavalry_close(client);
     (void) cavalry_context_close(context);
     printf("conformance/c: closed round: a service beside a driver with no member took nothing; after the driver's "
-           "stop, poll %d and the %d after it returned -1 with CAVALRY_ERR_CLOSED, and the client's reason is "
-           "CAVALRY_CLOSED_DRIVER_CLOSED\n", polls, POLLS_AFTER);
+           "stop, poll %d and the %d after it returned -1 with CAVALRY_ERR_CLOSED, the client's reason is "
+           "CAVALRY_CLOSED_DRIVER_CLOSED, and the service closed with 0\n", polls, POLLS_AFTER);
     printf("conformance/c: closed round ok\n");
     return 0;
 }

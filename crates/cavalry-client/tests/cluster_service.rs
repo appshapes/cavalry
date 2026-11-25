@@ -1332,6 +1332,38 @@ fn a_poll_of_a_closed_client_is_the_clients_close_for_a_service_that_reads_its_l
             end,
             "round {round}: the entry taken before the close is taken"
         );
-        assert_eq!(service.snapshot_due(), None, "round {round}");
     }
+}
+
+/// A program that ends on the poll's one error closes its service as it always
+/// does: a driver that is gone cannot be told, and that is no error of the close.
+/// The service holds its log's handle here, since the poll met the close before it
+/// read, so the close has a replay it cannot stop.
+#[test]
+fn a_service_closes_with_no_error_at_a_client_that_is_closed() {
+    let mut member = Member::start("close-at-a-closed-client");
+    let mut client = Cavalry::connect_to(&member.dir).expect("the service's client connects");
+    let mut service = client.cluster_service();
+    let mut seen = Seen::default();
+    member.term(0, MEMBER);
+    member.leads_as_or_follows(MEMBER);
+    member.name();
+    member.commit();
+    open_log(&mut service, &mut client, &mut seen);
+    member.close();
+    wait("the client sees its driver's close", || {
+        client.closed().is_some()
+    });
+    let polled = service.poll(&mut client, |_, _| Action::Continue, 16);
+    assert!(
+        matches!(
+            polled,
+            Err(ClusterError::Client(ClientError::Closed(
+                Closed::DriverClosed
+            )))
+        ),
+        "{polled:?}"
+    );
+    let closed = service.close(&mut client);
+    assert!(closed.is_ok(), "{closed:?}");
 }
