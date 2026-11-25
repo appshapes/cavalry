@@ -1820,6 +1820,36 @@ impl Consensus {
         })
     }
 
+    /// Appends a timer event for the timer `correlation_id`, which the service beside
+    /// this member scheduled and whose deadline this member's clock has reached, at
+    /// the cluster's time `clock` gives (`spec/cluster.md`, "The service", "Timers",
+    /// "The leader's timer events"; ADR 0151). What is refused is what
+    /// [`Consensus::offer`] refuses: a member that does not lead with its election
+    /// closed appends none.
+    pub fn timer_event<I: Io>(
+        &mut self,
+        clock: Clock,
+        correlation_id: i64,
+        io: &mut I,
+    ) -> Result<Result<(), Refused>, I::Fault> {
+        if self.member_id() != self.leader_id {
+            return Ok(Err(Refused::NotLeader));
+        }
+        if self.role != Role::Leader || self.state != ElectionState::Closed {
+            return Ok(Err(Refused::Election));
+        }
+        let appended = io.append(&Message::TimerEvent {
+            leadership_term_id: self.term,
+            correlation_id,
+            timestamp: clock.time_ms,
+        })?;
+        Ok(if appended {
+            Ok(())
+        } else {
+            Err(Refused::BackPressured)
+        })
+    }
+
     fn peer(&self, index: usize) -> Peer {
         self.peers.get(index).copied().unwrap_or(Peer {
             id: -1,

@@ -1286,6 +1286,99 @@ impl Cluster {
         })
     }
 
+    /// Has `member` append a timer event for the timer `correlation_id`, as a member
+    /// does for a timer it holds whose deadline its clock has reached, with the
+    /// cluster's time `skew_ms` after the cluster's clock, which stands for a
+    /// member's own wall clock; and returns the position at which the entry begins
+    /// ([`Consensus::timer_event`]). `member` need not be [`Cluster::leader`]: a
+    /// member that led, was cut off and has not yet given up the lead appends to its
+    /// own log, which no other member holds. Refused as [`Consensus::offer`] refuses,
+    /// and as not the leader's for a member that is halted or stalled.
+    pub fn timer_event(
+        &mut self,
+        member: i32,
+        correlation_id: i64,
+        skew_ms: i64,
+    ) -> Result<i64, Refused> {
+        self.append_from(member, |core, mut clock, io| {
+            clock.time_ms = clock.time_ms.saturating_add(skew_ms);
+            core.timer_event(clock, correlation_id, io)
+        })
+    }
+
+    fn append_from(
+        &mut self,
+        member: i32,
+        append: impl FnOnce(
+            &mut Consensus,
+            Clock,
+            &mut MemberIo<'_>,
+        ) -> Result<Result<(), Refused>, Faulted>,
+    ) -> Result<i64, Refused> {
+        let Some(own) = self.index(member) else {
+            return Err(Refused::NotLeader);
+        };
+        if self
+            .world
+            .disks
+            .get(own)
+            .is_none_or(|disk| disk.halted || disk.stalled)
+        {
+            return Err(Refused::NotLeader);
+        }
+        let Some(core) = self.cores.get_mut(own) else {
+            return Err(Refused::NotLeader);
+        };
+        let begins = self
+            .world
+            .publication_of(own)
+            .and_then(|index| self.world.publications.get(index))
+            .map_or(0, |publication| publication.position);
+        let clock = self.world.clock;
+        let mut io = MemberIo {
+            world: &mut self.world,
+            own,
+        };
+        // An append truncates nothing, so no step of it faults here; one that did
+        // would leave the entry unappended, which back-pressure says too.
+        let Ok(outcome) = append(core, clock, &mut io) else {
+            return Err(Refused::BackPressured);
+        };
+        outcome.map(|()| begins)
+    }
+
+    /// The entries of the member's log that begin at or above `from` and end at or
+    /// below `to`, each the position at which it begins, the position after it and
+    /// its bytes, encoded as `spec/cluster.md` gives it. With a commit position as
+    /// `to`, the committed entries a service beside the member reads from its own
+    /// position.
+    pub fn entries(&self, member: i32, from: i64, to: i64) -> Vec<(i64, i64, Vec<u8>)> {
+        self.index(member)
+            .and_then(|index| self.world.disks.get(index))
+            .map(|disk| {
+                disk.log
+                    .iter()
+                    .filter(|entry| entry.position >= from && entry.position_after <= to)
+                    .map(|entry| (entry.position, entry.position_after, entry.bytes.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The position after the last entry the member's log holds, 0 for an empty log:
+    /// where a cut left it.
+    pub fn log_end(&self, member: i32) -> i64 {
+        self.index(member)
+            .and_then(|index| self.world.disks.get(index))
+            .and_then(|disk| disk.log.last())
+            .map_or(0, |entry| entry.position_after)
+    }
+
+    /// The cluster's time on the cluster's one clock, in milliseconds.
+    pub fn time_ms(&self) -> i64 {
+        self.world.clock.time_ms
+    }
+
     /// Cuts the member off: its consensus messages, sent and to come, arrive nowhere,
     /// and the log stops reaching it. Its duty cycle still runs. An image of the log it
     /// holds stays for the image liveness timeout, 10 s, and what the cut kept from it
