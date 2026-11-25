@@ -6,6 +6,8 @@
  * forms of a lock. */
 #include "shim.h"
 
+#include <stdio.h>
+
 #include "_cgo_export.h"
 
 /* Copies the NUL-terminated `text` into `out` of `size` bytes, cut at `size` - 1 bytes,
@@ -26,9 +28,28 @@ static void cavalry_go_keep(cavalry_go_error_t *error, const char *function) {
   cavalry_go_copy(error->message, sizeof error->message, cavalry_errmsg());
 }
 
-int64_t cavalry_go_try_claim(cavalry_publication_t *publication, size_t length, cavalry_buffer_claim_t *claim,
+/* Keeps in `error` this client's own refusal of a count or a length below zero, with the
+ * ABI function it would have called. The ABI takes a count as a size_t, and a negative
+ * int converted for it is a count near 2 ** 64: a claim of that many bytes, or a poll with
+ * no limit, for a caller that asked for neither. So the count crosses to this file as an
+ * int64, which holds every Go int, and is refused here, before the ABI is called. The
+ * code is CAVALRY_GO_ERR_NEGATIVE, this client's own and none of the ABI's, whose codes
+ * are above zero (spec/c-abi.md, "Error codes"; ADR 0164). */
+static void cavalry_go_refuse(cavalry_go_error_t *error, const char *function, const char *parameter, int64_t given) {
+  error->code = CAVALRY_GO_ERR_NEGATIVE;
+  cavalry_go_copy(error->function, sizeof error->function, function);
+  snprintf(error->message, sizeof error->message, "%s: an int from 0 expected, a count or a length, and %lld was "
+           "given; the ABI would be passed another count, near 2 ** 64, and was not called. Pass a count that is not "
+           "below zero. See clients/go/README.md#what-it-must-never-do", parameter, (long long) given);
+}
+
+int64_t cavalry_go_try_claim(cavalry_publication_t *publication, int64_t length, cavalry_buffer_claim_t *claim,
                              cavalry_go_error_t *error) {
-  int64_t position = cavalry_publication_try_claim(publication, length, claim);
+  if (length < 0) {
+    cavalry_go_refuse(error, "cavalry_publication_try_claim", "length", length);
+    return CAVALRY_PUBLICATION_ERROR;
+  }
+  int64_t position = cavalry_publication_try_claim(publication, (size_t) length, claim);
   if (position == CAVALRY_PUBLICATION_ERROR) {
     cavalry_go_keep(error, "cavalry_publication_try_claim");
   }
@@ -76,9 +97,13 @@ static void cavalry_go_trampoline(void *clientd, const uint8_t *buffer, size_t l
   cavalryGoFragment((uintptr_t) clientd, (uint8_t *) buffer, length, (cavalry_header_t *) header);
 }
 
-int cavalry_go_poll(cavalry_subscription_t *subscription, uintptr_t index, size_t fragment_limit,
+int cavalry_go_poll(cavalry_subscription_t *subscription, uintptr_t index, int64_t fragment_limit,
                     cavalry_go_error_t *error) {
-  int count = cavalry_subscription_poll(subscription, cavalry_go_trampoline, (void *) index, fragment_limit);
+  if (fragment_limit < 0) {
+    cavalry_go_refuse(error, "cavalry_subscription_poll", "fragmentLimit", fragment_limit);
+    return -1;
+  }
+  int count = cavalry_subscription_poll(subscription, cavalry_go_trampoline, (void *) index, (size_t) fragment_limit);
   if (count < 0) {
     cavalry_go_keep(error, "cavalry_subscription_poll");
   }
@@ -96,9 +121,13 @@ static void cavalry_go_entry_trampoline(void *clientd, const uint8_t *buffer, si
                  cavalry_committed_log_entry_position(header));
 }
 
-int cavalry_go_committed_log_poll(cavalry_committed_log_t *log, uintptr_t index, size_t fragment_limit,
+int cavalry_go_committed_log_poll(cavalry_committed_log_t *log, uintptr_t index, int64_t fragment_limit,
                                   cavalry_go_error_t *error) {
-  int count = cavalry_committed_log_poll(log, cavalry_go_entry_trampoline, (void *) index, fragment_limit);
+  if (fragment_limit < 0) {
+    cavalry_go_refuse(error, "cavalry_committed_log_poll", "fragmentLimit", fragment_limit);
+    return -1;
+  }
+  int count = cavalry_committed_log_poll(log, cavalry_go_entry_trampoline, (void *) index, (size_t) fragment_limit);
   if (count < 0) {
     cavalry_go_keep(error, "cavalry_committed_log_poll");
   }
@@ -126,9 +155,13 @@ static void cavalry_go_reply_trampoline(void *clientd, const uint8_t *buffer, si
   cavalryGoReply((uintptr_t) clientd, (uint8_t *) buffer, length, values.leadership_term_id, values.timestamp);
 }
 
-int cavalry_go_cluster_session_poll(cavalry_cluster_session_t *session, uintptr_t index, size_t fragment_limit,
+int cavalry_go_cluster_session_poll(cavalry_cluster_session_t *session, uintptr_t index, int64_t fragment_limit,
                                     cavalry_go_error_t *error) {
-  int count = cavalry_cluster_session_poll(session, cavalry_go_reply_trampoline, (void *) index, fragment_limit);
+  if (fragment_limit < 0) {
+    cavalry_go_refuse(error, "cavalry_cluster_session_poll", "fragmentLimit", fragment_limit);
+    return -1;
+  }
+  int count = cavalry_cluster_session_poll(session, cavalry_go_reply_trampoline, (void *) index, (size_t) fragment_limit);
   if (count < 0) {
     cavalry_go_keep(error, "cavalry_cluster_session_poll");
   }
@@ -206,9 +239,15 @@ static void cavalry_go_service_trampoline(void *clientd, const uint8_t *buffer, 
 }
 
 int cavalry_go_cluster_service_poll(cavalry_cluster_service_t *service, cavalry_t *client, uintptr_t index,
-                                    size_t fragment_limit, int *aborted, cavalry_go_error_t *error) {
+                                    int64_t fragment_limit, int *aborted, cavalry_go_error_t *error) {
+  if (fragment_limit < 0) {
+    *aborted = 0;
+    cavalry_go_refuse(error, "cavalry_cluster_service_poll", "fragmentLimit", fragment_limit);
+    return -1;
+  }
   cavalry_go_service_poll_t poll = { index, service, error, 0 };
-  int count = cavalry_cluster_service_poll(service, client, cavalry_go_service_trampoline, &poll, fragment_limit);
+  int count = cavalry_cluster_service_poll(service, client, cavalry_go_service_trampoline, &poll,
+                                           (size_t) fragment_limit);
   *aborted = poll.aborted;
   if (count < 0) {
     cavalry_go_keep(error, "cavalry_cluster_service_poll");

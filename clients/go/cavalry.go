@@ -160,6 +160,14 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("%s: %s (error %d)", e.Fn, e.Message, e.Code)
 }
 
+// ErrNegative is the Code of an *Error for a count or a length below zero, which this
+// client refused before the ABI was called: TryClaim's length, a poll's fragment limit,
+// ImageAt's index. It is no code of the ABI's, whose codes are above zero
+// (spec/c-abi.md, "Error codes"); Fn is the ABI function the call would have made. As a
+// size_t, which is what the ABI takes, a negative int is a count near 2 ** 64: a claim of
+// that many bytes, or a poll with no limit (README, "What it must never do"; ADR 0164).
+const ErrNegative int32 = C.CAVALRY_GO_ERR_NEGATIVE
+
 // HandlerError is the handler panicked during a poll, a subscription's fragment handler
 // or, when CommittedLog is true, a committed log's entry handler, or, when Cluster is
 // "session", a cluster session's reply handler: Fragments is the count
@@ -745,9 +753,10 @@ func newPublication(handle *C.cavalry_publication_t) (*Publication, error) {
 // TryClaim claims length bytes: the position after the frame, with Claim the writable
 // slice over them, or a result code below zero, which leaves Claim as it was; Err says
 // why a PublicationError. One cgo call, to shim.c's one ABI call; the slice is made with
-// unsafe.Slice and allocates nothing.
+// unsafe.Slice and allocates nothing. A length below zero is refused before the ABI is
+// called: the ABI's code for an error, with an Err whose Code is ErrNegative.
 func (p *Publication) TryClaim(length int) int64 {
-	position := int64(C.cavalry_go_try_claim(p.handle, C.size_t(length), &p.claim, &p.err))
+	position := int64(C.cavalry_go_try_claim(p.handle, C.int64_t(length), &p.claim, &p.err))
 	if position >= 0 {
 		p.Claim = unsafe.Slice((*byte)(unsafe.Pointer(p.claim.data)), int(p.claim.length))
 	}
@@ -1000,15 +1009,17 @@ func newSubscription(handle *C.cavalry_subscription_t) (*Subscription, error) {
 // returned (or -1, with Err saying why: a fault, which Fault reads, or ErrPolling for a
 // poll from inside a handler of this subscription, which the ABI refuses and which
 // touches nothing here), and a *HandlerError when a handler call panicked.
+// A fragmentLimit below zero is refused before the ABI is called: -1, with an Err whose
+// Code is ErrNegative.
 func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) (int, error) {
 	if s.polling {
-		return int(C.cavalry_go_poll(s.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit), &s.err)), nil
+		return int(C.cavalry_go_poll(s.handle, C.uintptr_t(s.slot), C.int64_t(fragmentLimit), &s.err)), nil
 	}
 	s.handler = handler
 	s.polling = true
 	s.raised = 0
 	s.first = nil
-	count := int(C.cavalry_go_poll(s.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit), &s.err))
+	count := int(C.cavalry_go_poll(s.handle, C.uintptr_t(s.slot), C.int64_t(fragmentLimit), &s.err))
 	s.polling = false
 	s.handler = nil
 	if s.raised == 0 {
@@ -1091,8 +1102,15 @@ func (s *Subscription) Fault() (code int32, sessionID int32, position int64, err
 // ImageCount is how many images the subscription has.
 func (s *Subscription) ImageCount() int { return int(C.cavalry_subscription_image_count(s.handle)) }
 
-// ImageAt is the image at index, with its constants copied now, or nil.
+// ImageAt is the image at index, with its constants copied now, or nil. An index below
+// zero is an *Error whose Code is ErrNegative, and the ABI is not called.
 func (s *Subscription) ImageAt(index int) (*Image, error) {
+	if index < 0 {
+		return nil, &Error{Fn: "cavalry_subscription_image_at_index", Code: ErrNegative, Message: fmt.Sprintf(
+			"index: an int from 0 expected, and %d was given; the ABI would be passed another index, near 2 ** 64, "+
+				"and was not called. Pass an index that is not below zero. See "+
+				"clients/go/README.md#what-it-must-never-do", index)}
+	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	ptr := C.cavalry_subscription_image_at_index(s.handle, C.size_t(index))
@@ -1186,16 +1204,18 @@ type CommittedLog struct {
 // failure only until the log's next one; Faulted keeps it (IsEnded). An entry whose
 // handler call panicked was delivered and is not delivered again: Position is past it,
 // and past every entry this poll delivered after it.
+// A fragmentLimit below zero is refused before the ABI is called: -1, with an Err whose
+// Code is ErrNegative.
 func (l *CommittedLog) Poll(handler EntryHandler, fragmentLimit int) (int, error) {
 	s := l.state
 	if s.polling {
-		return int(C.cavalry_go_committed_log_poll(l.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit), &s.err)), nil
+		return int(C.cavalry_go_committed_log_poll(l.handle, C.uintptr_t(s.slot), C.int64_t(fragmentLimit), &s.err)), nil
 	}
 	s.entry = handler
 	s.polling = true
 	s.raised = 0
 	s.first = nil
-	count := int(C.cavalry_go_committed_log_poll(l.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit), &s.err))
+	count := int(C.cavalry_go_committed_log_poll(l.handle, C.uintptr_t(s.slot), C.int64_t(fragmentLimit), &s.err))
 	s.polling = false
 	s.entry = nil
 	if s.raised == 0 {
@@ -1372,16 +1392,18 @@ func (n *ClusterSession) Offer(message []byte) int64 {
 // below that of a reply this session has handed over, is passed over and counted in
 // StaleReplies, and is not in the count. Every reply the ABI hands over reaches the
 // handler, whether or not an earlier call panicked.
+// A fragmentLimit below zero is refused before the ABI is called: -1, with an Err whose
+// Code is ErrNegative.
 func (n *ClusterSession) Poll(handler ReplyHandler, fragmentLimit int) (int, error) {
 	s := n.state
 	if s.polling {
-		return int(C.cavalry_go_cluster_session_poll(n.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit), &s.err)), nil
+		return int(C.cavalry_go_cluster_session_poll(n.handle, C.uintptr_t(s.slot), C.int64_t(fragmentLimit), &s.err)), nil
 	}
 	s.reply = handler
 	s.polling = true
 	s.raised = 0
 	s.first = nil
-	count := int(C.cavalry_go_cluster_session_poll(n.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit), &s.err))
+	count := int(C.cavalry_go_cluster_session_poll(n.handle, C.uintptr_t(s.slot), C.int64_t(fragmentLimit), &s.err))
 	s.polling = false
 	s.reply = nil
 	if s.raised == 0 {
@@ -1566,18 +1588,20 @@ func (v *ClusterService) CancelTimer(correlationID int64) int32 {
 // *HandlerError: its Fragments is the count of entries taken before that entry, and its
 // Cause the panic's value, or the *Error with ErrClusterAction that the ABI gave for the
 // value the handler returned. The next poll hands the aborted entry over again.
+// A fragmentLimit below zero is refused before the ABI is called: -1, with an Err whose
+// Code is ErrNegative.
 func (v *ClusterService) Poll(handler ServiceHandler, fragmentLimit int) (int, error) {
 	s := v.state
 	if s.polling {
 		return int(C.cavalry_go_cluster_service_poll(v.handle, v.client.handle, C.uintptr_t(s.slot),
-			C.size_t(fragmentLimit), &s.aborted, &s.err)), nil
+			C.int64_t(fragmentLimit), &s.aborted, &s.err)), nil
 	}
 	s.service = handler
 	s.polling = true
 	s.raised = 0
 	s.first = nil
 	count := int(C.cavalry_go_cluster_service_poll(v.handle, v.client.handle, C.uintptr_t(s.slot),
-		C.size_t(fragmentLimit), &s.aborted, &s.err))
+		C.int64_t(fragmentLimit), &s.aborted, &s.err))
 	s.polling = false
 	s.service = nil
 	if s.raised == 0 && s.aborted == 0 {

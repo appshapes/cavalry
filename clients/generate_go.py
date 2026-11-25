@@ -132,9 +132,14 @@ typedef struct cavalry_go_error_s {
   char message[512];
 } cavalry_go_error_t;
 
+/* The code of a failure that is this client's own refusal, before the ABI was called, of a
+ * count or a length below zero (ADR 0164). It is none of the ABI's: the ABI's codes are
+ * above zero (spec/c-abi.md, "Error codes"). */
+#define CAVALRY_GO_ERR_NEGATIVE (-1)
+
 /* cavalry_publication_try_claim, with `error` written when it returns
  * CAVALRY_PUBLICATION_ERROR. */
-int64_t cavalry_go_try_claim(cavalry_publication_t *publication, size_t length, cavalry_buffer_claim_t *claim,
+int64_t cavalry_go_try_claim(cavalry_publication_t *publication, int64_t length, cavalry_buffer_claim_t *claim,
                              cavalry_go_error_t *error);
 
 /* cavalry_buffer_claim_set_reserved_value, with `error` written when it returns -1. */
@@ -155,7 +160,7 @@ int64_t cavalry_go_offer(cavalry_publication_t *publication, const uint8_t *buff
  * function cavalryGoFragment for each with `index`, the subscription's 1-based index in
  * the client's table, as clientd. The ABI's result: the count, or -1, with `error`
  * written. */
-int cavalry_go_poll(cavalry_subscription_t *subscription, uintptr_t index, size_t fragment_limit,
+int cavalry_go_poll(cavalry_subscription_t *subscription, uintptr_t index, int64_t fragment_limit,
                     cavalry_go_error_t *error);
 
 /* Polls the committed log `log` for up to `fragment_limit` entries, as cavalry_go_poll
@@ -163,7 +168,7 @@ int cavalry_go_poll(cavalry_subscription_t *subscription, uintptr_t index, size_
  * trampoline is the log's own: it reads each entry's position in the log and calls the
  * exported Go function cavalryGoEntry with it. The ABI's result: the count, or -1, with
  * `error` written. */
-int cavalry_go_committed_log_poll(cavalry_committed_log_t *log, uintptr_t index, size_t fragment_limit,
+int cavalry_go_committed_log_poll(cavalry_committed_log_t *log, uintptr_t index, int64_t fragment_limit,
                                   cavalry_go_error_t *error);
 
 /* cavalry_cluster_session_offer, with `error` written when it returns
@@ -176,7 +181,7 @@ int64_t cavalry_go_cluster_session_offer(cavalry_cluster_session_t *session, con
  * client's table. Its trampoline is the session's own: it reads each reply's values from
  * the header and calls the exported Go function cavalryGoReply with them. The ABI's
  * result: the count of replies handed over, or -1, with `error` written. */
-int cavalry_go_cluster_session_poll(cavalry_cluster_session_t *session, uintptr_t index, size_t fragment_limit,
+int cavalry_go_cluster_session_poll(cavalry_cluster_session_t *session, uintptr_t index, int64_t fragment_limit,
                                     cavalry_go_error_t *error);
 
 /* cavalry_cluster_service_reply, with `error` written when it returns -1, for a call from
@@ -201,7 +206,7 @@ int cavalry_go_cluster_service_cancel_timer(cavalry_cluster_service_t *service, 
  * copied into `error` in that call, and `*aborted` is 1 when the poll returns, else 0. The
  * ABI's result: the count of entries the handler took, or -1, with `error` written. */
 int cavalry_go_cluster_service_poll(cavalry_cluster_service_t *service, cavalry_t *client, uintptr_t index,
-                                    size_t fragment_limit, int *aborted, cavalry_go_error_t *error);
+                                    int64_t fragment_limit, int *aborted, cavalry_go_error_t *error);
 
 #endif
 '''
@@ -213,6 +218,8 @@ SHIM_C = r'''/* The C trampoline the ABI calls per fragment, the poll that insta
  * `just lint` regenerates and compares, and clients/lint.py reads every function for C's
  * forms of a lock. */
 #include "shim.h"
+
+#include <stdio.h>
 
 #include "_cgo_export.h"
 
@@ -234,9 +241,28 @@ static void cavalry_go_keep(cavalry_go_error_t *error, const char *function) {
   cavalry_go_copy(error->message, sizeof error->message, cavalry_errmsg());
 }
 
-int64_t cavalry_go_try_claim(cavalry_publication_t *publication, size_t length, cavalry_buffer_claim_t *claim,
+/* Keeps in `error` this client's own refusal of a count or a length below zero, with the
+ * ABI function it would have called. The ABI takes a count as a size_t, and a negative
+ * int converted for it is a count near 2 ** 64: a claim of that many bytes, or a poll with
+ * no limit, for a caller that asked for neither. So the count crosses to this file as an
+ * int64, which holds every Go int, and is refused here, before the ABI is called. The
+ * code is CAVALRY_GO_ERR_NEGATIVE, this client's own and none of the ABI's, whose codes
+ * are above zero (spec/c-abi.md, "Error codes"; ADR 0164). */
+static void cavalry_go_refuse(cavalry_go_error_t *error, const char *function, const char *parameter, int64_t given) {
+  error->code = CAVALRY_GO_ERR_NEGATIVE;
+  cavalry_go_copy(error->function, sizeof error->function, function);
+  snprintf(error->message, sizeof error->message, "%s: an int from 0 expected, a count or a length, and %lld was "
+           "given; the ABI would be passed another count, near 2 ** 64, and was not called. Pass a count that is not "
+           "below zero. See clients/go/README.md#what-it-must-never-do", parameter, (long long) given);
+}
+
+int64_t cavalry_go_try_claim(cavalry_publication_t *publication, int64_t length, cavalry_buffer_claim_t *claim,
                              cavalry_go_error_t *error) {
-  int64_t position = cavalry_publication_try_claim(publication, length, claim);
+  if (length < 0) {
+    cavalry_go_refuse(error, "cavalry_publication_try_claim", "length", length);
+    return CAVALRY_PUBLICATION_ERROR;
+  }
+  int64_t position = cavalry_publication_try_claim(publication, (size_t) length, claim);
   if (position == CAVALRY_PUBLICATION_ERROR) {
     cavalry_go_keep(error, "cavalry_publication_try_claim");
   }
@@ -284,9 +310,13 @@ static void cavalry_go_trampoline(void *clientd, const uint8_t *buffer, size_t l
   cavalryGoFragment((uintptr_t) clientd, (uint8_t *) buffer, length, (cavalry_header_t *) header);
 }
 
-int cavalry_go_poll(cavalry_subscription_t *subscription, uintptr_t index, size_t fragment_limit,
+int cavalry_go_poll(cavalry_subscription_t *subscription, uintptr_t index, int64_t fragment_limit,
                     cavalry_go_error_t *error) {
-  int count = cavalry_subscription_poll(subscription, cavalry_go_trampoline, (void *) index, fragment_limit);
+  if (fragment_limit < 0) {
+    cavalry_go_refuse(error, "cavalry_subscription_poll", "fragmentLimit", fragment_limit);
+    return -1;
+  }
+  int count = cavalry_subscription_poll(subscription, cavalry_go_trampoline, (void *) index, (size_t) fragment_limit);
   if (count < 0) {
     cavalry_go_keep(error, "cavalry_subscription_poll");
   }
@@ -304,9 +334,13 @@ static void cavalry_go_entry_trampoline(void *clientd, const uint8_t *buffer, si
                  cavalry_committed_log_entry_position(header));
 }
 
-int cavalry_go_committed_log_poll(cavalry_committed_log_t *log, uintptr_t index, size_t fragment_limit,
+int cavalry_go_committed_log_poll(cavalry_committed_log_t *log, uintptr_t index, int64_t fragment_limit,
                                   cavalry_go_error_t *error) {
-  int count = cavalry_committed_log_poll(log, cavalry_go_entry_trampoline, (void *) index, fragment_limit);
+  if (fragment_limit < 0) {
+    cavalry_go_refuse(error, "cavalry_committed_log_poll", "fragmentLimit", fragment_limit);
+    return -1;
+  }
+  int count = cavalry_committed_log_poll(log, cavalry_go_entry_trampoline, (void *) index, (size_t) fragment_limit);
   if (count < 0) {
     cavalry_go_keep(error, "cavalry_committed_log_poll");
   }
@@ -334,9 +368,13 @@ static void cavalry_go_reply_trampoline(void *clientd, const uint8_t *buffer, si
   cavalryGoReply((uintptr_t) clientd, (uint8_t *) buffer, length, values.leadership_term_id, values.timestamp);
 }
 
-int cavalry_go_cluster_session_poll(cavalry_cluster_session_t *session, uintptr_t index, size_t fragment_limit,
+int cavalry_go_cluster_session_poll(cavalry_cluster_session_t *session, uintptr_t index, int64_t fragment_limit,
                                     cavalry_go_error_t *error) {
-  int count = cavalry_cluster_session_poll(session, cavalry_go_reply_trampoline, (void *) index, fragment_limit);
+  if (fragment_limit < 0) {
+    cavalry_go_refuse(error, "cavalry_cluster_session_poll", "fragmentLimit", fragment_limit);
+    return -1;
+  }
+  int count = cavalry_cluster_session_poll(session, cavalry_go_reply_trampoline, (void *) index, (size_t) fragment_limit);
   if (count < 0) {
     cavalry_go_keep(error, "cavalry_cluster_session_poll");
   }
@@ -414,9 +452,15 @@ static void cavalry_go_service_trampoline(void *clientd, const uint8_t *buffer, 
 }
 
 int cavalry_go_cluster_service_poll(cavalry_cluster_service_t *service, cavalry_t *client, uintptr_t index,
-                                    size_t fragment_limit, int *aborted, cavalry_go_error_t *error) {
+                                    int64_t fragment_limit, int *aborted, cavalry_go_error_t *error) {
+  if (fragment_limit < 0) {
+    *aborted = 0;
+    cavalry_go_refuse(error, "cavalry_cluster_service_poll", "fragmentLimit", fragment_limit);
+    return -1;
+  }
   cavalry_go_service_poll_t poll = { index, service, error, 0 };
-  int count = cavalry_cluster_service_poll(service, client, cavalry_go_service_trampoline, &poll, fragment_limit);
+  int count = cavalry_cluster_service_poll(service, client, cavalry_go_service_trampoline, &poll,
+                                           (size_t) fragment_limit);
   *aborted = poll.aborted;
   if (count < 0) {
     cavalry_go_keep(error, "cavalry_cluster_service_poll");
@@ -935,6 +979,14 @@ type Error struct {
 func (e *Error) Error() string {
 	return fmt.Sprintf("%s: %s (error %d)", e.Fn, e.Message, e.Code)
 }
+
+// ErrNegative is the Code of an *Error for a count or a length below zero, which this
+// client refused before the ABI was called: TryClaim's length, a poll's fragment limit,
+// ImageAt's index. It is no code of the ABI's, whose codes are above zero
+// (spec/c-abi.md, "Error codes"); Fn is the ABI function the call would have made. As a
+// size_t, which is what the ABI takes, a negative int is a count near 2 ** 64: a claim of
+// that many bytes, or a poll with no limit (README, "What it must never do"; ADR 0164).
+const ErrNegative int32 = C.CAVALRY_GO_ERR_NEGATIVE
 
 // HandlerError is the handler panicked during a poll, a subscription's fragment handler
 // or, when CommittedLog is true, a committed log's entry handler, or, when Cluster is
@@ -1521,9 +1573,10 @@ func newPublication(handle *C.cavalry_publication_t) (*Publication, error) {
 // TryClaim claims length bytes: the position after the frame, with Claim the writable
 // slice over them, or a result code below zero, which leaves Claim as it was; Err says
 // why a PublicationError. One cgo call, to shim.c's one ABI call; the slice is made with
-// unsafe.Slice and allocates nothing.
+// unsafe.Slice and allocates nothing. A length below zero is refused before the ABI is
+// called: the ABI's code for an error, with an Err whose Code is ErrNegative.
 func (p *Publication) TryClaim(length int) int64 {
-	position := int64(C.cavalry_go_try_claim(p.handle, C.size_t(length), &p.claim, &p.err))
+	position := int64(C.cavalry_go_try_claim(p.handle, C.int64_t(length), &p.claim, &p.err))
 	if position >= 0 {
 		p.Claim = unsafe.Slice((*byte)(unsafe.Pointer(p.claim.data)), int(p.claim.length))
 	}
@@ -1776,15 +1829,17 @@ func newSubscription(handle *C.cavalry_subscription_t) (*Subscription, error) {
 // returned (or -1, with Err saying why: a fault, which Fault reads, or ErrPolling for a
 // poll from inside a handler of this subscription, which the ABI refuses and which
 // touches nothing here), and a *HandlerError when a handler call panicked.
+// A fragmentLimit below zero is refused before the ABI is called: -1, with an Err whose
+// Code is ErrNegative.
 func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) (int, error) {
 	if s.polling {
-		return int(C.cavalry_go_poll(s.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit), &s.err)), nil
+		return int(C.cavalry_go_poll(s.handle, C.uintptr_t(s.slot), C.int64_t(fragmentLimit), &s.err)), nil
 	}
 	s.handler = handler
 	s.polling = true
 	s.raised = 0
 	s.first = nil
-	count := int(C.cavalry_go_poll(s.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit), &s.err))
+	count := int(C.cavalry_go_poll(s.handle, C.uintptr_t(s.slot), C.int64_t(fragmentLimit), &s.err))
 	s.polling = false
 	s.handler = nil
 	if s.raised == 0 {
@@ -1867,8 +1922,15 @@ func (s *Subscription) Fault() (code int32, sessionID int32, position int64, err
 // ImageCount is how many images the subscription has.
 func (s *Subscription) ImageCount() int { return int(C.cavalry_subscription_image_count(s.handle)) }
 
-// ImageAt is the image at index, with its constants copied now, or nil.
+// ImageAt is the image at index, with its constants copied now, or nil. An index below
+// zero is an *Error whose Code is ErrNegative, and the ABI is not called.
 func (s *Subscription) ImageAt(index int) (*Image, error) {
+	if index < 0 {
+		return nil, &Error{Fn: "cavalry_subscription_image_at_index", Code: ErrNegative, Message: fmt.Sprintf(
+			"index: an int from 0 expected, and %d was given; the ABI would be passed another index, near 2 ** 64, "+
+				"and was not called. Pass an index that is not below zero. See "+
+				"clients/go/README.md#what-it-must-never-do", index)}
+	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	ptr := C.cavalry_subscription_image_at_index(s.handle, C.size_t(index))
@@ -1962,16 +2024,18 @@ type CommittedLog struct {
 // failure only until the log's next one; Faulted keeps it (IsEnded). An entry whose
 // handler call panicked was delivered and is not delivered again: Position is past it,
 // and past every entry this poll delivered after it.
+// A fragmentLimit below zero is refused before the ABI is called: -1, with an Err whose
+// Code is ErrNegative.
 func (l *CommittedLog) Poll(handler EntryHandler, fragmentLimit int) (int, error) {
 	s := l.state
 	if s.polling {
-		return int(C.cavalry_go_committed_log_poll(l.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit), &s.err)), nil
+		return int(C.cavalry_go_committed_log_poll(l.handle, C.uintptr_t(s.slot), C.int64_t(fragmentLimit), &s.err)), nil
 	}
 	s.entry = handler
 	s.polling = true
 	s.raised = 0
 	s.first = nil
-	count := int(C.cavalry_go_committed_log_poll(l.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit), &s.err))
+	count := int(C.cavalry_go_committed_log_poll(l.handle, C.uintptr_t(s.slot), C.int64_t(fragmentLimit), &s.err))
 	s.polling = false
 	s.entry = nil
 	if s.raised == 0 {
@@ -2148,16 +2212,18 @@ func (n *ClusterSession) Offer(message []byte) int64 {
 // below that of a reply this session has handed over, is passed over and counted in
 // StaleReplies, and is not in the count. Every reply the ABI hands over reaches the
 // handler, whether or not an earlier call panicked.
+// A fragmentLimit below zero is refused before the ABI is called: -1, with an Err whose
+// Code is ErrNegative.
 func (n *ClusterSession) Poll(handler ReplyHandler, fragmentLimit int) (int, error) {
 	s := n.state
 	if s.polling {
-		return int(C.cavalry_go_cluster_session_poll(n.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit), &s.err)), nil
+		return int(C.cavalry_go_cluster_session_poll(n.handle, C.uintptr_t(s.slot), C.int64_t(fragmentLimit), &s.err)), nil
 	}
 	s.reply = handler
 	s.polling = true
 	s.raised = 0
 	s.first = nil
-	count := int(C.cavalry_go_cluster_session_poll(n.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit), &s.err))
+	count := int(C.cavalry_go_cluster_session_poll(n.handle, C.uintptr_t(s.slot), C.int64_t(fragmentLimit), &s.err))
 	s.polling = false
 	s.reply = nil
 	if s.raised == 0 {
@@ -2342,18 +2408,20 @@ func (v *ClusterService) CancelTimer(correlationID int64) int32 {
 // *HandlerError: its Fragments is the count of entries taken before that entry, and its
 // Cause the panic's value, or the *Error with ErrClusterAction that the ABI gave for the
 // value the handler returned. The next poll hands the aborted entry over again.
+// A fragmentLimit below zero is refused before the ABI is called: -1, with an Err whose
+// Code is ErrNegative.
 func (v *ClusterService) Poll(handler ServiceHandler, fragmentLimit int) (int, error) {
 	s := v.state
 	if s.polling {
 		return int(C.cavalry_go_cluster_service_poll(v.handle, v.client.handle, C.uintptr_t(s.slot),
-			C.size_t(fragmentLimit), &s.aborted, &s.err)), nil
+			C.int64_t(fragmentLimit), &s.aborted, &s.err)), nil
 	}
 	s.service = handler
 	s.polling = true
 	s.raised = 0
 	s.first = nil
 	count := int(C.cavalry_go_cluster_service_poll(v.handle, v.client.handle, C.uintptr_t(s.slot),
-		C.size_t(fragmentLimit), &s.aborted, &s.err))
+		C.int64_t(fragmentLimit), &s.aborted, &s.err))
 	s.polling = false
 	s.service = nil
 	if s.raised == 0 && s.aborted == 0 {
