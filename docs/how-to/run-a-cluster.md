@@ -159,18 +159,19 @@ committed once a quorum, two of three, has it on disk.
    driver cuts each recording that was being made to the position the recording had
    synced, and counts each cut in `recording.cut_to_synced`. While that driver runs,
    `cavalry doctor` on it prints a `WARN` line for the counter, which explains the
-   cut and asks nothing of you. A host that lost power starts again, and the
-   directories of this page are under `/tmp`, which macOS and many Linux systems
-   empty when a host starts. When this page's one host empties it, the three
-   members' directories go together, and no member is left with the cluster's log:
-   start the three again as a new cluster, with the commands of step 3, as step 6
-   does. What the cluster had committed is gone with them. On three hosts, keep each
-   log directory on storage that outlives its host, as the prerequisites say. A
-   member whose log directory is gone all the same starts as one whose directory has
-   no `log-recordings` file, under "When it does not work", while the other two run.
-   That section, under "The member's host lost power", also names the one member that
-   starts on a new log directory instead: one that ran a driver of an earlier version
-   when the power was lost.
+   cut and asks nothing of you unless the count climbs at every start: then the
+   line says to find what stops the driver without `close`. A host that lost power
+   starts again, and the directories of this page are under `/tmp`, which macOS and
+   many Linux systems empty when a host starts. When this page's one host empties
+   it, the three members' directories go together, and no member is left with the
+   cluster's log: start the three again as a new cluster, with the commands of step
+   3, as step 6 does. What the cluster had committed is gone with them. On three
+   hosts, keep each log directory on storage that outlives its host, as the
+   prerequisites say. A member whose log directory is gone all the same starts as
+   one whose directory has no `log-recordings` file, under "When it does not work",
+   while the other two run. That section, under "The member's host lost power", also
+   names the one member that starts on a new log directory instead: one that ran a
+   driver of an earlier version when the power was lost.
 
 ## How to verify it worked
 
