@@ -15,7 +15,10 @@ namespace Cavalry;
 /// A handler that throws, or returns what is no action, has its entry aborted, and
 /// <c>Poll</c> throws a <see cref="HandlerException"/> once the ABI has returned: an entry
 /// is taken only by a handler that finished with it. <see cref="Reply"/> answers a session
-/// from inside the handler. The handler is reached through an <c>UnmanagedCallersOnly</c>
+/// from inside the handler, and <see cref="ScheduleTimer"/> and <see cref="CancelTimer"/>
+/// are the program's timers there: a timer that is due is handed to the handler as an entry
+/// of the type <see cref="Abi.CLUSTER_ENTRY_TIMER"/>, once, at one position beside every
+/// member. The handler is reached through an <c>UnmanagedCallersOnly</c>
 /// trampoline of the service's own, which finds the service by the <c>GCHandle</c> it hands
 /// the ABI as its <c>clientd</c>.
 /// </summary>
@@ -63,17 +66,65 @@ public sealed unsafe class ClusterService : IDisposable
         }
     }
 
+    /// <summary>Schedules, from inside the handler, the timer
+    /// <paramref name="correlationId"/>, any <c>long</c> the program chooses, for
+    /// <paramref name="deadline"/> in the cluster's time, the clock of an entry's
+    /// <c>Timestamp</c>, in milliseconds, and returns what became of the schedule, never
+    /// throwing for a code. <see cref="Abi.CLUSTER_TIMER_SCHEDULED"/>: the timer is pending
+    /// with that deadline, a new one or one that was pending, whose deadline this sets.
+    /// <see cref="Abi.CLUSTER_TIMER_REFUSED"/>: the service holds its 1,024 pending timers
+    /// and the id is none of them, and nothing changed; a program with more deadlines than
+    /// that keeps them in its own state and schedules one timer for the earliest. When the
+    /// deadline has come the handler is handed an entry whose <c>Type</c> is
+    /// <see cref="Abi.CLUSTER_ENTRY_TIMER"/> and whose <c>CorrelationId</c> is this id: once,
+    /// at one position beside every member, never before its deadline and never after its
+    /// cancel. A deadline at or before the entry's time is due at once. A handler that
+    /// returns <see cref="Abi.ACTION_ABORT"/>, or throws, is handed its entry again with
+    /// every timer as it was before that handling. A program schedules its first timer only
+    /// once every member of its cluster, with the service beside it, runs version 2 of the
+    /// cluster protocol, and from that entry on no member is stepped back: a service of
+    /// version 1 hands its program no timer, so the two would compute two states from one
+    /// log. From outside the handler it is -1, with <see cref="Abi.ERR_CLUSTER_NO_ENTRY"/>
+    /// as <see cref="Abi.Errcode"/>. One ABI call, which allocates nothing and waits for
+    /// nothing: the service tells its member after the handler has taken the entry, in
+    /// <see cref="Poll"/>.</summary>
+    public int ScheduleTimer(long correlationId, long deadline)
+    {
+        return Abi.cavalry_cluster_service_schedule_timer(handle, correlationId, deadline);
+    }
+
+    /// <summary>Makes, from inside the handler, the timer <paramref name="correlationId"/>
+    /// pending no more: its event, where the log holds one, is handed to no program. A timer
+    /// that is not pending is no error. It returns 0, and -1 with
+    /// <see cref="Abi.ERR_CLUSTER_NO_ENTRY"/> from outside the handler. One ABI call, which
+    /// allocates nothing and waits for nothing.</summary>
+    public int CancelTimer(long correlationId)
+    {
+        return Abi.cavalry_cluster_service_cancel_timer(handle, correlationId);
+    }
+
     /// <summary>Hands up to <paramref name="fragmentLimit"/> committed entries to the handler:
-    /// one ABI call, the count of entries the handler took, 0 while the driver hosts no
-    /// member that has a log yet (or -1, with <see cref="Abi.Errcode"/> saying why: a fault,
-    /// which <see cref="GetFault"/> reads until the next poll, or
-    /// <see cref="Abi.ERR_POLLING"/> for a poll from inside a handler of this service, which
-    /// the ABI refuses and which touches nothing here). The poll is the service's duty
+    /// one ABI call, the count of entries the service took, 0 while the driver, one that
+    /// runs, hosts no member that has a log yet (or -1, with <see cref="Abi.Errcode"/> saying
+    /// why: a fault, which <see cref="GetFault"/> reads until the next poll;
+    /// <see cref="Abi.ERR_CLOSED"/> for a client that its driver closed, as when the
+    /// member's driver has stopped, which <c>GetFault</c> reads too and every poll after it
+    /// answers again, so that a program's loop ends on it; or, with <c>GetFault</c> left as
+    /// it was, <see cref="Abi.ERR_POLLING"/> for a poll from inside a handler of this
+    /// service, which the ABI refuses and which touches nothing here). A timer event whose
+    /// timer is not pending, or not yet due, is taken and handed to no handler, so the count
+    /// may be more than the handler was called. The poll is the service's duty
     /// cycle: it opens the member's log, follows the log's sessions, and holds a publication
     /// to each open session while the service answers. Those are commands sent with the
     /// service's client, at a session's opening, where a term's leader changes and at a
     /// recording's end, and the poll waits for the driver's answer to each; none is sent for
-    /// a session message. The poll takes no lock, and it is a call on the client: no other
+    /// a session message. Six more are sent once in a service's life, at the most: its five
+    /// counters and its publication to its member, in the poll in which the program first
+    /// schedules a timer or the service first passes a timer event over, after that poll's
+    /// entries, where a snapshot has not added them already; that poll returns -1 with the
+    /// driver's refusal of one of them, after the entries its handler took are taken. After
+    /// that the poll tells the member what each taken entry changed, and every pending
+    /// timer again each second, by offers that wait for nothing. The poll takes no lock, and it is a call on the client: no other
     /// thread uses the service's client (<see cref="Client.ClusterService"/>). When the
     /// handler threw, or returned what is no action, its entry was aborted and this throws a
     /// <see cref="HandlerException"/> whose <c>Cluster</c> is "service": its

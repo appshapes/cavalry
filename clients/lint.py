@@ -382,15 +382,18 @@ RULES = {
             "CommittedLog.Deliver",
             # A cluster session and a cluster service (ADR 0124): the session's offer, its
             # poll, its trampoline and the method that calls the handler, which reads each
-            # reply's values; the service's poll, its reply, its trampoline and the method
-            # that calls the handler, which reads each entry's values and passes the ABI the
-            # action the handler returned; and the getters of the two objects of values.
+            # reply's values; the service's poll, its reply, the schedule and the cancel of
+            # its timers (ADR 0157), its trampoline and the method that calls the handler,
+            # which reads each entry's values and passes the ABI the action the handler
+            # returned; and the getters of the two objects of values.
             "ClusterSession.Offer",
             "ClusterSession.Poll",
             "ClusterSession.OnReply",
             "ClusterSession.Deliver",
             "ClusterService.Poll",
             "ClusterService.Reply",
+            "ClusterService.ScheduleTimer",
+            "ClusterService.CancelTimer",
             "ClusterService.OnClusterEntry",
             "ClusterService.Deliver",
             "ClusterReplyValues.LeadershipTermId",
