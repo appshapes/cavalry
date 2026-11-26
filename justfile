@@ -33,7 +33,9 @@ test *ARGS: test-scripts
 # sentence of counters.toml names (work item 230), and the script that points Brigade's
 # server at this tree, against a made-up checkout and a fake `cargo`, with the nightly
 # workflow that runs it (work item 362), and the book's pages of the decisions and the
-# check of the built book, on a made-up book and made-up built pages (work item 474).
+# check of the built book, on a made-up book and made-up built pages (work item 474),
+# and the rule that a commit and a pull request body carry no attribution lines: the
+# project's settings, the skills' words and the check `/pr` gives (work item 475).
 # Standard library only, no network.
 test-scripts:
     python3 scripts/release-notes-email-test.py
@@ -47,6 +49,7 @@ test-scripts:
     python3 scripts/tidy-test.py
     python3 scripts/gen-counters-test.py
     python3 scripts/decisions-index-test.py
+    python3 scripts/attribution-test.py
     python3 clients/generate-test.py
     python3 clients/lint-test.py
 

@@ -103,7 +103,23 @@ conflict: a conflict is resolved in place, as step 4 says.
    does not check (the `just fuzz` result after a parser change). A bench table is not
    owed: no change takes a bench host, and the latency gate runs each night on `master`
    (ADR 0139). End it with `Closes #<issue>` when an
-   issue exists. Then:
+   issue exists, and with nothing after that: **no attribution lines**, in the body
+   or in a commit message of the branch. That is no `Co-Authored-By:` line that names
+   Claude, no `Claude-Session:` line with a session's link, and no "Generated with
+   Claude Code" line (the owner's ruling of 2026-11-26; work item 475; `/commit`,
+   step 5, has the reason). The body is the one that matters most, since it becomes
+   the commit on `master`. The project's `.claude/settings.json` turns the lines off
+   (`attribution`), and this check of the file shows that none is there. It prints
+   `no attribution lines`, or the lines to take out. A sentence that names the lines,
+   as this step does, is not one of them, and neither is a person's `Co-Authored-By:`:
+
+   ```
+   grep -n -i -E '^co-authored-by:.*(claude|anthropic)|^claude-session:|generated with \[claude code\]|claude\.ai/code/session' <file> || echo "no attribution lines"
+   ```
+
+   Run it again on the new file before any `gh pr edit <number> --body-file <file>`.
+   A commit that is already pushed keeps its lines: never amend or force-push to
+   remove one, since the squash takes the body and not the branch's messages. Then:
 
    ```
    gh pr create --title "<work item>: <Imperative subject>" --body-file <file> --label auto-merge
