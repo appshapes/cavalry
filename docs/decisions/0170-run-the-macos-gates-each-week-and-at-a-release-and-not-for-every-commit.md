@@ -145,15 +145,23 @@ created from 2026-11-22 to 2026-11-25 UTC, four days, and each run's jobs:
 - In the same window `gates (linux)` failed once in 61 jobs, at `just test` (run
   45487811627, 0c68d788).
 
-The changed workflows were tried from a throwaway branch, `trial-479-macos`, which
-held this change's two workflow files and a temporary push trigger in each:
+The changed workflows were tried twice from a throwaway branch, `trial-479-macos`,
+which is never merged:
 
-- A push started `ci` run 45759398269 with one job, `gates (linux)`, and `macos` run
-  45759398361 with one job, `macos / gates (macos)`. The two ran at the same time,
-  so the called run is in no group that `ci`'s own runs wait in.
-- A run of `macos.yml` by hand at that branch, and a run of `ci.yml` by hand, are in
-  this change's pull request body with their jobs, as is the first run of `macos.yml`
-  at `master`'s head after the landing.
+- At 7676e590, which is this change's first commit, 9a49fcf3, with a temporary push
+  trigger added to each workflow file: a push started `ci` run 45759398269 with one job,
+  `gates (linux)`, and `macos` run 45759398361 with one job, `macos / gates (macos)`.
+  The two ran at the same time and both passed, in 16 and 17 minutes. So a push
+  starts no macOS job in `ci`, and the called run is in no group that `ci`'s own
+  runs wait in.
+- At f51758f2, with no temporary trigger: its tree is that of 7bfa5063, this change's
+  head when it was reviewed. By hand, `macos` run 45761444480 had the one job
+  `macos / gates (macos)`, and `ci` run 45761448035 had the one job `gates (linux)`.
+  Both passed, in 17 and 15 minutes.
+
+The first run of `macos.yml` at `master`'s head cannot come before this change lands,
+since the file must be on `master` first. It is started by hand after the landing,
+and the landing's comment on work item 479 names it.
 
 An independent read of the workflows and the rules by a read-only reviewer came
 before the push; what it found is in the pull request's body.
