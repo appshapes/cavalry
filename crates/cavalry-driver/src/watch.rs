@@ -138,8 +138,8 @@ impl Watch {
             let now = now_nanos();
             for ((thread, due), counted) in self.threads.iter().zip(&mut counted) {
                 if let Some(due) = due.overdue(now) {
-                    // Counted before the thread is woken, so that the counter never
-                    // lags the thread it explains.
+                    // Counted before the unpark, so that the counter never lags the
+                    // thread it explains: whoever sees the thread go on sees its count.
                     if *counted != due {
                         *counted = due;
                         self.parks_overdue.increment();
