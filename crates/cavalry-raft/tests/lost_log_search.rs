@@ -92,6 +92,7 @@ struct Drawn {
     leaders_stalled: u64,
     senders_held: u64,
     frames_held: u64,
+    streams_held: u64,
 }
 
 /// Runs `seed` for `length_ms`, the check of every step failing the test where it
@@ -112,6 +113,10 @@ fn search(seed: u64, length_ms: u64) -> Drawn {
     // held back for a member, released from when.
     let mut sender_held: Option<(i32, u64)> = None;
     let mut frame_held: Option<(i32, u64)> = None;
+    // A consensus stream held from one member to another, until when: every message
+    // written on it waits and reaches the receiver in the order written, its next run
+    // if it starts again meanwhile (work item 476).
+    let mut stream_held: Option<(i32, i32, u64)> = None;
     let mut entry: u32 = 0;
     for ms in 0..length_ms {
         if draw.below(10) == 0 && cluster.offer(&entry.to_le_bytes()).is_ok() {
@@ -143,6 +148,15 @@ fn search(seed: u64, length_ms: u64) -> Drawn {
         {
             cluster.release_held_back(member);
             frame_held = None;
+        }
+        // Released once the receiver has left init, as its new image takes the frames
+        // (work item 458: the in-memory cluster reads a message in init).
+        if let Some((from, to, until)) = stream_held
+            && ms >= until
+            && cluster.election_state(to) != Some(cavalry_raft::ElectionState::Init)
+        {
+            cluster.release_stream(from, to);
+            stream_held = None;
         }
         if let Some((a, b, until)) = cut
             && ms >= until
@@ -255,6 +269,17 @@ fn search(seed: u64, length_ms: u64) -> Drawn {
                     drawn.stalls += 1;
                 }
             }
+            // A stream held as a sender holds its frames while its receiver's image is a
+            // receiver window behind (`spec/udp.md`, "The sender"): from one member to
+            // another, for 1 ms to 20 s, so that a member that starts again meanwhile
+            // reads frames its peer wrote before that start (work item 476).
+            5 if stream_held.is_none() => {
+                let from = draw.pick(&IDS);
+                let to = draw.pick(&[(from + 1) % 3, (from + 2) % 3]);
+                cluster.hold_stream(from, to);
+                stream_held = Some((from, to, ms + 1 + draw.below(20_000)));
+                drawn.streams_held += 1;
+            }
             _ => {}
         }
         safety.run(&mut cluster, 1);
@@ -283,6 +308,7 @@ fn no_committed_entry_is_lost_across_lost_log_directories() {
         all.leaders_stalled += drawn.leaders_stalled;
         all.senders_held += drawn.senders_held;
         all.frames_held += drawn.frames_held;
+        all.streams_held += drawn.streams_held;
     }
     let Drawn {
         wipes,
@@ -291,6 +317,7 @@ fn no_committed_entry_is_lost_across_lost_log_directories() {
         leaders_stalled,
         senders_held,
         frames_held,
+        streams_held,
     } = all;
     assert!(wipes > 0, "seeds {seeds:?} wiped no member");
     assert!(
@@ -301,6 +328,7 @@ fn no_committed_entry_is_lost_across_lost_log_directories() {
         senders_held > 0 && frames_held > 0,
         "seeds {seeds:?} held {senders_held} senders and {frames_held} frames at a wipe"
     );
+    assert!(streams_held > 0, "seeds {seeds:?} held no stream");
     assert!(
         caught_up > 0,
         "no wiped member of seeds {seeds:?} reached its floor"

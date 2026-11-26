@@ -90,6 +90,12 @@ const REPLAY_CONNECT_TIMEOUT_NS: u64 = 5_000_000_000;
 /// cluster has would be more than a test needs.
 pub const MAX_HELD_BACK: usize = 8;
 
+/// The most consensus messages the in-memory cluster holds in held streams at once
+/// ([`Cluster::hold_stream`]): one sent while that many are held is lost, as a frame a
+/// full log buffer has no room for is refused to its writer, who sends again at its
+/// interval.
+pub const MAX_HELD_STREAM: usize = 1_024;
+
 /// One consensus message between two members.
 struct Flight {
     deliver_at_ns: u64,
@@ -359,6 +365,11 @@ struct World {
     /// The member ids whose address a test moved to another run, each with the place
     /// of the run that holds it now ([`Cluster::move_address`]).
     addressed: Vec<(i32, usize)>,
+    /// The pairs, `(from, to)` by place, whose stream a test holds
+    /// ([`Cluster::hold_stream`]), and every message sent on them since, in the order
+    /// sent: at most [`MAX_HELD_STREAM`].
+    held_streams: Vec<(usize, usize)>,
+    stream_queue: Vec<Flight>,
 }
 
 impl World {
@@ -444,6 +455,22 @@ impl Io for MemberIo<'_> {
         };
         let run = self.world.runs.get(self.own).copied().unwrap_or(0);
         let session = session_of(self.own, to, run);
+        // A stream a test holds keeps every message written on it from then on, in the
+        // order written, as a sender keeps the frames its receiver's image is a receiver
+        // window behind for, and sends them to the next image (`spec/udp.md`, "The
+        // sender"): none is lost at the receiver's start, as a datagram on its way is.
+        if self.world.held_streams.contains(&(self.own, to)) {
+            if self.world.stream_queue.len() < MAX_HELD_STREAM {
+                self.world.stream_queue.push(Flight {
+                    deliver_at_ns: 0,
+                    to,
+                    bytes: buffer.get(..length).unwrap_or(&[]).to_vec(),
+                    run,
+                    session,
+                });
+            }
+            return true;
+        }
         // The message a test holds back is written and not sent, as a sender holds a
         // frame back while its receiver's image is a receiver window behind, and it
         // reaches the member when the test releases it.
@@ -1052,6 +1079,8 @@ impl Cluster {
                 max_delay_ms: 0,
                 random: 0x9E37_79B9_7F4A_7C15,
                 addressed: Vec::new(),
+                held_streams: Vec::new(),
+                stream_queue: Vec::new(),
             },
         })
     }
@@ -2258,6 +2287,52 @@ impl Cluster {
         self.world
             .hold_back
             .retain(|&(_, armed_to, _)| armed_to != to);
+    }
+
+    /// Holds the stream from member `from` to member `to`, as a sender holds the frames
+    /// its receiver's image is a receiver window behind for (`spec/udp.md`, "The
+    /// sender"; work item 476): every consensus message `from` sends `to` from now on is
+    /// kept, in the order written, at most [`MAX_HELD_STREAM`] of them across every
+    /// held stream, and none reaches `to` until [`Cluster::release_stream`]. A start of
+    /// `to` again, [`Cluster::wipe`] or [`Cluster::restart`], loses none of them: they
+    /// reach its new run, as a sender sends its unsent frames to the next image. Unlike
+    /// [`Cluster::hold_back_new_leadership_term`], which holds one message while those
+    /// written after it pass, a held stream keeps the order a stream has.
+    pub fn hold_stream(&mut self, from: i32, to: i32) {
+        let index = |id: i32| self.world.disks.iter().position(|disk| disk.id == id);
+        if let (Some(from), Some(to)) = (index(from), index(to))
+            && !self.world.held_streams.contains(&(from, to))
+        {
+            self.world.held_streams.push((from, to));
+        }
+    }
+
+    /// Lets the stream from `from` to `to` go: the messages it kept are sent now, in the
+    /// order written, each with the delay the delivery setting draws, and what `from`
+    /// sends `to` next goes as any message does.
+    pub fn release_stream(&mut self, from: i32, to: i32) {
+        let index = |id: i32| self.world.disks.iter().position(|disk| disk.id == id);
+        let (Some(from), Some(to)) = (index(from), index(to)) else {
+            return;
+        };
+        self.world.held_streams.retain(|&pair| pair != (from, to));
+        let now_ns = self.world.clock.now_ns;
+        // A message the sender's earlier run wrote went with that run's publication, as
+        // a process that stops takes its unsent frames with it.
+        let run = self.world.runs.get(from).copied().unwrap_or(0);
+        let queue = std::mem::take(&mut self.world.stream_queue);
+        let mut kept = Vec::with_capacity(queue.len());
+        for mut flight in queue {
+            // The sender's place, as `session_of` writes it in the session's top byte.
+            let sender = usize::try_from((flight.session >> 24) & 0xFF).unwrap_or(usize::MAX);
+            if flight.to != to || sender != from {
+                kept.push(flight);
+            } else if flight.run == run && self.world.net.len() < IN_FLIGHT_CAPACITY {
+                flight.deliver_at_ns = now_ns.saturating_add(STEP_NS);
+                self.world.net.push_back(flight);
+            }
+        }
+        self.world.stream_queue = kept;
     }
 
     /// Holds back the next floor answer member `from` sends to member `to`: it is
