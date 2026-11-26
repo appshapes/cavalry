@@ -59,6 +59,14 @@ def camel(name: str) -> str:
     return head + "".join(part.capitalize() for part in rest)
 
 
+def said(name: str) -> str:
+    """The name a refusal gives the caller for the ABI's parameter `name`: the one the
+    package's method has for it, which is what the caller wrote (ADR 0164, decision 6).
+    The methods name an integer the ABI's way in camel case, `recordingId` for
+    `recording_id`, and the bytes of a message `message`, where the ABI says `buffer`."""
+    return {"buffer": "message"}.get(name, camel(name))
+
+
 def layout(header) -> dict:
     """Each struct's size and its fields' offsets, in C's natural alignment, nested structs
     included, for the DataView reads of index.js and the ArrayBuffers it allocates."""
@@ -117,7 +125,7 @@ def c_arg(param, header, index: int, lines: list, struct_names: set, opaque: set
     base = t[6:] if const else t
     name = param.name
     if base == "char *":
-        lines.append(f"  char {name}_buf[4096]; const char *{name} = string_arg(env, argv[{index}], {name}_buf, sizeof {name}_buf, \"{name}\");")
+        lines.append(f"  char {name}_buf[4096]; const char *{name} = string_arg(env, argv[{index}], {name}_buf, sizeof {name}_buf, \"{said(name)}\");")
         lines.append(f"  if (string_failed) return NULL;")
         return name
     if base.endswith(" **"):
@@ -155,9 +163,9 @@ def c_arg(param, header, index: int, lines: list, struct_names: set, opaque: set
             reader = "int64_exact_arg"
         if base in narrow:
             least, greatest = narrow[base]
-            lines.append(f"  {base} {name} = ({base}) int_arg(env, argv[{index}], \"{name}\", {least}, {greatest});")
+            lines.append(f"  {base} {name} = ({base}) int_arg(env, argv[{index}], \"{said(name)}\", {least}, {greatest});")
         else:
-            lines.append(f"  {base} {name} = ({base}) {reader}(env, argv[{index}], \"{name}\");")
+            lines.append(f"  {base} {name} = ({base}) {reader}(env, argv[{index}], \"{said(name)}\");")
         lines.append(f"  if (arg_failed) return NULL;")
         return name
     raise SystemExit(f"generate_node: no marshalling for {t!r}")
@@ -257,7 +265,7 @@ def write_addon(header) -> str:
             t = " ".join(p.type.split())
             nxt = params[i + 1] if i + 1 < n else None
             if t in ("const uint8_t *", "uint8_t *") and nxt is not None and " ".join(nxt.type.split()) == "size_t":
-                body.append(f"  size_t {nxt.name} = 0; const uint8_t *{p.name} = (const uint8_t *) bytes_arg(env, argv[{js_args}], &{nxt.name}, \"{p.name}\");")
+                body.append(f"  size_t {nxt.name} = 0; const uint8_t *{p.name} = (const uint8_t *) bytes_arg(env, argv[{js_args}], &{nxt.name}, \"{said(p.name)}\");")
                 body.append("  if (arg_failed) return NULL;")
                 args += [p.name, nxt.name]
                 js_args += 1
@@ -2054,7 +2062,8 @@ class ClusterSession {
     this.sessionId = c.int64("session_id");
     this.maxMessageLength = c.size("max_message_length");
   }
-  /** Offer the leader `message`, a Buffer or another typed array, as a publication's `offer` takes
+  /** Offer the leader `message`, a Buffer or another typed array but a Float16Array, as a
+   * publication's `offer` takes
    * them: the position after it, or a result code below zero. ERROR with CAVALRY_ERR_TOO_LONG
    * as the thread's error is a message longer than `maxMessageLength`, and CLOSED a session
    * that is closed, for the reason `closed()` gives, or whose client is. From inside this
@@ -2164,7 +2173,8 @@ class ClusterService {
     this._state = addon.registerClusterService(this._entry);
     this._entry._state = this._state;
   }
-  /** From inside the handler: send `message`, a Buffer or another typed array, to the session
+  /** From inside the handler: send `message`, a Buffer or another typed array but a
+   * Float16Array, to the session
    * `sessionId`, with the leadership term id and the cluster's time of the entry being
    * handled, and return what became of the reply, one of `CAVALRY_CLUSTER_REPLY_*`, never
    * throwing for a code. `_SENT`: it is on its way, or an earlier handling of the same entry
@@ -2191,9 +2201,10 @@ class ClusterService {
    * deadline at or before the entry's time is due at once. A handler that returns ABORT, or
    * throws, is handed its entry again with every timer as it was before that handling. A
    * program schedules its first timer only once every member of its cluster, with the service
-   * beside it, runs version 2 of the cluster protocol, and from that entry on no member is
-   * stepped back: a service of version 1 hands its program no timer, so the two would compute
-   * two states from one log. From outside the handler it is -1, with
+   * beside it, runs version 2 of the cluster protocol or a later one, and from that entry on
+   * no member is stepped back to version 1: a service of version 1 hands its program no
+   * timer, so the two would compute two states from one log. From outside the handler it is
+   * -1, with
    * CAVALRY_ERR_CLUSTER_NO_ENTRY. An id and a deadline are each a BigInt, any int64, or a
    * number that is an integer from -(2 ** 53 - 1) to 2 ** 53 - 1, as `entry.timestamp + 50`
    * is. A BigInt outside int64, and a number with a fraction or outside that range, a NaN

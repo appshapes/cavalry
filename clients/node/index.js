@@ -994,7 +994,8 @@ class ClusterSession {
     this.sessionId = c.int64("session_id");
     this.maxMessageLength = c.size("max_message_length");
   }
-  /** Offer the leader `message`, a Buffer or another typed array, as a publication's `offer` takes
+  /** Offer the leader `message`, a Buffer or another typed array but a Float16Array, as a
+   * publication's `offer` takes
    * them: the position after it, or a result code below zero. ERROR with CAVALRY_ERR_TOO_LONG
    * as the thread's error is a message longer than `maxMessageLength`, and CLOSED a session
    * that is closed, for the reason `closed()` gives, or whose client is. From inside this
@@ -1104,7 +1105,8 @@ class ClusterService {
     this._state = addon.registerClusterService(this._entry);
     this._entry._state = this._state;
   }
-  /** From inside the handler: send `message`, a Buffer or another typed array, to the session
+  /** From inside the handler: send `message`, a Buffer or another typed array but a
+   * Float16Array, to the session
    * `sessionId`, with the leadership term id and the cluster's time of the entry being
    * handled, and return what became of the reply, one of `CAVALRY_CLUSTER_REPLY_*`, never
    * throwing for a code. `_SENT`: it is on its way, or an earlier handling of the same entry
@@ -1131,9 +1133,10 @@ class ClusterService {
    * deadline at or before the entry's time is due at once. A handler that returns ABORT, or
    * throws, is handed its entry again with every timer as it was before that handling. A
    * program schedules its first timer only once every member of its cluster, with the service
-   * beside it, runs version 2 of the cluster protocol, and from that entry on no member is
-   * stepped back: a service of version 1 hands its program no timer, so the two would compute
-   * two states from one log. From outside the handler it is -1, with
+   * beside it, runs version 2 of the cluster protocol or a later one, and from that entry on
+   * no member is stepped back to version 1: a service of version 1 hands its program no
+   * timer, so the two would compute two states from one log. From outside the handler it is
+   * -1, with
    * CAVALRY_ERR_CLUSTER_NO_ENTRY. An id and a deadline are each a BigInt, any int64, or a
    * number that is an integer from -(2 ** 53 - 1) to 2 ** 53 - 1, as `entry.timestamp + 50`
    * is. A BigInt outside int64, and a number with a fraction or outside that range, a NaN
