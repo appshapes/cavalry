@@ -56,6 +56,7 @@ test-scripts:
     python3 scripts/gen-counters-test.py
     python3 scripts/decisions-index-test.py
     python3 scripts/attribution-test.py
+    python3 scripts/glibc-floor-test.py
     python3 clients/generate-test.py
     python3 clients/lint-test.py
     python3 clients/package-test.py

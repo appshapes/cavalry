@@ -183,16 +183,51 @@ class PlatformTag(unittest.TestCase):
         # Versions compare as numbers, 2.4 below 2.17, and across every library asked;
         # a version of another library's naming, GCC_3.0, is no glibc version.
         several = elf(machine=183, needs=(("libgcc_s.so.1", ("GCC_3.0", "GCC_4.2.0")),
-                                          ("libm.so.6", ("GLIBC_2.27",)),
+                                          ("libm.so.6", ("GLIBC_2.31",)),
                                           ("libc.so.6", ("GLIBC_2.4", "GLIBC_2.17", "GLIBC_2.2.5"))))
-        self.assertEqual(backend.library_platform(several, "lib")[1], "manylinux_2_27_aarch64")
-        # A tag has no third number: a library that needs 2.3.4 does not run on 2.3, so its tag is 2_4.
-        for versions, tag in ((("GLIBC_2.3.4", "GLIBC_2.2.5"), "manylinux_2_4_x86_64"),
-                              (("GLIBC_2.2.5",), "manylinux_2_3_x86_64"),
-                              (("GLIBC_2.3.4", "GLIBC_2.4"), "manylinux_2_4_x86_64"),
-                              (("GLIBC_2.3.4", "GLIBC_2.5"), "manylinux_2_5_x86_64"),
-                              (("GLIBC_2.17.0",), "manylinux_2_17_x86_64")):
+        self.assertEqual(backend.library_platform(several, "lib")[1], "manylinux_2_31_aarch64")
+        # A tag has no third number: a library that needs 2.30.1 does not run on 2.30, so
+        # its tag is 2_31. glibc has given no version a third number since 2.3.4, which
+        # is below the floor now, so the versions here are made up to be above it.
+        for versions, tag in ((("GLIBC_2.30.1", "GLIBC_2.2.5"), "manylinux_2_31_x86_64"),
+                              (("GLIBC_2.30",), "manylinux_2_30_x86_64"),
+                              (("GLIBC_2.30.1", "GLIBC_2.31"), "manylinux_2_31_x86_64"),
+                              (("GLIBC_2.30.1", "GLIBC_2.32"), "manylinux_2_32_x86_64"),
+                              (("GLIBC_2.29.0",), "manylinux_2_29_x86_64")):
             self.assertEqual(backend.library_platform(elf(needs=(("libc.so.6", versions),)), "lib")[1], tag, versions)
+
+    def test_an_elf_librarys_tag_is_never_below_the_floor(self):
+        """ADR 0178: Cavalry's packages are built for glibc 2.28 and run on it in the
+        package's gate, and on nothing older. A library that asks for less gets the
+        floor's tag, and none of the tags that no installer matches, `manylinux_2_3` and
+        `2_4` on x86_64 and anything below `2_17` on aarch64. A library that asks for
+        more keeps what it asks for: the floor never lowers a tag."""
+        self.assertEqual(backend._GLIBC_FLOOR, (2, 28))
+        for machine, name in ((62, "x86_64"), (183, "aarch64")):
+            for versions in (("GLIBC_2.2.5",), ("GLIBC_2.3.4", "GLIBC_2.2.5"), ("GLIBC_2.17",),
+                             ("GLIBC_2.17", "GLIBC_2.18", "GLIBC_2.25"), ("GLIBC_2.27",), ("GLIBC_2.27.1",),
+                             ("GLIBC_2.28",), ("GLIBC_2.17", "GLIBC_2.28")):
+                library = elf(machine=machine, needs=(("libc.so.6", versions),))
+                self.assertEqual(backend.library_platform(library, "lib")[1], f"manylinux_2_28_{name}", versions)
+            for versions, tag in ((("GLIBC_2.28.1",), "2_29"), (("GLIBC_2.17", "GLIBC_2.29"), "2_29"),
+                                  (("GLIBC_2.34", "GLIBC_2.2.5"), "2_34")):
+                library = elf(machine=machine, needs=(("libc.so.6", versions),))
+                self.assertEqual(backend.library_platform(library, "lib")[1], f"manylinux_{tag}_{name}", versions)
+
+    def test_a_library_with_packed_relative_relocations_needs_glibc_2_36(self):
+        """A library linked with `-z pack-relative-relocs` asks its loader for the version
+        name `GLIBC_ABI_DT_RELR`, which glibc has from 2.36 and which has no number in
+        it. A reader that skipped the name would tag such a library for the newest
+        numbered version it asks for, 2.34 here, where it does not load."""
+        packed = elf(needs=(("libc.so.6", ("GLIBC_2.2.5", "GLIBC_ABI_DT_RELR", "GLIBC_2.34")),))
+        self.assertEqual(backend.library_platform(packed, "lib")[1], "manylinux_2_36_x86_64")
+        alone = elf(machine=183, needs=(("libc.so.6", ("GLIBC_ABI_DT_RELR",)),))
+        self.assertEqual(backend.library_platform(alone, "lib")[1], "manylinux_2_36_aarch64")
+        newer = elf(needs=(("libc.so.6", ("GLIBC_ABI_DT_RELR", "GLIBC_2.38")),))
+        self.assertEqual(backend.library_platform(newer, "lib")[1], "manylinux_2_38_x86_64")
+        # Another name that begins the same way is no glibc version, as before.
+        other = elf(needs=(("libc.so.6", ("GLIBC_ABI_OTHER", "GLIBC_PRIVATE", "GLIBC_2.30")),))
+        self.assertEqual(backend.library_platform(other, "lib")[1], "manylinux_2_30_x86_64")
 
     def test_an_elf_library_with_no_tag_is_refused(self):
         whole = elf()
@@ -227,8 +262,8 @@ class PlatformTag(unittest.TestCase):
                          "manylinux_2_34_x86_64")
         self.assertLess(time.monotonic() - started, 5)
         # And a count that is too small ends the list early: the reader trusts neither alone.
-        two = (("libm.so.6", ("GLIBC_2.27",)), ("libc.so.6", ("GLIBC_2.34",)))
-        self.assertEqual(backend.library_platform(elf(needs=two, count=1), "lib")[1], "manylinux_2_27_x86_64")
+        two = (("libm.so.6", ("GLIBC_2.31",)), ("libc.so.6", ("GLIBC_2.34",)))
+        self.assertEqual(backend.library_platform(elf(needs=two, count=1), "lib")[1], "manylinux_2_31_x86_64")
 
     def test_a_file_that_is_neither_is_refused(self):
         for library in (b"", b"MZ\x90\0" + b"\0" * 60, struct.pack(">I", 0xCAFEBABE) + b"\0" * 60):

@@ -16,6 +16,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# On Linux the whole of this runs at the floor, glibc 2.28, in the container that
+# scripts/floor.sh starts: what is built below is linked there, and the package is
+# installed and run there (ADR 0178). On macOS it runs as it is.
+if [ "$(uname -s)" = Linux ] && [ -z "${CAVALRY_AT_FLOOR:-}" ]; then
+    exec scripts/floor.sh bash scripts/package.sh
+fi
+
 if [ -d /dev/shm ]; then base=/dev/shm; else base="${TMPDIR:-/tmp}"; fi
 export CAVALRY_DIR="${base%/}/cavalry-package-$$"
 export CAVALRY_LOG_DIR="${CAVALRY_DIR}.log"
@@ -32,6 +39,13 @@ trap cleanup EXIT
 echo "package: build the driver and the library"
 cargo build --release -p cavalry --bin cavalry
 cargo build --release -p cavalry-ffi --lib
+
+# The floor's check (ADR 0178): neither file may need a newer glibc than the floor's,
+# nor load a library a system of the floor may lack. Here it is true by how they were
+# built; the check is what fails when the image, the toolchain or a dependency moves.
+if [ -n "${CAVALRY_AT_FLOOR:-}" ]; then
+    python3 scripts/glibc-floor.py target/release/libcavalry_ffi.so target/release/cavalry
+fi
 
 echo "package: cavalry run, in the background, on $CAVALRY_DIR"
 target/release/cavalry run &
