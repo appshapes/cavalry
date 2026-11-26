@@ -290,31 +290,83 @@ static void publish_and_receive(cavalry_publication_t *publication, receiver_t *
     publish_and_receive_all(publication, rs, 1);
 }
 
+/* The most ports one step takes together. */
+#define PORTS_TOGETHER 8
+
+/* `count` loopback UDP ports that no socket holds, no two of them the same: every
+ * socket is bound before any is closed, so the system cannot give one port twice. A
+ * step that needs several ports that must differ takes them in one call. A port taken
+ * by one socket, read and released, and then another the same way, can be the same
+ * port again: nothing held the first (work item 461, where step 2b's control address
+ * and its first destination were both given port 61935). */
+static void free_udp_ports(int *ports, int count) {
+    int fds[PORTS_TOGETHER];
+    if (count < 1 || count > PORTS_TOGETHER) {
+        fprintf(stderr, "conformance/c: %d ports asked for together, of at most %d\n",
+                count, PORTS_TOGETHER);
+        exit(1);
+    }
+    for (int i = 0; i < count; i++) {
+        fds[i] = socket(AF_INET, SOCK_DGRAM, 0);
+        if (fds[i] < 0) { perror("socket"); exit(1); }
+        struct sockaddr_in address = {0};
+        address.sin_family = AF_INET;
+        /* The address the channel string names. */
+        if (inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) != 1) {
+            fprintf(stderr, "conformance/c: inet_pton did not parse 127.0.0.1\n");
+            exit(1);
+        }
+        socklen_t length = sizeof address;
+        if (bind(fds[i], (struct sockaddr *)&address, length) < 0 ||
+            getsockname(fds[i], (struct sockaddr *)&address, &length) < 0) {
+            perror("bind");
+            exit(1);
+        }
+        ports[i] = ntohs(address.sin_port);
+    }
+    for (int i = 0; i < count; i++) close(fds[i]);
+}
+
 static int free_udp_port(void) {
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) { perror("socket"); exit(1); }
-    struct sockaddr_in address = {0};
-    address.sin_family = AF_INET;
-    /* The address the channel string names. */
-    if (inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) != 1) {
-        fprintf(stderr, "conformance/c: inet_pton did not parse 127.0.0.1\n");
-        exit(1);
-    }
-    socklen_t length = sizeof address;
-    if (bind(fd, (struct sockaddr *)&address, length) < 0 ||
-        getsockname(fd, (struct sockaddr *)&address, &length) < 0) {
-        perror("bind");
-        exit(1);
-    }
-    int port = ntohs(address.sin_port);
-    close(fd);
+    int port;
+    free_udp_ports(&port, 1);
     return port;
 }
 
-int main(void) {
+/* The picker alone, with no driver: `draws` times the three ports of step 2b, and a
+ * failure if two of a draw are the same. `run.sh` runs it before the quickstart. */
+static int pick_ports(long draws) {
+    for (long draw = 0; draw < draws; draw++) {
+        int ports[3];
+        free_udp_ports(ports, 3);
+        if (ports[0] == ports[1] || ports[0] == ports[2] || ports[1] == ports[2]) {
+            fprintf(stderr, "conformance/c: draw %ld gave the ports %d, %d and %d: two are the same\n",
+                    draw + 1, ports[0], ports[1], ports[2]);
+            return 1;
+        }
+    }
+    printf("conformance/c: %ld draws of three ports together, no two of a draw the same\n", draws);
+    return 0;
+}
+
+int main(int argc, char **argv) {
     /* A line at a time, so that a failure on stderr follows the lines before it in a
      * CI log, where stdout is a pipe. */
     setvbuf(stdout, NULL, _IOLBF, 0);
+    /* `--pick-ports <draws>`: the port picker's own test, and nothing else. */
+    if (argc == 3 && strcmp(argv[1], "--pick-ports") == 0) {
+        char *end = NULL;
+        long draws = strtol(argv[2], &end, 10);
+        if (end == argv[2] || *end != '\0' || draws < 1) {
+            fprintf(stderr, "conformance/c: --pick-ports takes a count of draws, 1 or more\n");
+            return 2;
+        }
+        return pick_ports(draws);
+    }
+    if (argc != 1) {
+        fprintf(stderr, "usage: %s [--pick-ports <draws>]\n", argv[0]);
+        return 2;
+    }
     /* What a reader rejects, both ways: another version is refused with the code, and
      * the header's own version is not. */
     cavalry_context_t *context = NULL;
@@ -388,10 +440,13 @@ int main(void) {
      * on a loopback port of its own, under fc=min: multi-destination cast (ADR 0053),
      * through cavalry_add_destination and cavalry_remove_destination (ADR 0057). */
     char control_channel[96], destination_a[64], destination_b[64];
+    /* The three ports together: they must differ, and three separate picks need not. */
+    int mdc_ports[3];
+    free_udp_ports(mdc_ports, 3);
     snprintf(control_channel, sizeof control_channel,
-             "cavalry:udp?control=127.0.0.1:%d|control-mode=manual|fc=min", free_udp_port());
-    snprintf(destination_a, sizeof destination_a, "cavalry:udp?endpoint=127.0.0.1:%d", free_udp_port());
-    snprintf(destination_b, sizeof destination_b, "cavalry:udp?endpoint=127.0.0.1:%d", free_udp_port());
+             "cavalry:udp?control=127.0.0.1:%d|control-mode=manual|fc=min", mdc_ports[0]);
+    snprintf(destination_a, sizeof destination_a, "cavalry:udp?endpoint=127.0.0.1:%d", mdc_ports[1]);
+    snprintf(destination_b, sizeof destination_b, "cavalry:udp?endpoint=127.0.0.1:%d", mdc_ports[2]);
     cavalry_subscription_t *sub_a = NULL, *sub_b = NULL;
     cavalry_publication_t *mdc_pub = NULL;
     CHECK(cavalry_add_subscription(&sub_a, client, destination_a, STREAM));
