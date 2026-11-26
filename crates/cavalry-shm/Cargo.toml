@@ -25,15 +25,11 @@ zerocopy = { version = "0.8.62", default-features = false, features = ["derive"]
 # `fs` carries the call and its flags. The version the driver already takes, so nothing
 # new enters the lock file, and it carries the `unsafe` the call needs. Never on a
 # message's path: a client makes one file when it attaches.
-nix = { version = "0.32", default-features = false, features = ["fs"] }
-
-# `fallocate`, which the standard library does not have: a new shared file is given its
-# room before it is mapped, so that a directory with no room is an error and never a bus
-# error (src/allocate.rs; ADR 0175). `fs` is that call and the question of a tmpfs's free
-# room; `signal` is the thread's signal mask, which holds every signal off the call. On
-# the control plane only, where a file is created; nix is the crate the driver and the
-# client already take, and its wrappers keep the `unsafe` of the calls out of this crate.
-[target.'cfg(target_os = "linux")'.dependencies]
+# And on Linux `fallocate`, which the standard library does not have either: a new
+# shared file is given its room before it is mapped, so that a directory with no room is
+# an error and never a bus error (src/allocate.rs; ADR 0175). `fs` carries that call and
+# the question of a tmpfs's free room; `signal` is the thread's signal mask, which holds
+# every signal off the call. On the control plane only, where a file is created.
 nix = { version = "0.32", default-features = false, features = ["fs", "signal"] }
 
 [dev-dependencies]

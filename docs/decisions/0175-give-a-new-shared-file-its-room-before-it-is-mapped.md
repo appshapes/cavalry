@@ -157,9 +157,9 @@ a file removed and asked for again at once.
   a log in its first poll. Left for work item 505, which first finds out what a
   full volume does to a mapped log there.
 - **The calls through `libc`, in `unsafe` blocks of `cavalry-shm`.** The crate may
-  hold `unsafe`. Lost to `nix`, which the driver and the client already take, whose
-  wrappers keep the blocks out of this crate: one more name on `cavalry-shm`'s list
-  of dependencies, and no new crate in the lock file.
+  hold `unsafe`. Lost to `nix`, which this crate takes since ADR 0179 and the
+  driver and the client took before it, whose wrappers keep the blocks out of this
+  crate: one feature more of it, `signal`, and no new crate in the lock file.
 - **A test of the old kernel's path in a container with a seccomp profile**, as the
   read ran it. Lost: CI's job is not in a container, and a filter that the test's
   own run installs needs nothing of the runner but a C compiler.
@@ -259,7 +259,8 @@ filter that answers as it does, or from the kernel's source, and says which.
   measured. No call is added to any path a message takes.
 - A signal sent to the thread that creates a file waits for the allocation's end.
   The read's one measurement of the call for 192 MiB was 21.6 ms.
-- `cavalry-shm` takes `nix` on Linux, with its features `fs` and `signal`.
+- `cavalry-shm`, which takes `nix` with its feature `fs` since ADR 0179, takes its
+  feature `signal` too, for the thread's signal mask.
 - The populate advice is no longer what finds a directory with no room. It is kept
   for what ADR 0027 chose it for: one call that makes the pages resident and
   writable.
