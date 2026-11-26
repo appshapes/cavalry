@@ -2049,11 +2049,16 @@ fn a_refused_add_is_the_polls_error_once_an_interval_and_is_made_good() {
     let mut seen: Vec<usize> = Vec::new();
     // The poll that opens the log: its error is the driver's refusal, of one command.
     let mut first = Ok(0);
-    // A moment before the refusal: the interval is counted from after it.
+    // A moment before the refusal and a moment after it. The service counts its
+    // interval from the refusal, which is between the two: no poll that starts less
+    // than an interval after `asked_at` asks again, and the first poll an interval
+    // after `refused_by` does, however long the poll that opened the log took.
     let mut asked_at = Instant::now();
+    let mut refused_by = asked_at;
     wait("the service opens its member's log", || {
         asked_at = Instant::now();
         first = poll_timers_seeing(&mut service, &mut client, &counters, &mut seen);
+        refused_by = Instant::now();
         first.is_err()
     });
     assert!(
@@ -2096,17 +2101,18 @@ fn a_refused_add_is_the_polls_error_once_an_interval_and_is_made_good() {
     member.message(0, -1, &cancel(8));
     member.commit();
     let entries = member.end;
-    std::thread::sleep(Duration::from_millis(1100).saturating_sub(asked_at.elapsed()));
+    std::thread::sleep(Duration::from_millis(1100).saturating_sub(refused_by.elapsed()));
     let handed = seen.len();
-    let asked_again_at = Instant::now();
     let again = poll_timers_seeing(&mut service, &mut client, &counters, &mut seen);
+    // After the second refusal, which the next interval is counted from.
+    let refused_again_by = Instant::now();
     assert!(
         matches!(
             again,
             Err(ClusterError::Client(ClientError::Refused { .. }))
         ),
         "the first poll {:?} after the refusal: {again:?}",
-        asked_at.elapsed()
+        refused_by.elapsed()
     );
     assert_eq!(refusals(), before + 2);
     assert_eq!(
@@ -2125,7 +2131,7 @@ fn a_refused_add_is_the_polls_error_once_an_interval_and_is_made_good() {
     }
     member.message(0, -1, b"after the driver has room");
     member.commit();
-    std::thread::sleep(Duration::from_millis(1100).saturating_sub(asked_again_at.elapsed()));
+    std::thread::sleep(Duration::from_millis(1100).saturating_sub(refused_again_by.elapsed()));
     let handed = seen.len();
     poll_timers_seeing(&mut service, &mut client, &counters, &mut seen)
         .expect("the poll that asks once the driver has room");
@@ -2205,10 +2211,13 @@ fn a_refused_publication_is_the_polls_error_and_is_added_once_the_driver_has_roo
     let before = refusals();
     let mut seen: Vec<usize> = Vec::new();
     let mut first = Ok(0);
+    // A moment before the refusal and a moment after it, as in the test above.
     let mut asked_at = Instant::now();
+    let mut refused_by = asked_at;
     wait("the service opens its member's log", || {
         asked_at = Instant::now();
         first = poll_timers_seeing(&mut service, &mut client, &counters, &mut seen);
+        refused_by = Instant::now();
         first.is_err()
     });
     assert!(
@@ -2242,12 +2251,18 @@ fn a_refused_publication_is_the_polls_error_and_is_added_once_the_driver_has_roo
     assert_eq!(refusals(), before + 1);
     assert_eq!(service_counter(&client, CLUSTER_SERVICE_TIMERS.0), Some(1));
     assert_eq!(read_told(&mut stream, &mut told), 0, "no publication");
-    // Room again: the first poll past the interval adds the publication.
+    // Room again: the first poll past the interval adds the publication. The service
+    // is not polled again until the member's client has mapped its image, so the
+    // image is that one poll's publication.
     drop(held);
-    std::thread::sleep(Duration::from_millis(1100).saturating_sub(asked_at.elapsed()));
+    std::thread::sleep(Duration::from_millis(1100).saturating_sub(refused_by.elapsed()));
     poll_timers_seeing(&mut service, &mut client, &counters, &mut seen)
         .expect("the poll that asks once the driver has room");
     assert_eq!(refusals(), before + 1, "the second ask was taken");
+    wait(
+        "the member has the image of the publication the first poll past the interval added",
+        || read_told(&mut stream, &mut told) == 1,
+    );
     wait("the member is told of the timer", || {
         poll_timers_seeing(&mut service, &mut client, &counters, &mut seen).expect("a poll");
         read_told(&mut stream, &mut told) == 1 && !told.is_empty()
