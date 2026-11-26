@@ -1,6 +1,8 @@
-# Continuous integration: the CLAUDE.md gates that exist today, on both operating
-# systems the ten-minute path promises (CLAUDE.md, invariant 5). It runs on every push
-# to master, on every pull request, and by hand.
+# Continuous integration: the CLAUDE.md gates that exist today. It runs them on Linux
+# for every push to master, for every pull request, and by hand. The same job runs on
+# macOS, the other operating system the ten-minute path promises (CLAUDE.md, invariant
+# 5), when `.github/workflows/macos.yml` calls this file: each week at master's head,
+# by hand, and at a release (ADR 0170).
 #
 # Every action is pinned to a full commit SHA with its version in a trailing comment.
 # Tags are mutable: the tj-actions compromise of March 2025 was delivered by moving
@@ -14,12 +16,14 @@
 # and `just miri`, run in the gates jobs too (GitHub issue 9). `gates (linux)` is a
 # required check, so no pull request merges without them, and a gates job that has
 # failed is a blocker in the reviewer's brief (`.claude/agents/reviewer.md`).
-# `gates (macos)` runs the same steps for pushes to master and runs by hand, not for
-# pull requests, and is not a required check (ADR 0073): in 92 runs it failed alone
-# twice, both times an intermittent failure no change caused, and it set the time of
-# every run that takes no bench host. A failure it finds on master is the landing
-# session's to fix forward, which the `pr` skill's last step, the wait for master's
-# run, is there to see.
+# `gates (macos)` runs the same steps, and no event of this file's own starts it: not a
+# pull request (ADR 0073), and since ADR 0170 not a push to master either. In the four
+# days from 2026-11-22 it took about 15 minutes of a macOS runner for each of about 16
+# commits a day, about one job in twenty lost its runner for no fault of a change
+# (work item 456), and every session had already run the same gates on a Mac before
+# its pull request. It runs when `macos.yml` calls this file with `macos: true`, and then it is
+# the only job. A red week is `/next-task`'s to hand out, and
+# docs/how-to/read-the-weekly-run-of-the-macos-gates.md says how it is read.
 # The latency gate takes no host for a change (ADR 0139): it runs each night and on
 # demand in .github/workflows/bench.yml, on the two dedicated bench hosts, as a coarse
 # check, until the slice that measures Cavalry against Aeron arms it again. What holds
@@ -29,7 +33,8 @@
 #
 # The job names are stable on purpose: "gates (linux)" is the one check branch protection
 # on master requires, since the owner dropped the three bench names from the rule with
-# ADR 0139; "gates (macos)" is not required, since ADR 0073. Renaming "gates (linux)"
+# ADR 0139; "gates (macos)" is not required, since ADR 0073, and in the run of `macos`
+# that calls this file its check reads "macos / gates (macos)". Renaming "gates (linux)"
 # means updating the protection rule in the same change. "bench (linux)", "bench (grip)"
 # and "bench (udp)" are jobs of bench.yml alone.
 name: ci
@@ -39,12 +44,26 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+  # Called by macos.yml, which asks for the macOS runner, and by the release's workflow
+  # when work item 491 writes it. An event of this file's own has no `inputs.macos`,
+  # which reads as false below.
+  workflow_call:
+    inputs:
+      macos:
+        description: "Run the gates job on the macOS runner and not on the Linux one"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
+# One group for this file's own runs of a ref, as before, and another for the runs that
+# macos.yml calls. In a called workflow `github` is the caller's, so without the first
+# word a week's run at master's head would share the group of master's own runs: it
+# would wait behind a landing's run, or take the place of one that waits.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ inputs.macos && 'macos' || 'ci' }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -68,10 +87,9 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      # Linux for every event; macOS as well for a push to master and a run by hand,
-      # and not for a pull request (ADR 0073). The names stay "gates (linux)" and
-      # "gates (macos)".
-      matrix: ${{ fromJSON(github.event_name == 'pull_request' && '{"include":[{"name":"linux","runner":"blacksmith-4vcpu-ubuntu-2404"}]}' || '{"include":[{"name":"linux","runner":"blacksmith-4vcpu-ubuntu-2404"},{"name":"macos","runner":"blacksmith-6vcpu-macos-latest"}]}') }}
+      # One runner a run: Linux for every event of this file's own, and macOS when
+      # macos.yml calls it (ADR 0170). The names stay "gates (linux)" and "gates (macos)".
+      matrix: ${{ fromJSON(inputs.macos && '{"include":[{"name":"macos","runner":"blacksmith-6vcpu-macos-latest"}]}' || '{"include":[{"name":"linux","runner":"blacksmith-4vcpu-ubuntu-2404"}]}') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -152,15 +170,15 @@ jobs:
       - run: just lint-docs
       # The README's ten-minute path, end to end (CLAUDE.md, gate 5; ADR 0007's
       # acceptance test for the first slice): on Linux for every change, and on macOS
-      # too for every commit on master (ADR 0073).
+      # each week at master's head and at a release (ADR 0170).
       - run: just quickstart
       # A client's package as a user installs it (work item 469; ADR 0166): the Python
       # client's wheel, built with the shared library inside by the package's own
       # backend, installed into a new environment outside the checkout, and the
       # client README's example run there; then the same wheel without its library,
       # which must fail. The runner's own Python 3 and its venv; nothing from a
-      # package index. On Linux for every change and on macOS too for every commit on
-      # master, as the job's other steps are (ADR 0073).
+      # package index. On Linux for every change and on macOS each week and at a
+      # release, as the job's other steps are (ADR 0170).
       - run: just package
       - run: just replay-check
       # The harness on a shared runner is a report (ADR 0016): the table is in the log

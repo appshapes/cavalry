@@ -1699,7 +1699,7 @@ id = 170
 name = "cluster.service_snapshots_taken"
 kind = "counter"
 scope = "client"
-doc = "Snapshots the service beside one cluster member wrote and told the member of: the recording stopped at the end of what the service wrote, and the consensus module stream took the service ack. The service adds the counter at its first snapshot (spec/cluster.md, Snapshots; ADR 0131). key: member id (i32), little-endian; label text: the member id in decimal."
+doc = "Snapshots the service beside one cluster member wrote and told the member of: the recording stopped at the end of what the service wrote, and the consensus module stream took the service ack. The service adds the counter when it first opens its member's log (spec/cluster.md, Snapshots, A service's snapshot; ADR 0131, ADR 0168). key: member id (i32), little-endian; label text: the member id in decimal."
 doctor = ""
 
 [[counter]]
@@ -1707,7 +1707,7 @@ id = 171
 name = "cluster.service_snapshots_failed"
 kind = "counter"
 scope = "client"
-doc = "Snapshots the service beside one cluster member gave up: the driver refused its publication or its recording, the recording was of another session, a publication took no message or the recording's stop was not announced within a second, the recording stopped short of what was written, or the consensus module stream did not take the service ack within a second. The service reports each to its program and reads on. The service adds the counter at its first snapshot (spec/cluster.md, Snapshots; ADR 0131). key: member id (i32), little-endian; label text: the member id in decimal."
+doc = "Snapshots the service beside one cluster member gave up: the driver refused its publication or its recording, the recording was of another session, a publication took no message or the recording's stop was not announced within a second, the recording stopped short of what was written, or the consensus module stream did not take the service ack within a second. The service reports each to its program and reads on. The service adds the counter when it first opens its member's log (spec/cluster.md, Snapshots, A service's snapshot; ADR 0131, ADR 0168). key: member id (i32), little-endian; label text: the member id in decimal."
 doctor = "The service beside this member took no snapshot where its program gave its state. Nothing committed is lost, and the service tries the next snapshot by itself. Check that the member runs: a service whose member is stopped has nobody to tell. Then check the driver's counters on this host: driver.registry_full for a recording or a publication the driver had no room for, recording.start_failed for a recording whose files could not be created, recording.write_failed for a disk that refuses a write or a sync, and free space in the log directory."
 
 [[counter]]

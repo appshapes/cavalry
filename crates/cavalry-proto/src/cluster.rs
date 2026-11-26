@@ -90,9 +90,10 @@ pub const MAX_UNSENT_TIMER_CANCELS: usize = 1_024;
 /// the member's timers).
 pub const MAX_MEMBER_TIMERS: usize = 2 * MAX_SERVICE_TIMERS;
 
-/// How often a service sends its member every pending timer again, in nanoseconds
-/// of the service's monotonic clock: 1 s (`spec/cluster.md`, "Values", timer
-/// refresh interval).
+/// How often a service sends its member every pending timer again, and how long
+/// after its driver refused its counters or its publication to its member it asks
+/// for them again (ADR 0168), in nanoseconds of the service's monotonic clock: 1 s
+/// (`spec/cluster.md`, "Values", timer refresh interval).
 pub const TIMER_REFRESH_INTERVAL_NS: u64 = 1_000_000_000;
 
 /// How many timer events a leader appends in one duty cycle (`spec/cluster.md`,

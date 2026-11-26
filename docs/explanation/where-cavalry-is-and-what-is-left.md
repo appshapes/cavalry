@@ -93,7 +93,10 @@ dedicated hosts (ADR 0016, ADR 0034, ADR 0044), a weekly email of the changes (A
 - **Configuration.** Five keys in `config.toml`. Zero configuration is the supported
   default, and the two cluster keys have no default a host could guess.
 - **CI.** `gates (linux)` on every pull request and `gates (macos)` on every commit
-  of `master`, about 11 and 13 minutes. `just conformance` in them runs ten vector
+  of `master`, about 11 and 13 minutes; since 2026-11-26 the macOS gates run each
+  week and at a release
+  ([ADR 0170](../decisions/0170-run-the-macos-gates-each-week-and-at-a-release-and-not-for-every-commit.md)).
+  `just conformance` in them runs ten vector
   suites, six runners with a cluster of three on the loopback, and an upgrade of a
   cluster one member at a time. At this commit three bench jobs on two dedicated hosts
   are required checks; feature 1 below changed that on 2026-11-21.

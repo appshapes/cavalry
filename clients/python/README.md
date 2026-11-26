@@ -273,8 +273,9 @@ ADR 0157):
 
 Both calls are one ABI call each, which allocates nothing and waits for nothing.
 What they changed is told to the service's member by the poll, once the handler
-has taken the entry, and the poll in which a program first schedules a timer
-sends six commands more, once in a service's life ("The call").
+has taken the entry. That poll sends the driver no command for it, a program's
+first timer included: the service added its counters and its publication to its
+member when it first opened its member's log ("The call"; ADR 0168).
 `conformance/python/cluster.py` schedules timers and cancels one beside three
 members; what it holds, and what rests on the library's own tests, is in
 `conformance/README.md`. The how-to above is the task from its start, with a program
@@ -637,7 +638,8 @@ and prints the same line.
 
 `just package` does all of this with a driver of its own
 (`scripts/package.sh`, `scripts/package-python.py`), and CI runs it on Linux for every
-pull request and on macOS too for every commit on `master`. It builds the wheel
+pull request and every commit on `master`, and on macOS each week and at a release.
+It builds the wheel
 through pip and again with the backend run as a program, and fails unless the two are
 the same bytes. It checks that the wheel holds the library `cargo` built under the tag
 that a second reader gives it, `objdump` on Linux and `otool` on macOS, and on Linux
@@ -685,24 +687,31 @@ runner checks each function's loader.
 A cluster service's poll is the one per-message function that can wait for the driver.
 It sends commands with the service's client when it opens the member's log, at a
 session's opening, where a term's leader changes and at a recording's end, and six
-more once in a service's life, at the most, its five counters and its publication
-to its member, in the poll in which its program first schedules a timer or the
-service first passes a timer event over. It
-waits for each answer with the GIL held, so every other Python thread of the process
-stops for that wait. A driver that refuses one of the six is that poll's −1, after
-the entries its handler took are taken, and the service adds them again at a later
-poll (ADR 0159). What a service tells its member of its timers after that, each
-pending timer again every second among it, is offered and waits for nothing. It holds the GIL all the same, because releasing it would cost
+more, its five counters and its publication to its member, in the poll that first
+opens the member's log, before that poll's entries (ADR 0168). It waits for each
+answer with the GIL held, so every other Python thread of the process stops for that
+wait. A driver that refuses one of the six is that poll's −1, after the entries its
+handler took are taken, and the service asks again at its first poll a second later,
+with no error from a poll between (ADR 0159, ADR 0168). The publication's log is 192
+MiB in the driver's directory, every page of it resident, and every service holds it
+from that poll on, a program with no timer and no snapshot too; where the directory
+has no room for it, the refusal is `CAVALRY_ERR_STORAGE_SPACE`, code 12, and `cavalry
+doctor` names it with `driver.log_create_failed`. The driver leaves no file for a log
+it could not create, however often it is asked (ADR 0172). What a service tells its
+member of its timers, each pending timer again every second among it, is offered and
+waits for nothing, a program's first timer too. It holds the GIL all the same, because releasing it would cost
 every entry: through `ctypes.CDLL` each call-back takes the GIL back, and beside one
 Python thread that computes, a poll of 10 messages then took 5.8 to 6.3 ms at its p99,
 the interpreter's switch interval of 5 ms and more, against 4.4 to 4.6 µs with the GIL
 held (ADR 0124 has the measurement, on an Apple M5 Pro laptop with Python 3.14.6). The
-runner's cluster round reports the waits. On that laptop, in each of 10 runs,
-7 of about 36,000 polls of three services took over 1 ms, where 4 of about 17,900 did in
-each of 25 runs before the round scheduled a timer. The report names the longest poll
-alone: in every run it was a poll in which a service's program first scheduled a
-timer, 24.5 to 34.0 ms with its six commands, where the longest before took 7.4 to
-12.2 ms. A program whose other threads cannot stop for that long runs its service in a
+runner's cluster round reports the waits. On that laptop, in each of 10 runs, 4 of
+about 126,200 to 149,800 polls of three services took over 1 ms. The report names the
+longest poll alone: in nine of the ten it was the poll in which a service first opened
+its member's log, with the six adds in it, 28.1 to 47.5 ms, and in one a later poll
+that took one entry, 134.2 ms, which the report does not explain. Before ADR 0168 it
+was the poll in which a service's program first scheduled a timer, 24.5 to 34.0 ms.
+The round's last 200 messages, each of which schedules one more timer, are among those
+polls. A program whose other threads cannot stop for that long runs its service in a
 process of its own.
 
 ### Threads

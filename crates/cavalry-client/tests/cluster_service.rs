@@ -14,18 +14,20 @@ use cavalry_client::{
     Publication, Recording, Reply, Subscription,
 };
 use cavalry_driver::Driver;
+use cavalry_proto::client_protocol::ErrorCode;
 use cavalry_proto::cluster::{
     CONSENSUS_MODULE_STREAM_ID, CloseReason, ClusterAction, EGRESS_STREAM_ID,
     LOG_RECORDINGS_FILE_PREFIX, LogRecording, MAX_LOG_RECORDINGS_LENGTH, MAX_SESSIONS, Message,
     Stream, TimeUnit, write_log_recordings,
 };
-use cavalry_shm::counters::CountersError;
 use cavalry_shm::counters::generated::{
-    CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_LEADER_MEMBER_ID,
-    CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID, CLUSTER_REPLIES_DROPPED,
+    CLIENT_PROTOCOL_ERRORS, CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION,
+    CLUSTER_LEADER_MEMBER_ID, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID,
+    CLUSTER_REPLIES_DROPPED, CLUSTER_SERVICE_SNAPSHOTS_FAILED, CLUSTER_SERVICE_SNAPSHOTS_TAKEN,
     CLUSTER_SERVICE_TIMER_CANCELS_DROPPED, CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER,
     CLUSTER_SERVICE_TIMERS,
 };
+use cavalry_shm::counters::{CountersError, CountersReader};
 
 // This test's ports, from the one file that says how they are taken and why, which is
 // `cavalry-raft`'s: `crates/cavalry-raft/tests/ports/mod.rs`.
@@ -1455,7 +1457,32 @@ fn poll_timers(
 /// The value of one of the service's counters of the member, or `None` while no
 /// service has added it.
 fn service_counter(client: &Cavalry, counter: i32) -> Option<i64> {
-    let counters = client.counters();
+    counter_in(client.counters(), counter)
+}
+
+/// The value of the one counter of a type that the driver holds for itself.
+fn static_counter(counters: &CountersReader, counter: i32) -> i64 {
+    (0..counters.capacity())
+        .find(|id| {
+            counters
+                .record(*id)
+                .ok()
+                .flatten()
+                .is_some_and(|record| record.type_id() == counter)
+        })
+        .map(|id| counters.read(id).expect("the counter reads"))
+        .expect("the driver's counter")
+}
+
+/// How many records a counters file holds.
+fn allocated(counters: &CountersReader) -> usize {
+    (0..counters.capacity())
+        .filter(|id| counters.record(*id).ok().flatten().is_some())
+        .count()
+}
+
+/// [`service_counter`], from a reader of the driver's counters file.
+fn counter_in(counters: &CountersReader, counter: i32) -> Option<i64> {
     let ours = |id: u32| {
         counters.record(id).ok().flatten().filter(|record| {
             record.type_id() == counter && record.key().starts_with(&MEMBER.to_le_bytes())
@@ -1846,33 +1873,491 @@ fn a_program_is_refused_a_timer_beyond_the_bound_and_schedules_one_again_in_its_
     member.close();
 }
 
-/// A service that reads history with a timer pending, and passes no event over in
-/// it, adds no counter of its timers while it reads that history: the page names
-/// three moments for them, its first snapshot, the first thing it has to tell its
-/// member of a timer and the first timer event it passes over, and a service tells
-/// its member nothing of its history (`spec/cluster.md`, "A service's snapshot",
-/// "What a service tells its member"). Once it has read it, its gauge holds the
-/// timer and its member is told of it.
+/// A program is handed its first entry with the service's five counters in the
+/// driver's counters already (ADR 0168). That the adds come before the entries of
+/// the poll that makes them is held where it can be seen without a race, in
+/// [`a_refused_add_is_the_polls_error_once_an_interval_and_is_made_good`]: the poll
+/// that opens the log may hand over no entry, its replay not yet written.
 #[test]
-fn a_service_adds_its_timers_counters_at_the_end_of_a_history_that_passes_no_event_over() {
-    let mut member = Member::start("timers-history");
-    // The history: a timer scheduled, and two entries after it.
+fn a_program_is_handed_its_first_entry_with_the_services_counters_there() {
+    let mut member = Member::start("timers-before-entries");
     member.term(0, MEMBER);
+    member.name();
+    member.commit();
+    let mut client = Cavalry::connect_to(&member.dir).expect("the service's client connects");
+    let mut service = client.cluster_service();
+    let counters = CountersReader::open(&member.dir).expect("the counters file opens");
+    for counter in FIVE {
+        assert_eq!(
+            counter_in(&counters, counter),
+            None,
+            "before the first poll"
+        );
+    }
+    // How many of the five each handled entry saw.
+    let mut seen: Vec<usize> = Vec::new();
+    wait("the service is handed the term's first entry", || {
+        service
+            .poll(
+                &mut client,
+                |_: &Committed<'_>, _| {
+                    seen.push(
+                        FIVE.iter()
+                            .filter(|counter| counter_in(&counters, **counter).is_some())
+                            .count(),
+                    );
+                    Action::Continue
+                },
+                16,
+            )
+            .expect("the service polls");
+        !seen.is_empty()
+    });
+    assert_eq!(seen, [5], "the first entry, with the five counters there");
+
+    service.close(&mut client).expect("the service closes");
+    client.close().expect("the client closes");
+    member.close();
+}
+
+/// The five counters a service adds for its member with its publication to it: the
+/// two of its snapshots and the three of its timers.
+const FIVE: [i32; 5] = [
+    CLUSTER_SERVICE_SNAPSHOTS_TAKEN.0,
+    CLUSTER_SERVICE_SNAPSHOTS_FAILED.0,
+    CLUSTER_SERVICE_TIMERS.0,
+    CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER.0,
+    CLUSTER_SERVICE_TIMER_CANCELS_DROPPED.0,
+];
+
+/// What a service told its member: `s`, an id and a deadline for a schedule timer,
+/// and `c`, an id and 0 for a cancel timer.
+type Told = Vec<(char, i64, i64)>;
+
+/// Reads the consensus module stream into `told`, and returns how many images the
+/// member's subscription has: one for each service's publication.
+fn read_told(stream: &mut Subscription, told: &mut Told) -> usize {
+    stream
+        .poll(
+            |bytes, _| match Message::parse(Stream::ConsensusModule, bytes) {
+                Ok(Message::ScheduleTimer {
+                    correlation_id,
+                    deadline,
+                }) => told.push(('s', correlation_id, deadline)),
+                Ok(Message::CancelTimer { correlation_id }) => told.push(('c', correlation_id, 0)),
+                other => panic!("a schedule timer or a cancel timer: {other:?}"),
+            },
+            16,
+        )
+        .expect("the stream is read");
+    stream.image_count()
+}
+
+/// A poll whose handler schedules a timer at a message that begins `s` and cancels
+/// one at a message that begins `c`, and writes down for each entry it is handed
+/// how many of the five counters the driver's counters held.
+fn poll_timers_seeing(
+    service: &mut ClusterService,
+    client: &mut Cavalry,
+    counters: &CountersReader,
+    seen: &mut Vec<usize>,
+) -> Result<usize, ClusterError> {
+    service.poll(
+        client,
+        |committed: &Committed<'_>, replies| {
+            seen.push(
+                FIVE.iter()
+                    .filter(|counter| counter_in(counters, **counter).is_some())
+                    .count(),
+            );
+            if let Entry::SessionMessage { payload, .. } = committed.entry {
+                let number = |bytes: &[u8]| {
+                    i64::from_le_bytes(bytes.try_into().expect("eight bytes of a number"))
+                };
+                match payload.first() {
+                    Some(b's') => {
+                        replies
+                            .schedule_timer(number(&payload[1..9]), number(&payload[9..17]))
+                            .expect("room for a timer");
+                    }
+                    Some(b'c') => {
+                        replies.cancel_timer(number(&payload[1..9]));
+                    }
+                    _ => {}
+                }
+            }
+            Action::Continue
+        },
+        16,
+    )
+}
+
+/// How many records of a type the driver's counters hold for the member.
+fn records_of(counters: &CountersReader, counter: i32) -> usize {
+    (0..counters.capacity())
+        .filter(|id| {
+            counters.record(*id).ok().flatten().is_some_and(|record| {
+                record.type_id() == counter && record.key().starts_with(&MEMBER.to_le_bytes())
+            })
+        })
+        .count()
+}
+
+/// A driver that refuses one of the six adds is the error of the poll that asked,
+/// returned once that poll's entries are taken, and the service asks again at its
+/// first poll a timer refresh interval later and at none between (`spec/cluster.md`,
+/// "What a service tells its member"; ADR 0159, ADR 0168). The driver counts one
+/// refusal for each ask and no more. The refusal here is in the middle of the five:
+/// the two the driver took are kept, and none is added twice. Until the service
+/// holds its publication it tells its member nothing and keeps every word, a cancel
+/// among them, which no refresh would send again. Once the driver has room, the
+/// poll that asks adds what is missing before it hands over an entry, and the
+/// member is told.
+#[test]
+fn a_refused_add_is_the_polls_error_once_an_interval_and_is_made_good() {
+    let mut member = Member::start("timers-refused");
+    member.term(0, MEMBER);
+    member.name();
+    member.commit();
+    let mut stream = member
+        .client
+        .add_subscription("cavalry:ipc", CONSENSUS_MODULE_STREAM_ID)
+        .expect("the member's subscription");
+    let mut told: Told = Vec::new();
+    // Another client of the member's driver takes every counter the driver gives
+    // its clients but three: the service's counter of its dropped replies and the
+    // two of its snapshots take them, and the first of its timers is refused.
+    let mut filler = Cavalry::connect_to(&member.dir).expect("another client connects");
+    let mut held = Vec::new();
+    loop {
+        match filler.add_counter(CLUSTER_REPLIES_DROPPED.0, &OTHER.to_le_bytes(), "a filler") {
+            Ok(counter) => held.push(counter),
+            Err(ClientError::Refused { .. }) => break,
+            Err(other) => panic!("{other}"),
+        }
+        assert!(held.len() <= 256, "the driver's counters are bounded");
+    }
+    for _ in 0..3 {
+        held.pop().expect("a filler").close();
+    }
+
+    let mut client = Cavalry::connect_to(&member.dir).expect("the service's client connects");
+    let mut service = client.cluster_service();
+    let counters = CountersReader::open(&member.dir).expect("the counters file opens");
+    let refusals = || static_counter(&counters, CLIENT_PROTOCOL_ERRORS.0);
+    let before = refusals();
+    let mut seen: Vec<usize> = Vec::new();
+    // The poll that opens the log: its error is the driver's refusal, of one command.
+    let mut first = Ok(0);
+    // A moment before the refusal and a moment after it. The service counts its
+    // interval from the refusal, which is between the two: no poll that starts less
+    // than an interval after `asked_at` asks again, and the first poll an interval
+    // after `refused_by` does, however long the poll that opened the log took.
+    let mut asked_at = Instant::now();
+    let mut refused_by = asked_at;
+    wait("the service opens its member's log", || {
+        asked_at = Instant::now();
+        first = poll_timers_seeing(&mut service, &mut client, &counters, &mut seen);
+        refused_by = Instant::now();
+        first.is_err()
+    });
+    assert!(
+        matches!(
+            first,
+            Err(ClusterError::Client(ClientError::Refused {
+                code: Some(ErrorCode::ResourceTemporarilyUnavailable),
+                ..
+            }))
+        ),
+        "{first:?}"
+    );
+    assert_eq!(refusals(), before + 1);
+    let held_now = |counters: &CountersReader| FIVE.map(|counter| records_of(counters, counter));
+    assert_eq!(
+        held_now(&counters),
+        [1, 1, 0, 0, 0],
+        "the two the driver took"
+    );
+    // No poll within the interval asks the driver again, or reports anything.
+    let mut polls = 0;
+    while asked_at.elapsed() < Duration::from_millis(600) {
+        poll_timers_seeing(&mut service, &mut client, &counters, &mut seen)
+            .expect("a poll between two asks");
+        polls += 1;
+    }
+    assert!(polls > 10, "{polls} polls within 600 ms of the refusal");
+    assert_eq!(
+        refusals(),
+        before + 1,
+        "no ask in {polls} polls within the interval"
+    );
+    assert_eq!(read_told(&mut stream, &mut told), 0, "no publication");
+    // The program's entries meanwhile: a timer scheduled, and another scheduled and
+    // cancelled. They are committed, and the service is not polled until the
+    // interval has passed: one poll then asks once more, is refused once more, and
+    // returns that error with the three entries taken.
+    member.message(0, -1, &schedule(7, TIME + 1_000_000));
+    member.message(0, -1, &schedule(8, TIME + 2_000_000));
+    member.message(0, -1, &cancel(8));
+    member.commit();
+    let entries = member.end;
+    std::thread::sleep(Duration::from_millis(1100).saturating_sub(refused_by.elapsed()));
+    let handed = seen.len();
+    let again = poll_timers_seeing(&mut service, &mut client, &counters, &mut seen);
+    // After the second refusal, which the next interval is counted from.
+    let refused_again_by = Instant::now();
+    assert!(
+        matches!(
+            again,
+            Err(ClusterError::Client(ClientError::Refused { .. }))
+        ),
+        "the first poll {:?} after the refusal: {again:?}",
+        refused_by.elapsed()
+    );
+    assert_eq!(refusals(), before + 2);
+    assert_eq!(
+        (seen.len() - handed, service.position()),
+        (3, entries),
+        "the poll that was refused took its entries first"
+    );
+    assert_eq!(held_now(&counters), [1, 1, 0, 0, 0], "no counter twice");
+    assert_eq!(read_told(&mut stream, &mut told), 0, "no publication");
+    assert_eq!(told, [], "nothing is told without the publication");
+    // The driver has room again, and one more entry is committed. The service is not
+    // polled until the interval has passed: one poll then adds what is missing, is
+    // refused nothing, and hands its entry over with the five counters there.
+    for counter in held.drain(..) {
+        counter.close();
+    }
+    member.message(0, -1, b"after the driver has room");
+    member.commit();
+    std::thread::sleep(Duration::from_millis(1100).saturating_sub(refused_again_by.elapsed()));
+    let handed = seen.len();
+    poll_timers_seeing(&mut service, &mut client, &counters, &mut seen)
+        .expect("the poll that asks once the driver has room");
+    assert_eq!(
+        &seen[handed..],
+        [5],
+        "the adds come before the entries of the poll that makes them"
+    );
+    assert_eq!(refusals(), before + 2, "the last ask was taken");
+    assert_eq!(
+        held_now(&counters),
+        [1, 1, 1, 1, 1],
+        "one counter of each kind"
+    );
+    // The member is told what the service kept: the cancel first, of a timer that
+    // is pending no more, and the timer that is pending, and nothing of the other.
+    wait("the member is told of the cancel and of the timer", || {
+        poll_timers_seeing(&mut service, &mut client, &counters, &mut seen).expect("a poll");
+        read_told(&mut stream, &mut told);
+        told.len() >= 2
+    });
+    assert_eq!(
+        told[..2],
+        [('c', 8, 0), ('s', 7, TIME + 1_000_000)],
+        "{told:?}"
+    );
+    assert!(
+        told.iter().all(|word| word.1 != 8 || word.0 == 'c'),
+        "{told:?}"
+    );
+    assert_eq!(service_counter(&client, CLUSTER_SERVICE_TIMERS.0), Some(1));
+    drop(stream);
+
+    filler.close().expect("the filler closes");
+    service.close(&mut client).expect("the service closes");
+    client.close().expect("the client closes");
+    member.close();
+}
+
+/// A driver that takes the five counters and refuses the publication is the same
+/// error of the same polls: the counters stay, one of each, the service tells its
+/// member nothing, and it adds the publication at its first ask once the driver
+/// has room (ADR 0159, ADR 0168).
+#[test]
+fn a_refused_publication_is_the_polls_error_and_is_added_once_the_driver_has_room() {
+    let mut member = Member::start("timers-refused-publication");
+    member.term(0, MEMBER);
+    member.message(0, -1, &schedule(7, TIME + 1_000_000));
+    member.name();
+    member.commit();
+    let mut stream = member
+        .client
+        .add_subscription("cavalry:ipc", CONSENSUS_MODULE_STREAM_ID)
+        .expect("the member's subscription");
+    let mut told: Told = Vec::new();
+    // Another client of the member's driver fills the driver's publications, each
+    // of the shortest term a channel names, 64 KiB, to an endpoint nobody reads.
+    let channel = format!(
+        "cavalry:udp?endpoint=127.0.0.1:{}|term-length=64k",
+        ports::free_port()
+    );
+    let mut filler = Cavalry::connect_to(&member.dir).expect("another client connects");
+    let mut held = Vec::new();
+    loop {
+        match filler.add_exclusive_publication(&channel, EGRESS_STREAM_ID + 1000) {
+            Ok(publication) => held.push(publication),
+            Err(ClientError::Refused { .. }) => break,
+            Err(other) => panic!("{other}"),
+        }
+        assert!(held.len() <= 1024, "the driver's publications are bounded");
+    }
+
+    let mut client = Cavalry::connect_to(&member.dir).expect("the service's client connects");
+    let mut service = client.cluster_service();
+    let counters = CountersReader::open(&member.dir).expect("the counters file opens");
+    let refusals = || static_counter(&counters, CLIENT_PROTOCOL_ERRORS.0);
+    let before = refusals();
+    let mut seen: Vec<usize> = Vec::new();
+    let mut first = Ok(0);
+    // A moment before the refusal and a moment after it, as in the test above.
+    let mut asked_at = Instant::now();
+    let mut refused_by = asked_at;
+    wait("the service opens its member's log", || {
+        asked_at = Instant::now();
+        first = poll_timers_seeing(&mut service, &mut client, &counters, &mut seen);
+        refused_by = Instant::now();
+        first.is_err()
+    });
+    assert!(
+        matches!(
+            first,
+            Err(ClusterError::Client(ClientError::Refused {
+                code: Some(ErrorCode::ResourceTemporarilyUnavailable),
+                ..
+            }))
+        ),
+        "{first:?}"
+    );
+    assert_eq!(refusals(), before + 1);
+    let held_now = FIVE.map(|counter| records_of(&counters, counter));
+    assert_eq!(
+        held_now,
+        [1, 1, 1, 1, 1],
+        "the counters come before the publication"
+    );
+    // Polls within the interval: no ask, no error, the entries read, nothing told.
+    wait("the service reads the entry that schedules a timer", || {
+        poll_timers_seeing(&mut service, &mut client, &counters, &mut seen)
+            .expect("a poll between two asks");
+        service.position() == member.end
+    });
+    assert!(
+        asked_at.elapsed() < Duration::from_millis(900),
+        "{:?}",
+        asked_at.elapsed()
+    );
+    assert_eq!(refusals(), before + 1);
+    assert_eq!(service_counter(&client, CLUSTER_SERVICE_TIMERS.0), Some(1));
+    assert_eq!(read_told(&mut stream, &mut told), 0, "no publication");
+    // Room again: the first poll past the interval adds the publication. The service
+    // is not polled again until the member's client has mapped its image, so the
+    // image is that one poll's publication.
+    drop(held);
+    std::thread::sleep(Duration::from_millis(1100).saturating_sub(refused_by.elapsed()));
+    poll_timers_seeing(&mut service, &mut client, &counters, &mut seen)
+        .expect("the poll that asks once the driver has room");
+    assert_eq!(refusals(), before + 1, "the second ask was taken");
+    wait(
+        "the member has the image of the publication the first poll past the interval added",
+        || read_told(&mut stream, &mut told) == 1,
+    );
+    wait("the member is told of the timer", || {
+        poll_timers_seeing(&mut service, &mut client, &counters, &mut seen).expect("a poll");
+        read_told(&mut stream, &mut told) == 1 && !told.is_empty()
+    });
+    assert!(
+        told.iter().all(|word| *word == ('s', 7, TIME + 1_000_000)),
+        "{told:?}"
+    );
+    let held_now = FIVE.map(|counter| records_of(&counters, counter));
+    assert_eq!(held_now, [1, 1, 1, 1, 1], "no counter twice");
+    drop(stream);
+
+    filler.close().expect("the filler closes");
+    service.close(&mut client).expect("the service closes");
+    client.close().expect("the client closes");
+    member.close();
+}
+
+/// A service adds its five counters and its publication to its member in the poll
+/// that first opens its member's log, whatever its program does and before any
+/// entry is committed for it to hand over (`spec/cluster.md`, "A service's
+/// snapshot", "What a service tells its member"; ADR 0168). Nothing is added after
+/// that: the driver's counters hold as many records at every entry the program is
+/// handed, and after its member is told of its first timer, as when the log was
+/// opened, and a counter or a publication, whose position and limit are records
+/// too, would be one more. A service that reads history with a timer pending holds
+/// it in its gauge meanwhile and tells its member nothing of it; once it has read
+/// its history, its member is told.
+#[test]
+fn a_service_adds_its_counters_and_its_publication_when_it_first_opens_its_members_log() {
+    let mut member = Member::start("timers-history");
+    // The history: two entries, a timer scheduled, and two entries after it.
+    member.term(0, MEMBER);
+    member.message(0, -1, b"no timer yet");
     member.message(0, -1, &schedule(7, TIME + 1_000_000));
     // The position after the entry that schedules it.
     let scheduled = member.message(0, -1, b"no timer").0;
     member.message(0, -1, b"no timer either");
+    // The member names its recording and commits nothing yet.
     member.name();
-    member.commit();
     let history = member.end;
+    // The member reads the consensus module stream from before the service starts.
+    let mut stream = member
+        .client
+        .add_subscription("cavalry:ipc", CONSENSUS_MODULE_STREAM_ID)
+        .expect("the member's subscription");
+    let mut told: Vec<(i64, i64)> = Vec::new();
+    let mut read_stream = |told: &mut Vec<(i64, i64)>| {
+        stream
+            .poll(
+                |bytes, _| match Message::parse(Stream::ConsensusModule, bytes) {
+                    Ok(Message::ScheduleTimer {
+                        correlation_id,
+                        deadline,
+                    }) => told.push((correlation_id, deadline)),
+                    other => panic!("a schedule timer and nothing else: {other:?}"),
+                },
+                16,
+            )
+            .expect("the stream is read");
+        stream.image_count()
+    };
     let mut client = Cavalry::connect_to(&member.dir).expect("the service's client connects");
     let mut service = client.cluster_service();
+    // The counters as a handler reads them, while the poll holds the client.
+    let counters = CountersReader::open(&member.dir).expect("the counters file opens");
+    for counter in FIVE {
+        assert_eq!(
+            counter_in(&counters, counter),
+            None,
+            "before the first poll"
+        );
+    }
+    assert_eq!(
+        read_stream(&mut told),
+        0,
+        "no publication before the first poll"
+    );
+    // What each handled entry saw: its position, whether the five counters were all
+    // there, and how many records the counters file held.
+    let mut seen: Vec<(i64, bool, usize)> = Vec::new();
     // One entry a poll, so that what each poll in the history added can be read.
-    let poll = |service: &mut ClusterService, client: &mut Cavalry| {
+    let poll = |service: &mut ClusterService,
+                client: &mut Cavalry,
+                seen: &mut Vec<(i64, bool, usize)>| {
         service
             .poll(
                 client,
                 |committed: &Committed<'_>, replies| {
+                    seen.push((
+                        committed.position,
+                        FIVE.iter()
+                            .all(|counter| counter_in(&counters, *counter).is_some()),
+                        allocated(&counters),
+                    ));
                     if let Entry::SessionMessage { payload, .. } = committed.entry
                         && payload.first() == Some(&b's')
                     {
@@ -1889,20 +2374,32 @@ fn a_service_adds_its_timers_counters_at_the_end_of_a_history_that_passes_no_eve
             )
             .expect("the service polls")
     };
+    // The poll that opens the log adds the five, with no entry to hand over; and
+    // the publication, whose image the member's client maps in its own time.
+    wait("the service opens its member's log", || {
+        assert_eq!(poll(&mut service, &mut client, &mut seen), 0);
+        FIVE.iter()
+            .all(|counter| counter_in(&counters, *counter).is_some())
+    });
+    wait(
+        "the member has the image of the service's publication",
+        || read_stream(&mut told) == 1,
+    );
+    assert_eq!(seen, [], "nothing is committed yet");
+    let records_at_open = allocated(&counters);
+    member.commit();
     // The polls that ended in the history with the timer pending.
     let mut pending_in_history = 0;
     wait("the service reads its history", || {
-        poll(&mut service, &mut client);
-        if service.position() < history {
+        poll(&mut service, &mut client, &mut seen);
+        if service.position() < history && service.position() >= scheduled {
             assert_eq!(
                 service_counter(&client, CLUSTER_SERVICE_TIMERS.0),
-                None,
-                "no counter of a service's timers at {} of a history that ends at {history}",
+                Some(1),
+                "the gauge holds the timer at {} of a history that ends at {history}",
                 service.position()
             );
-            if service.position() >= scheduled {
-                pending_in_history += 1;
-            }
+            pending_in_history += 1;
         }
         service.position() == history
     });
@@ -1910,44 +2407,42 @@ fn a_service_adds_its_timers_counters_at_the_end_of_a_history_that_passes_no_eve
         pending_in_history >= 2,
         "two polls end in the history with the timer pending, one entry a poll: {pending_in_history}"
     );
-    wait(
-        "the service has read its history and stores its gauge",
-        || {
-            poll(&mut service, &mut client);
-            service_counter(&client, CLUSTER_SERVICE_TIMERS.0) == Some(1)
-        },
+    // Every entry was handed over with the five counters there, and with as many
+    // records in the driver's counters as when the log was opened: the poll that
+    // scheduled the timer added no counter and no publication, and no poll did.
+    assert!(seen.len() >= 5, "{seen:?}");
+    assert!(
+        seen.iter()
+            .all(|(_, five, records)| *five && *records == records_at_open),
+        "{records_at_open} records at the open: {seen:?}"
     );
+    assert_eq!(read_stream(&mut told), 1, "one publication, as at the open");
+    // Nothing of the history was told while it was read.
     assert_eq!(
-        service_counter(&client, CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER.0),
-        Some(0)
+        told,
+        [],
+        "a service tells its member nothing of its history"
     );
-    // And the timer is what it tells its member, on the publication it added with
-    // the counters.
-    let mut stream = member
-        .client
-        .add_subscription("cavalry:ipc", CONSENSUS_MODULE_STREAM_ID)
-        .expect("the member's subscription");
-    let mut told: Vec<(i64, i64)> = Vec::new();
     wait("the member is told of the timer", || {
-        poll(&mut service, &mut client);
-        stream
-            .poll(
-                |bytes, _| match Message::parse(Stream::ConsensusModule, bytes) {
-                    Ok(Message::ScheduleTimer {
-                        correlation_id,
-                        deadline,
-                    }) => told.push((correlation_id, deadline)),
-                    other => panic!("a schedule timer and nothing else: {other:?}"),
-                },
-                16,
-            )
-            .expect("the stream is read");
+        poll(&mut service, &mut client, &mut seen);
+        read_stream(&mut told);
         !told.is_empty()
     });
     assert!(
         told.iter().all(|word| *word == (7, TIME + 1_000_000)),
         "{told:?}"
     );
+    assert_eq!(service_counter(&client, CLUSTER_SERVICE_TIMERS.0), Some(1));
+    assert_eq!(
+        service_counter(&client, CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER.0),
+        Some(0)
+    );
+    assert_eq!(
+        allocated(&counters),
+        records_at_open,
+        "telling the member of the timer added no record"
+    );
+    drop(read_stream);
     drop(stream);
 
     service.close(&mut client).expect("the service closes");

@@ -1184,19 +1184,18 @@ pub struct ClusterService {
     /// The snapshot the last poll's last entry asked for, until the next poll.
     due: Option<Due>,
     /// The two counters of the service's snapshots, added with the three of its
-    /// timers at the first of its first snapshot that writes one, the first thing
-    /// it has to tell its member of a timer and the first timer event it passes
-    /// over ([`ClusterService::add_counters`]).
+    /// timers when the service first opens its member's log, and by a snapshot
+    /// where the driver refused them then ([`ClusterService::add_counters`]; ADR
+    /// 0168).
     snapshot_counters: Option<SnapshotCounters>,
     /// The service's publication on the service snapshot stream, from its first
     /// snapshot whose add the driver took: each snapshot is a recording of a span
     /// of it. Held apart from the counters, so that a refused add is counted, and a
     /// call after it adds no counter twice.
     snapshot_stream: Option<Publication>,
-    /// The service's publication on the consensus module stream, from the first of
-    /// its first snapshot, the first thing it has to tell its member of a timer
-    /// and the first timer event it passes over: its service acks, schedule timers
-    /// and cancel timers go to the member on it.
+    /// The service's publication on the consensus module stream, from its first
+    /// open of its member's log (ADR 0168): its service acks, schedule timers and
+    /// cancel timers go to the member on it.
     member_stream: Option<Publication>,
     /// Whether the service has begun: a poll has opened its member's log, or
     /// [`ClusterService::restore`] has answered where it starts.
@@ -1216,6 +1215,11 @@ pub struct ClusterService {
     /// When the service last sent its member every pending timer, on its own
     /// monotonic clock.
     refreshed_at_ns: i64,
+    /// When the driver last refused one of the six adds for the member, by the
+    /// monotonic clock: the service asks again at its first poll a timer refresh
+    /// interval after it, and at none between (ADR 0168). `None` while none was
+    /// refused.
+    add_refused_at_ns: Option<i64>,
 }
 
 /// What a service has counted of its timers: the events it passed over and the
@@ -1247,8 +1251,8 @@ struct Due {
     timestamp: i64,
 }
 
-/// The two counters of a service's snapshots, kept from the first snapshot it writes
-/// to its close: `cluster.service_snapshots_taken` and
+/// The two counters of a service's snapshots, kept from the service's first open of
+/// its member's log to its close: `cluster.service_snapshots_taken` and
 /// `cluster.service_snapshots_failed`.
 struct SnapshotCounters {
     taken: Counter,
@@ -1307,6 +1311,7 @@ impl ClusterService {
             timer_counters: None,
             history_read: false,
             refreshed_at_ns: 0,
+            add_refused_at_ns: None,
         }
     }
 
@@ -1500,15 +1505,19 @@ impl ClusterService {
     /// message. An entry the service would answer costs two loads of the member's
     /// counters.
     ///
+    /// The poll that first opens the member's log adds the service's five counters
+    /// and its publication on the consensus module stream, before it reads an
+    /// entry: six commands to the driver, the last of which is for a log of 192
+    /// MiB, every page of which the driver touches and this client touches again,
+    /// tens of milliseconds. Telling the member of a timer then sends no command,
+    /// so a program's first timer costs what a later one costs (ADR 0168). A
+    /// refusal of one of the six is this poll's error, returned after the entries
+    /// the handler took are taken, and the service asks again before the entries
+    /// of its first poll a second later.
+    ///
     /// After its entries the poll tells the member of the program's timers
-    /// (`spec/cluster.md`, "What a service tells its member"). The first time it
-    /// has something to tell, or a timer event it passed over to count, it adds
-    /// the service's five counters and its publication on the consensus module
-    /// stream, six commands to the driver, once in a service's life. A refusal of
-    /// one is this poll's error, returned after the entries the handler took are
-    /// taken, and the next such poll adds what is missing (ADR 0159). A poll then
-    /// offers the stream at most 2,048 messages, and none for a program that
-    /// schedules no timer.
+    /// (`spec/cluster.md`, "What a service tells its member"). It offers the stream
+    /// at most 2,048 messages, and none for a program that schedules no timer.
     ///
     /// A poll of a closed client is one error, [`ClusterError::Client`] holding
     /// [`ClientError::Closed`] with the reason [`Cavalry::closed`] gives, whatever
@@ -1577,6 +1586,12 @@ impl ClusterService {
             // for before this.
             self.started = true;
         }
+        // The service's counters and its publication to its member, before the
+        // entries of the poll that first opened the log; where the driver refused
+        // one, again before the entries of the first poll a timer refresh interval
+        // after the refusal (`spec/cluster.md`, "What a service tells its member";
+        // ADR 0168). A refusal is this poll's error once its entries are taken.
+        let added = self.add_for_member(client);
         let Self {
             log,
             member,
@@ -1842,13 +1857,63 @@ impl ClusterService {
             log.close(client)?;
         }
         // What the entries taken left to tell the member, and what is due again.
-        let told = self.tell_member(client);
+        self.tell_member();
         if let Some(error) = failure {
             return Err(error);
         }
         let polled = polled.map_err(ClusterError::Log)?;
-        told?;
+        added?;
         Ok(polled)
+    }
+
+    /// Adds what a service adds for its member where it holds it not yet: its five
+    /// counters, and then its publication on the consensus module stream. A service
+    /// that has found no member adds nothing. The publication is a `cavalry:ipc`
+    /// log of three terms of 64 MiB, every page of which the driver touches as it
+    /// creates it and this client touches again as it maps it (ADR 0027): that is
+    /// what a program's first timer waited for when this was done at the first
+    /// thing to tell (work item 462; ADR 0168).
+    ///
+    /// A refusal is returned, and nothing is asked of the driver again until a
+    /// timer refresh interval, 1 s, has passed: a refused command costs the driver
+    /// an error event to every one of its clients and a counter, and a refused
+    /// publication the making of its log, so a service that polls a thousand times
+    /// a second asks once a second and not a thousand times. A poll between two
+    /// asks reports nothing of it. With all six held this is three compares, and
+    /// reads no clock.
+    fn add_for_member(&mut self, client: &mut Cavalry) -> Result<(), ClusterError> {
+        let Some(member) = self.member.as_ref() else {
+            return Ok(());
+        };
+        if self.member_stream.is_some()
+            && self.snapshot_counters.is_some()
+            && self.timer_counters.is_some()
+        {
+            return Ok(());
+        }
+        if let Some(refused_at) = self.add_refused_at_ns
+            && nano_time().saturating_sub(refused_at) < TIMER_REFRESH_INTERVAL_NS as i64
+        {
+            return Ok(());
+        }
+        // The counters before the publication (`spec/cluster.md`, "A service's
+        // snapshot").
+        let added = Self::add_counters(
+            client,
+            member,
+            &mut self.snapshot_counters,
+            &mut self.timer_counters,
+        )
+        .and_then(|()| {
+            if self.member_stream.is_none() {
+                self.member_stream = Some(
+                    client.add_exclusive_publication(IPC_CHANNEL, CONSENSUS_MODULE_STREAM_ID)?,
+                );
+            }
+            Ok(())
+        });
+        self.add_refused_at_ns = added.is_err().then(nano_time);
+        Ok(added?)
     }
 
     /// Adds the counters a service adds, the two of its snapshots and the three of
@@ -1911,23 +1976,18 @@ impl ClusterService {
     /// and its 1,024 timers, which is what the poll after a refresh of a full table
     /// costs.
     ///
-    /// It adds the service's counters, and then its publication on the consensus
-    /// module stream, at the moments the page names and at no other: the first
-    /// thing there is to tell and the first passed-over event to count (the third,
-    /// the first snapshot, is [`snapshot`](Self::snapshot)'s). A service that reads
-    /// history with timers pending, and has passed no event over, has nothing to
-    /// tell and adds neither: what it counts is stored only into counters that an
-    /// earlier snapshot or read added, and its gauge appears when it has read its
-    /// history and tells its member its timers. A cancel dropped is never a moment
-    /// of its own, since one is dropped only for a cancel held, which is something
-    /// to tell. A driver that refuses a counter or the publication fails no call of
-    /// the program's inside a handler and changes no timer: the error is this
-    /// poll's, reported to the program, and the next poll with something to tell
-    /// or an event passed over adds what is missing (ADR 0159).
+    /// It adds nothing: the service's counters and its publication on the consensus
+    /// module stream are added before a poll's entries, from the first open of the
+    /// member's log ([`add_for_member`](Self::add_for_member); ADR 0168). While the
+    /// driver refuses the publication, nothing is told and every word is kept for
+    /// the poll that has it; while it refuses a counter, the counts are kept in the
+    /// service and stored when the counter is there. Neither fails a call of the
+    /// program's inside a handler or changes a timer. A service that reads history
+    /// tells its member nothing, and its gauge holds its pending timers meanwhile.
     ///
     /// A poll of a service with no timer pending, nothing to tell and nothing new
     /// to count costs a few compares here, and reads no clock.
-    fn tell_member(&mut self, client: &mut Cavalry) -> Result<(), ClusterError> {
+    fn tell_member(&mut self) {
         if self.history_read && !self.timers.is_empty() {
             let now = nano_time();
             if now.saturating_sub(self.refreshed_at_ns) >= TIMER_REFRESH_INTERVAL_NS as i64 {
@@ -1940,33 +2000,10 @@ impl ClusterService {
             self.timer_counts.passed_over,
             self.timer_counts.cancels_dropped,
         );
-        let telling = self.timers.next_word().is_some();
-        // An event passed over that the counters do not hold yet.
-        let passed_over = counts.1 != self.timer_counts.stored.1;
-        if !telling && !passed_over {
-            // None of the page's moments: nothing is added.
-            self.store_counts(counts);
-            return Ok(());
-        }
-        let Some(member) = self.member.as_ref() else {
-            return Ok(());
-        };
-        // The counters before the publication (`spec/cluster.md`, "A service's
-        // snapshot").
-        Self::add_counters(
-            client,
-            member,
-            &mut self.snapshot_counters,
-            &mut self.timer_counters,
-        )?;
         self.store_counts(counts);
-        // The publication, from the first thing to tell and the first event passed
-        // over.
-        let stream = match self.member_stream.take() {
-            Some(stream) => stream,
-            None => client.add_exclusive_publication(IPC_CHANNEL, CONSENSUS_MODULE_STREAM_ID)?,
+        let Some(stream) = self.member_stream.as_mut() else {
+            return;
         };
-        let stream = self.member_stream.insert(stream);
         let mut scratch = [0u8; 64];
         // Each word is told once, so the cancels a service holds and its timers
         // bound the loop.
@@ -1987,7 +2024,6 @@ impl ClusterService {
             }
             self.timers.told(word);
         }
-        Ok(())
     }
 
     /// The position after the last entry the handler took, 0 before the first.
@@ -2034,11 +2070,13 @@ impl ClusterService {
     /// A snapshot written is counted in `cluster.service_snapshots_taken`, and one
     /// given up in `cluster.service_snapshots_failed`, the driver's refusal of a
     /// command among them. At the first snapshot that refusal can be of the
-    /// service's two publications, which the call returns as
-    /// [`ClusterError::Client`]. The service's two counters are added before
-    /// anything else, at the first call that writes a snapshot, and a refusal of
-    /// either is the one failure that is not counted: there is no counter yet to
-    /// count it in. The call returns it as [`ClusterError::Client`], and the next
+    /// publication its snapshots are recordings of, which the call returns as
+    /// [`ClusterError::Client`]. The service's counters and its publication to its
+    /// member were added when it first opened its member's log (ADR 0168); where
+    /// the driver refused one then, the call adds it: a counter before anything
+    /// else, and the publication to its member after the one of its snapshots. A
+    /// refusal of a counter is the one failure that is not counted: there is no
+    /// counter yet to count it in. The call returns it as [`ClusterError::Client`], and the next
     /// call adds them again.
     ///
     /// ```

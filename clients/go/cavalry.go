@@ -1600,12 +1600,13 @@ func (v *ClusterService) CancelTimer(correlationID int64) int32 {
 // log's sessions, and holds a publication to each open session while the service answers.
 // Those are commands sent with the service's client, at a session's opening, where a term's
 // leader changes and at a recording's end, and the poll waits for the driver's answer to
-// each; none is sent for a session message. Six more are sent once in a service's life, at
-// the most: its five counters and its publication to its member, in the poll in which the
-// program first schedules a timer or the service first passes a timer event over, after
-// that poll's entries, where a snapshot has not added them already; that poll returns -1
-// with the driver's refusal of one of them, after the entries its handler took are taken.
-// After that the poll tells the member what each taken entry changed, and every pending
+// each; none is sent for a session message. Six more are sent in the poll that first
+// opens the member's log, before that poll's entries: its five counters and its
+// publication to its member. Telling the member of a timer then sends no command, the
+// program's first timer included. That poll returns -1 with the driver's refusal of one
+// of the six, after the entries its handler took are taken, and the service asks again
+// at its first poll a second later. After its entries a poll tells the member
+// what each taken entry changed, and every pending
 // timer again each second, by offers that wait for nothing. The poll takes no lock, and it is a call on the client: no
 // other goroutine uses the service's client (Client.ClusterService). When the handler
 // panicked, or returned what is no action, its entry was aborted and Poll returns a

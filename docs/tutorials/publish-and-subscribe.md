@@ -7,8 +7,8 @@ again over UDP on the same host, replay the recording from the durable log, and 
 Aeron, this is the media driver and Archive with a client that uses `tryClaim`, `poll`
 and `replay` over `aeron:ipc` and `aeron:udp` ([glossary](../glossary.md)).
 
-The same path is `just quickstart`, which CI runs on Linux and macOS on every commit, so
-what this page says happens is what the repository checks.
+The same path is `just quickstart`, which CI runs on Linux on every commit and on
+macOS each week, so what this page says happens is what the repository checks.
 
 ## Before you start
 
