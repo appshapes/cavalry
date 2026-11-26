@@ -30,7 +30,7 @@ use cavalry_log::catalog::CatalogReader;
 use cavalry_log::layout::{Descriptor, State as SlotState, locate};
 use cavalry_proto::cluster::{
     CONTROL_TOGGLE_SNAPSHOT, EMPTY_MEMBER, Endpoint, LEADER_HEARTBEAT_TIMEOUT_NS, MAX_MEMBERS,
-    SERVICE_LOG_STREAM_ID, STARTUP_CANVASS_TIMEOUT_NS, control_toggle_id, parse_members, quorum,
+    STARTUP_CANVASS_TIMEOUT_NS, control_toggle_id, parse_members, quorum,
 };
 #[cfg(target_os = "linux")]
 use cavalry_proto::udp::DATAGRAMS_PER_BURST;
@@ -55,9 +55,11 @@ use cavalry_shm::counters::generated::{
     CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADERS_WITHHELD, CLUSTER_LEADERSHIP_TERM_ID,
     CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_RECORDINGS_FORGOTTEN, CLUSTER_LOG_RECORDINGS_UNSYNCED,
     CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_LOG_REPLICATIONS_UNAVAILABLE,
-    CLUSTER_MESSAGES_REJECTED, CLUSTER_PROTOCOL_VERSION, CLUSTER_REPLIES_STALE, CLUSTER_ROLE,
-    CLUSTER_SERVICE_ACKS_REJECTED, CLUSTER_SERVICE_SNAPSHOTS_FAILED,
-    CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER, CLUSTER_SERVICE_TIMER_CANCELS_DROPPED,
+    CLUSTER_MESSAGES_REJECTED, CLUSTER_PROTOCOL_VERSION, CLUSTER_REPLIES_DROPPED,
+    CLUSTER_REPLIES_STALE, CLUSTER_ROLE, CLUSTER_SERVICE_ACKS_REJECTED,
+    CLUSTER_SERVICE_SNAPSHOT_START_POSITION, CLUSTER_SERVICE_SNAPSHOTS_FAILED,
+    CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER, CLUSTER_SERVICE_SNAPSHOTS_TAKEN,
+    CLUSTER_SERVICE_TIMER_CANCELS_DROPPED, CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER,
     CLUSTER_SERVICE_TIMERS, CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_PASSED_OVER,
     CLUSTER_STANDBY, CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TIMERS, CLUSTER_TIMERS_CLEARED,
     CLUSTER_TRUNCATION_OWED, CLUSTER_TRUNCATIONS_FAULTED, CLUSTER_TRUNCATIONS_REFUSED,
@@ -1195,6 +1197,26 @@ const MEMBER_COUNTS: [CounterId; 18] = [
     CLUSTER_FLOOR_ANSWERS_IGNORED,
 ];
 
+/// The counters that a service adds, as a client of its member's driver, each keyed
+/// by the member's id (`spec/cluster.md`, "Counters", "Snapshots", "Timers"): its
+/// dropped replies when it first opens its member's log, two for a start from a
+/// snapshot before it reads one, two with its first snapshot, and three with the first
+/// thing it has to tell its member of a timer. It holds each from then to its close,
+/// and the driver frees them when its client closes or times out. So a member with
+/// none of them in its driver's counters has no service beside it that has opened
+/// its log or begun a start from a snapshot (ADR 0167). A new counter that a service
+/// adds is added here.
+const SERVICE_COUNTERS: [CounterId; 8] = [
+    CLUSTER_REPLIES_DROPPED,
+    CLUSTER_SERVICE_SNAPSHOT_START_POSITION,
+    CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER,
+    CLUSTER_SERVICE_SNAPSHOTS_TAKEN,
+    CLUSTER_SERVICE_SNAPSHOTS_FAILED,
+    CLUSTER_SERVICE_TIMERS,
+    CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER,
+    CLUSTER_SERVICE_TIMER_CANCELS_DROPPED,
+];
+
 /// Where a cluster session's findings are explained.
 const DOC_SESSIONS: &str = "docs/reference/cluster.md#sessions";
 
@@ -1272,6 +1294,9 @@ struct MemberCounters {
     /// the member, which the service stores under its member's id; `None` while no
     /// service beside the member has added it.
     service_timers: Option<i64>,
+    /// Whether the file holds one of [`SERVICE_COUNTERS`] keyed by the member: a
+    /// service runs beside it.
+    serves: bool,
     /// The highest id among the control toggles beside the member that ask for a
     /// snapshot, each a counter that a `cavalry snapshot` adds and removes
     /// (`spec/cluster.md`, "The control toggle"; ADR 0147); `None` while there is
@@ -1556,7 +1581,9 @@ fn election_state_name(code: i64) -> String {
 /// its log is (`cluster.vote_floor`; ADR 0145, ADR 0161), or, for a member of a build
 /// before ADR 0161, one below its floor, and no standby, which has no vote to withhold; a
 /// member that owes a truncation whose command or write faulted, with the position it
-/// owes and the end it reports (`cluster.truncation_owed`; ADR 0148);
+/// owes and the end it reports (`cluster.truncation_owed`; ADR 0148); a leader beside
+/// which no service runs, a warning when it holds timers that a service told it of
+/// and a note when it holds none (`cluster-no-service`; ADR 0167);
 /// and each of [`MEMBER_COUNTS`] above 0, by its counter's name with its doctor
 /// sentence, consensus messages rejected among them, but for
 /// `cluster.leaders_withheld`, which is reported only while the member's log is empty
@@ -1596,24 +1623,11 @@ fn cluster_checks(
     // holds a session's record at all.
     let mut stale: Vec<(i64, CounterId, i64)> = Vec::new();
     let mut sessions = false;
-    // How many subscriptions read the service log stream on this driver, one position
-    // for each replay a subscription reads: a service that runs holds one from its
-    // first replay of its member's log to its close, whatever its program does, and
-    // nothing else subscribes to that stream (`spec/cluster.md`, "Members and
-    // streams", "The service"; ADR 0166).
-    let mut service_readers = 0usize;
     for id in 0..reader.capacity() {
         let Some(fields) = reader.record(id).ok().flatten() else {
             continue;
         };
         let type_id = fields.type_id();
-        if type_id == SUBSCRIPTION_POSITION.0 {
-            // Keyed by a correlation id, a session id and then the stream id.
-            if fields.key().get(12..16) == Some(&SERVICE_LOG_STREAM_ID.to_le_bytes()[..]) {
-                service_readers += 1;
-            }
-            continue;
-        }
         if !cluster_ids.contains(&type_id) {
             continue;
         }
@@ -1660,6 +1674,9 @@ fn cluster_checks(
         let Some(member) = members.get_mut(index) else {
             continue;
         };
+        if SERVICE_COUNTERS.iter().any(|counter| counter.0 == type_id) {
+            member.serves = true;
+        }
         if type_id == CLUSTER_ROLE.0 {
             member.role = Some(value);
         } else if type_id == CLUSTER_ELECTION_STATE.0 {
@@ -1724,11 +1741,11 @@ fn cluster_checks(
     if !members.is_empty() {
         members.sort_by_key(|member| member.id);
         for member in &members {
-            member_findings(member, cluster, service_readers, findings);
+            member_findings(member, cluster, findings);
         }
         // The eleven of `member_findings`, the vote floor's (ADR 0145), the control
         // toggle's (ADR 0147), the owed truncation's (ADR 0148), the leader's
-        // timers' (ADR 0151) and the leader's service's (ADR 0166) among them, and
+        // timers' (ADR 0151) and the leader's service's (ADR 0167) among them, and
         // one for each of the member's counts.
         checks += 11 + MEMBER_COUNTS.len();
     }
@@ -2086,7 +2103,6 @@ fn joining_message(member: &MemberCounters, state: i64, cluster: Option<&Cluster
 fn member_findings(
     member: &MemberCounters,
     cluster: Option<&Cluster>,
-    service_readers: usize,
     findings: &mut Vec<Finding>,
 ) {
     let id = member.id;
@@ -2336,53 +2352,61 @@ fn member_findings(
             doc: DOC_CLUSTER,
         });
     }
-    // A leader beside which no service reads the log is told of no timer, and no
-    // service answers the entries of its term (`spec/cluster.md`, "The service",
-    // "Replies", "Timers"): the timers of the program beside every other member
-    // wait while it leads. A service's own counters are closed with it, and a
-    // service that has nothing to tell its member adds none, so neither says whether
-    // one runs. Its subscription on the service log stream does: a service holds it
-    // from its first replay of the member's log to its close, and the driver removes
-    // its position with it (ADR 0166). A leader that holds timers was told of them by
-    // a service, so one that holds some with no reader is a service that stopped: a
-    // warning. A leader that holds none may be of a cluster that runs no program
-    // yet, which the leader's host cannot tell from one whose other members' programs
-    // wait: a note that says both. A service that finds its member's recording again
-    // holds no replay for a moment, so the warning asks for a second run.
-    if leads && closed && service_readers == 0 {
-        let reads = format!(
-            "this driver's counters hold no subscription.position of stream \
-             {SERVICE_LOG_STREAM_ID}, the service log stream"
-        );
-        match member.timers.filter(|held| *held > 0) {
-            Some(held) => findings.push(Finding {
-                check: "cluster.timers",
-                level: Level::Warn,
-                message: format!(
-                    "the leader, member {id}, holds {held} of a service's timers, its \
-                     cluster.timers, and no service reads its log on this host: {reads}. \
-                     Where a second run of doctor says the same, the program beside this \
-                     member has stopped. The member is told of no timer while it is, and \
-                     appends one event at the most for each it holds, so the timers of \
-                     the program beside every other member wait while this member \
-                     leads, and no entry of its term is answered. Start the program \
-                     beside this member."
+    // A leader beside which no service runs is told of no timer, and no service
+    // answers what is appended in its term (`spec/cluster.md`, "The service",
+    // "Replies", "Timers"): where the program runs beside the other members, its
+    // timers wait while this member leads. The sign is the service's own counters,
+    // [`SERVICE_COUNTERS`]: a service adds the first when it first opens its member's
+    // log, and they go with its client (ADR 0167). A leader that holds timers was
+    // told of them by a service, so one that holds some with no service beside it
+    // is a service that stopped: a warning. A leader that holds none may be of a
+    // cluster that runs no program yet, which the leader's host cannot tell from one
+    // whose other members' programs wait: a note that says both. A program that was
+    // killed keeps its counters until its client times out, and one that has just
+    // started has not added them yet, which both lines say.
+    if leads && closed && !member.serves {
+        let none = "this driver's counters hold none of the counters a service adds for \
+                    the member, cluster.replies_dropped the first of them";
+        let started = "A program that started a moment ago has not added them yet: run \
+                       doctor again";
+        let (level, message) = match member.timers.filter(|held| *held > 0) {
+            Some(held) => (
+                Level::Warn,
+                format!(
+                    "the leader, member {id}, holds {}, its cluster.timers, each told to \
+                     it by a service, and no service runs beside it: {none}. The program \
+                     beside this member has stopped; one that was killed is seen here \
+                     once its client has timed out, about 10 s later. \
+                     While it is stopped, the member is told of no timer and appends one \
+                     event at the most for each it holds, and nothing answers what is \
+                     appended in its term: where the program runs beside the other \
+                     members, its timers wait while this member leads. Start the program \
+                     beside this member; a client whose message was appended meanwhile \
+                     gets no reply to it and sends it again. {started}.",
+                    if held == 1 {
+                        "1 timer".to_string()
+                    } else {
+                        format!("{held} timers")
+                    }
                 ),
-                doc: DOC_CLUSTER,
-            }),
-            None => findings.push(Finding {
-                check: "cluster-no-service",
-                level: Level::Note,
-                message: format!(
-                    "no service reads the log of the leader, member {id}, on this host: \
-                     {reads}. Where a program runs beside the other members, its timers \
-                     wait and no entry of this term is answered while this member \
-                     leads: start the program beside this member too. A cluster that \
-                     runs no program yet has nothing to start."
+            ),
+            None => (
+                Level::Note,
+                format!(
+                    "no service runs beside the leader, member {id}: {none}. Where a \
+                     program runs beside the other members, its timers wait and nothing \
+                     answers what is appended in this term while this member leads: \
+                     start the program beside this member too. A cluster that runs no \
+                     program yet has nothing to start. {started}."
                 ),
-                doc: DOC_CLUSTER,
-            }),
-        }
+            ),
+        };
+        findings.push(Finding {
+            check: "cluster-no-service",
+            level,
+            message,
+            doc: DOC_CLUSTER,
+        });
     }
     for (counter, value) in MEMBER_COUNTS.iter().zip(member.counts) {
         let Some(def) = COUNTERS.iter().find(|def| def.id == *counter) else {
@@ -6720,19 +6744,22 @@ mod tests {
         );
     }
 
-    /// A counters file with one cluster member's counters, each set as given, and a
-    /// service that reads the member's log beside it ([`service_reader`]).
+    /// A counters file with one cluster member's counters, each set as given, and
+    /// beside the member a service that has opened its log: the service's
+    /// `cluster.replies_dropped`, at 0. A test of a member with no service, or with
+    /// another of a service's counters, builds its file with [`member_file_beside`].
     fn member_file(dir: &TestDir, id: i32, values: &[(CounterId, i64)]) -> CountersReader {
-        member_file_read_on(dir, id, values, &[SERVICE_LOG_STREAM_ID])
+        member_file_beside(dir, id, values, &[(CLUSTER_REPLIES_DROPPED, id)])
     }
 
-    /// A counters file with one cluster member's counters, each set as given, and a
-    /// subscription's position on each of the streams given.
-    fn member_file_read_on(
+    /// A counters file with one cluster member's counters, each set as given, and
+    /// the counters given beside them, each keyed by the member id given with it and
+    /// at 0: a service's counters, the member's own or another member's.
+    fn member_file_beside(
         dir: &TestDir,
         id: i32,
         values: &[(CounterId, i64)],
-        streams: &[i32],
+        beside: &[(CounterId, i32)],
     ) -> CountersReader {
         let mut file = CountersFile::create(&dir.0, 1024).expect("the counters file");
         for (type_id, value) in values {
@@ -6741,43 +6768,35 @@ mod tests {
                 .expect("a counter");
             counter.set(*value);
         }
-        for stream in streams {
-            service_reader(&mut file, *stream);
+        for (type_id, member) in beside {
+            file.allocate(
+                *type_id,
+                &member.to_le_bytes(),
+                &format!("cluster {member}"),
+            )
+            .expect("a counter beside the member");
         }
         CountersReader::open(&dir.0).expect("opens")
     }
 
-    /// What a driver's counters hold of a service that reads its member's log: the
-    /// position of its subscription on the service log stream, for the replay it
-    /// reads (`spec/cluster.md`, "The service"). On another stream it is some other
-    /// subscription's.
-    fn service_reader(file: &mut CountersFile, stream: i32) {
-        file.allocate(
-            SUBSCRIPTION_POSITION,
-            &position_key(9, 3, stream),
-            &format!("subscription.position 9 3 {stream}"),
-        )
-        .expect("a subscription's position")
-        .set(4096);
+    /// The cluster's findings but the member's own note, for a member with the
+    /// counters given beside it ([`member_file_beside`]).
+    fn cluster_findings_beside(
+        test: &str,
+        id: i32,
+        values: &[(CounterId, i64)],
+        beside: &[(CounterId, i32)],
+    ) -> Vec<Finding> {
+        let dir = TestDir::new(test);
+        let reader = member_file_beside(&dir, id, values, beside);
+        let mut findings = Vec::new();
+        cluster_checks(&reader, true, None, &mut findings);
+        findings.retain(|finding| finding.check != "cluster-member");
+        findings
     }
 
     fn cluster_findings(test: &str, id: i32, values: &[(CounterId, i64)]) -> (usize, Vec<Finding>) {
         cluster_findings_in(test, id, None, values)
-    }
-
-    /// [`cluster_findings`] of a driver whose subscriptions read the streams given,
-    /// and no other: with none, no service reads the member's log.
-    fn cluster_findings_read_on(
-        test: &str,
-        id: i32,
-        values: &[(CounterId, i64)],
-        streams: &[i32],
-    ) -> Vec<Finding> {
-        let dir = TestDir::new(test);
-        let reader = member_file_read_on(&dir, id, values, streams);
-        let mut findings = Vec::new();
-        cluster_checks(&reader, true, None, &mut findings);
-        findings
     }
 
     /// [`cluster_findings`] with the cluster doctor was given a members string for.
@@ -8020,16 +8039,16 @@ mod tests {
         );
     }
 
-    /// A leader beside which no service reads the log is named (ADR 0166): with a
-    /// warning when it holds timers, which a service told it of and has since stopped,
-    /// and with a note when it holds none, as in a cluster that runs no program yet.
-    /// What says that a service reads is a subscription's position on the service log
-    /// stream in the driver's counters, and on no other stream; the service's own
-    /// counters say nothing either way. A follower and a leader whose election is
-    /// open are told of in neither. Neither line says "cluster member", the words
+    /// A leader beside which no service runs is named (ADR 0167): with a warning when
+    /// it holds timers, which a service told it of and has since stopped, and with a
+    /// note when it holds none, as in a cluster that runs no program yet. What says
+    /// that a service runs is any one of the counters a service adds, keyed by the
+    /// member: another member's, a client's session's and the member's own counters
+    /// of its service's snapshots say nothing. A follower and a leader whose election
+    /// is open are told of in neither. Neither line says "cluster member", the words
     /// by which `docs/tutorials/run-a-cluster.md` picks the member's own note.
     #[test]
-    fn a_leader_beside_which_no_service_reads_its_log_is_named() {
+    fn a_leader_beside_which_no_service_runs_is_named() {
         let member = |role: i64, state: i64, more: &[(CounterId, i64)]| {
             let mut counters = vec![
                 (CLUSTER_ROLE, role),
@@ -8045,7 +8064,6 @@ mod tests {
         let of = |findings: &[Finding]| -> Vec<(&'static str, Level, String)> {
             findings
                 .iter()
-                .filter(|finding| finding.check != "cluster-member")
                 .map(|finding| {
                     assert_eq!(finding.doc, DOC_CLUSTER);
                     assert!(
@@ -8057,100 +8075,122 @@ mod tests {
                 })
                 .collect()
         };
-        let warning = |held: i64| {
+        let none = "this driver's counters hold none of the counters a service adds for the \
+                    member, cluster.replies_dropped the first of them";
+        let started = "A program that started a moment ago has not added them yet: run doctor \
+                       again.";
+        let warning = |timers: &str| {
             (
-                "cluster.timers",
+                "cluster-no-service",
                 Level::Warn,
                 format!(
-                    "the leader, member 1, holds {held} of a service's timers, its \
-                     cluster.timers, and no service reads its log on this host: this driver's \
-                     counters hold no subscription.position of stream 104, the service log \
-                     stream. Where a second run of doctor says the same, the program beside \
-                     this member has stopped. The member is told of no timer while it is, and \
-                     appends one event at the most for each it holds, so the timers of the \
-                     program beside every other member wait while this member leads, and no \
-                     entry of its term is answered. Start the program beside this member."
+                    "the leader, member 1, holds {timers}, its cluster.timers, each told to \
+                     it by a service, and no service runs beside it: {none}. The program \
+                     beside this member has stopped; one that was killed is seen here once \
+                     its client has timed out, about 10 s later. While it is stopped, the \
+                     member is told of no timer and appends one event at the most for each \
+                     it holds, and nothing answers what is appended in its term: where the \
+                     program runs beside the other members, its timers wait while this \
+                     member leads. Start the program beside this member; a client whose \
+                     message was appended meanwhile gets no reply to it and sends it again. \
+                     {started}"
                 ),
             )
         };
         let note = (
             "cluster-no-service",
             Level::Note,
-            "no service reads the log of the leader, member 1, on this host: this driver's \
-             counters hold no subscription.position of stream 104, the service log stream. \
-             Where a program runs beside the other members, its timers wait and no entry of \
-             this term is answered while this member leads: start the program beside this \
-             member too. A cluster that runs no program yet has nothing to start."
-                .to_string(),
+            format!(
+                "no service runs beside the leader, member 1: {none}. Where a program runs \
+                 beside the other members, its timers wait and nothing answers what is \
+                 appended in this term while this member leads: start the program beside \
+                 this member too. A cluster that runs no program yet has nothing to start. \
+                 {started}"
+            ),
         );
-        // The program beside the leader has stopped, and its service's counters went
-        // with it: the member holds the timers it was last told of.
-        for held in [1, 3] {
-            let findings = cluster_findings_read_on(
+        // The program beside the leader has stopped, and its counters went with it: the
+        // member holds the timers it was last told of.
+        for (held, timers) in [(1, "1 timer"), (3, "3 timers")] {
+            let findings = cluster_findings_beside(
                 "service-stopped",
                 1,
                 &member(2, 17, &[(CLUSTER_TIMERS, held)]),
                 &[],
             );
-            assert_eq!(of(&findings), [warning(held)]);
+            assert_eq!(of(&findings), [warning(timers)]);
         }
-        // A service's gauge that is still there says nothing of whether it reads.
-        let findings = cluster_findings_read_on(
-            "service-stopped-gauge",
+        // What is no service's counter for this member says nothing: a service's
+        // beside another member, a client's session's, whose key begins with the same
+        // four bytes as the member's id, and the member's own counters of its
+        // service's snapshots and acks.
+        let findings = cluster_findings_beside(
+            "service-others",
             1,
-            &member(2, 17, &[(CLUSTER_TIMERS, 2), (CLUSTER_SERVICE_TIMERS, 2)]),
-            &[],
+            &member(
+                2,
+                17,
+                &[
+                    (CLUSTER_TIMERS, 2),
+                    (CLUSTER_SERVICE_ACKS_REJECTED, 0),
+                    (CLUSTER_SNAPSHOTS_FAILED, 0),
+                ],
+            ),
+            &[(CLUSTER_REPLIES_DROPPED, 2), (CLUSTER_REPLIES_STALE, 1)],
         );
-        assert_eq!(of(&findings), [warning(2)]);
-        // The member's own replay of its log, a service's messages to its member and
-        // a snapshot's replay are other streams: no service reads the log.
-        let findings = cluster_findings_read_on(
-            "service-other-streams",
-            1,
-            &member(2, 17, &[(CLUSTER_TIMERS, 1)]),
-            &[103, 105, 109],
-        );
-        assert_eq!(of(&findings), [warning(1)]);
+        // The other member's counter is read as a member 2 that has no leader, as any
+        // counter keyed by a member is: that finding is member 2's, and is set aside.
+        let own: Vec<Finding> = findings
+            .into_iter()
+            .filter(|finding| finding.check != "cluster-no-leader")
+            .collect();
+        assert_eq!(of(&own), [warning("2 timers")]);
         // A leader that holds no timer, and one of a build without the gauge: a note.
         for (name, more) in [
             ("service-none", &[(CLUSTER_TIMERS, 0)][..]),
             ("service-none-older-build", &[][..]),
         ] {
-            let findings = cluster_findings_read_on(name, 1, &member(2, 17, more), &[]);
+            let findings = cluster_findings_beside(name, 1, &member(2, 17, more), &[]);
             assert_eq!(of(&findings), std::slice::from_ref(&note), "{name}");
         }
-        // Nothing for: a leader beside which a service reads, whatever it holds, a
-        // follower, a leader whose election is open.
-        for (name, counters, streams) in [
-            (
-                "service-reads",
-                member(2, 17, &[(CLUSTER_TIMERS, 1)]),
-                &[SERVICE_LOG_STREAM_ID][..],
-            ),
-            (
-                "service-reads-none-held",
-                member(2, 17, &[(CLUSTER_TIMERS, 0)]),
-                &[103, SERVICE_LOG_STREAM_ID][..],
-            ),
-            (
-                "service-follower",
-                member(0, 17, &[(CLUSTER_TIMERS, 1)]),
-                &[][..],
-            ),
+        // Each of a service's counters, alone, is a service that runs: nothing.
+        assert_eq!(SERVICE_COUNTERS.len(), 8);
+        for counter in SERVICE_COUNTERS {
+            let findings = cluster_findings_beside(
+                "service-runs",
+                1,
+                &member(2, 17, &[(CLUSTER_TIMERS, 1)]),
+                &[(counter, 1)],
+            );
+            assert_eq!(of(&findings), [], "{counter:?}");
+        }
+        // Nothing for a follower, nor for a leader whose election is open, with no
+        // service beside it.
+        for (name, counters) in [
+            ("service-follower", member(0, 17, &[(CLUSTER_TIMERS, 1)])),
             (
                 "service-election-open",
                 member(2, 5, &[(CLUSTER_TIMERS, 1)]),
-                &[][..],
             ),
         ] {
-            let findings = cluster_findings_read_on(name, 1, &counters, streams);
+            let findings = cluster_findings_beside(name, 1, &counters, &[]);
             assert!(
-                !findings.iter().any(|finding| {
-                    finding.check == "cluster.timers" || finding.check == "cluster-no-service"
-                }),
+                !findings
+                    .iter()
+                    .any(|finding| finding.check == "cluster-no-service"),
                 "{name}: {findings:?}"
             );
         }
+        // A leader that holds none, beside which a service has timers pending and
+        // then stopped uncleanly so that only its gauge is left, cannot be: the gauge
+        // is a service's counter. The older warning stands alone there.
+        let findings = cluster_findings_beside(
+            "service-gauge",
+            1,
+            &member(2, 17, &[(CLUSTER_TIMERS, 0), (CLUSTER_SERVICE_TIMERS, 3)]),
+            &[],
+        );
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster.timers"]);
     }
 
     /// A leader that holds no timer is named when the service beside it has timers
@@ -8916,7 +8956,7 @@ mod tests {
     fn a_cluster_member_is_explained_from_its_counters() {
         // No member: no check, nothing found. A stopped driver's: the same.
         let dir = TestDir::new("cluster-none");
-        let reader = member_file(&dir, 0, &[]);
+        let reader = member_file_beside(&dir, 0, &[], &[]);
         let mut findings = Vec::new();
         assert_eq!(cluster_checks(&reader, true, None, &mut findings), 0);
         assert!(findings.is_empty());
@@ -9333,7 +9373,9 @@ mod tests {
                 .expect("a counter")
                 .set(value);
         }
-        service_reader(&mut file, SERVICE_LOG_STREAM_ID);
+        // A service beside the leader, so that the toggle's is its one finding.
+        file.allocate(CLUSTER_REPLIES_DROPPED, &1i32.to_le_bytes(), "cluster 1")
+            .expect("a service's counter");
         let reader = CountersReader::open(&dir.0).expect("opens");
         let mut findings = Vec::new();
         cluster_checks(&reader, true, None, &mut findings);
