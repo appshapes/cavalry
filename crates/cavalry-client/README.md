@@ -328,6 +328,15 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
 
 In Aeron, this is the client, with `tryClaim` and `commit`
 ([glossary](../../docs/glossary.md)).
+- Keeps its conductor working on a machine that loses a timer's wake-up. A client
+  has one thread of its own, its conductor, which idles in a park of at most 1 ms. On
+  macOS a client starts a second thread, its watch, which parks a tenth of a second
+  at a time, and each of the two unparks the other when its park is more than 200 ms
+  overdue: on one Mac the system loses about one timer wake-up in 40 million, and a
+  conductor that was held sent no keepalive until its driver timed the client out.
+  A park so ended is counted in a counter the client adds for itself at the first
+  one, `client.conductor_parks_overdue`, keyed by the client's id, which `cavalry
+  doctor` explains. On other systems a client has no watch (ADR 0177).
 
 ## What it must never do
 
