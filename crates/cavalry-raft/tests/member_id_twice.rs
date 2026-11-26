@@ -39,11 +39,16 @@ fn cluster_with_entries(seed: u64) -> (Cluster, i32, i32) {
     let mut safety = Safety::new(&ids);
     let (mut cluster, leader) = elected(seed, &mut safety);
     for entry in 0..10u32 {
-        cluster.offer(&entry.to_le_bytes()).expect("the leader takes an entry");
+        cluster
+            .offer(&entry.to_le_bytes())
+            .expect("the leader takes an entry");
         safety.run(&mut cluster, 1);
     }
     safety.run(&mut cluster, 1_000);
-    let member = ids.into_iter().find(|&id| id != leader).expect("a follower");
+    let member = ids
+        .into_iter()
+        .find(|&id| id != leader)
+        .expect("a follower");
     (cluster, leader, member)
 }
 
@@ -55,13 +60,20 @@ fn cluster_with_entries(seed: u64) -> (Cluster, i32, i32) {
 #[test]
 fn a_run_without_its_member_ids_address_hears_nothing_and_canvasses_on() {
     let (mut cluster, leader, member) = cluster_with_entries(7);
-    let term = cluster.member(leader).expect("a member").leadership_term_id();
+    let term = cluster
+        .member(leader)
+        .expect("a member")
+        .leadership_term_id();
     let twin = cluster.start_twin(member).expect("a second run");
     cluster.run_ms(120_000);
     let second = cluster.member(twin).expect("the second run");
     assert_eq!(second.election_state(), ElectionState::Canvass);
     assert_eq!(second.leadership_term_id(), -1);
-    assert_eq!(cluster.append_position(twin), Some(0), "it received nothing");
+    assert_eq!(
+        cluster.append_position(twin),
+        Some(0),
+        "it received nothing"
+    );
     assert_eq!(cluster.counts(twin).expect("the second run").candidacies, 0);
     assert_eq!(cluster.leader(), Some(leader));
     let first = cluster.member(member).expect("a member");
@@ -76,7 +88,7 @@ fn a_run_without_its_member_ids_address_hears_nothing_and_canvasses_on() {
 /// entry is committed on the second run's log that the first run's lacks.
 #[test]
 fn a_leader_counts_the_acknowledgements_of_the_run_the_address_reaches() {
-    let (mut cluster, leader, member) = cluster_with_entries(11);
+    let (mut cluster, _, member) = cluster_with_entries(11);
     let held = cluster.append_position(member).expect("a member");
     let twin = cluster.start_twin(member).expect("a second run");
     cluster.move_address(twin);
@@ -92,7 +104,11 @@ fn a_leader_counts_the_acknowledgements_of_the_run_the_address_reaches() {
         },
     );
     assert!(
-        cluster.counts(twin).expect("the second run").vote_floors_cleared >= 1,
+        cluster
+            .counts(twin)
+            .expect("the second run")
+            .vote_floors_cleared
+            >= 1,
         "it took a floor and cleared it"
     );
 

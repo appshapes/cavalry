@@ -899,7 +899,11 @@ impl Io for MemberIo<'_> {
     }
 
     fn send_catchup_position(&mut self, leader: i32, term: i64, position: i64) -> bool {
-        let follower_member_id = self.world.disks.get(self.own).map_or(-1, |disk| disk.member);
+        let follower_member_id = self
+            .world
+            .disks
+            .get(self.own)
+            .map_or(-1, |disk| disk.member);
         // This cluster has no endpoints: a replay reaches the member by its place.
         self.send(
             leader,

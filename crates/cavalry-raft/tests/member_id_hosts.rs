@@ -96,9 +96,10 @@ fn a_member_id_runs_once_on_one_host() {
 
     // A second module on the first's driver, on another log directory.
     let other = dir.path().join("other-log");
-    let refused = ConsensusModule::start(&driver_dir, &other, &members, 1)
-        .err()
-        .expect("a second module of the member id on one driver is refused");
+    let refused = match ConsensusModule::start(&driver_dir, &other, &members, 1) {
+        Ok(_) => panic!("a second module of the member id on one driver started"),
+        Err(error) => error,
+    };
     let text = refused.to_string();
     assert!(
         text.contains("Start the member with the log directory its driver was started with"),
