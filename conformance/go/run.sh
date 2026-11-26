@@ -47,16 +47,21 @@ cargo build --release -p cavalry-ffi --lib
 
 # Go's build cache does not see a C library that cgo links by its path (`go help cache`,
 # "does not detect changes to C libraries imported with cgo"): with no Go source changed,
-# `go run` and `go test` reuse the executable they linked with the library of an earlier
-# build, and this runner would test that library and not the one built above. So the
-# contents of the library and of the header are named in the build's own flags, which
-# the cache does account for: a define that the client's C never reads, so that the
-# package is compiled against this header, and a linker value that no program declares,
-# so that every program is linked again, with this library (work item 503).
+# `go run` hands back the program it linked with the library of an earlier build, and
+# this runner would test that library and not the one built above. So the contents of
+# the library and of the header are named in the build's own flags, which the cache does
+# account for: a define that the client's C never reads, so that the package is compiled
+# against this header, and the linker's value of `linked.Library`, so that every program
+# is linked again, with this library. Each program that links the library then holds
+# itself to it: `linked.Check` (conformance/go/linked) stops one whose value is not the
+# one exported here, as when a `-ldflags` on a `go` line of this file, which replaces the
+# one in GOFLAGS, has taken the value away. What `go env` reports is kept, so that a
+# caller's own flags stay (work item 503).
 library=$(git hash-object target/release/libcavalry_ffi.a)
 header=$(git hash-object crates/cavalry-ffi/include/cavalry.h)
-export CGO_CFLAGS="${CGO_CFLAGS:--g -O2} -DCAVALRY_FFI_HEADER_IS=$header"
-export GOFLAGS="${GOFLAGS:+$GOFLAGS }-ldflags=-X=main.cavalryFFILibraryIs=$library"
+CGO_CFLAGS="$(go env CGO_CFLAGS) -DCAVALRY_FFI_HEADER_IS=$header"
+GOFLAGS="$(go env GOFLAGS) -ldflags=-X=github.com/appshapes/cavalry/conformance/go/linked.Library=$library"
+export CGO_CFLAGS GOFLAGS CAVALRY_GO_LINKED_LIBRARY="$library"
 
 echo "conformance/go: vet, build and test the client with $(go version)"
 unformatted=$(gofmt -l clients/go conformance/go)

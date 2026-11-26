@@ -498,13 +498,23 @@ target/release/cavalry run &                     # one driver per host
 kill -TERM %1
 ```
 
-After the library is built again, build the Go program with `-a` once, as
-`go run -a ./example`, or run `go clean -cache` first. cgo links `libcavalry_ffi.a` by
-its path, and Go's build cache does not see that file change (`go help cache`: it
-"does not detect changes to C libraries imported with cgo"). With no Go source
-changed, `go run` and `go test` can run the program they linked with the library of
-the build before. `conformance/go/run.sh` names the contents of the library and of the
-header in its build's flags, so that the runner tests the library it has just built.
+After the library is built again, Go's own cache can still hand back what it made
+with the library before. cgo links `libcavalry_ffi.a` by its path, and the cache does
+not see that file change (`go help cache`: it "does not detect changes to C libraries
+imported with cgo"). With no Go source changed:
+
+- `go run` runs the program it linked before. `go run -a ./example` once links it
+  again, and a plain `go run` after that runs the new one.
+- `go test` prints the result it cached. `go test -count=1` links and runs again each
+  time; `-a` once is not enough, since the next plain `go test` prints the older
+  cached result.
+- `go build -o` onto a program that is already there leaves it as it is. Build to a
+  new path, or with `-a`.
+
+`go clean -cache` cures all three at the cost of every package's next build.
+`conformance/go/run.sh` names the contents of the library and of the header in its
+build's flags, and each of its programs stops unless it was linked with the library
+just built (`conformance/go/linked`).
 
 ```go
 package main
