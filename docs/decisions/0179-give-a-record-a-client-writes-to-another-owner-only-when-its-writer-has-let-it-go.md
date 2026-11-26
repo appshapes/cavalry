@@ -60,9 +60,15 @@ decision's commit. Each goes through one of four methods of `cavalry-shm`'s `Cou
 | A cluster member's counters | `cavalry-raft`: `module.rs`, `Stored::add` (2760) and `Stored::store` (2771); `timers.rs` (281, 351); `toggle.rs` (61, 143, 144); `snapshot.rs` (236, 350) | The member's consensus thread | The same |
 | `cluster.control_toggle`, for `cavalry snapshot` | `crates/cavalry/src/snapshot.rs`, `wait` (374) | The command's own thread | The same |
 
+The release word has stores of its own, and they are in two places. A handle's drop,
+`owned.rs`, on whichever thread drops the handle, which is the thread that polls for
+an image that is taken out. And the conductor, by a record's id, in `release_unheld`
+of `conductor.rs`, for a record that no handle of this client exists on.
+
 A publisher stores into no record: it reads its limit and writes its log, a file of
 its own that is given to nobody else. `cavalry-ffi` stores nothing itself: its
-functions reach the rows above on its caller's thread. Before this decision the
+functions reach the rows above on its caller's thread. Every handle of the table is
+an `Owned` or holds one. Before this decision the
 image's handle and the conductor's were `cavalry-shm`'s `Counter`, which is `Clone`,
 and nothing in the crate cloned one. A store into a counter the client added first
 checks that the client is open, with one load. The check and the store are two steps,
@@ -86,29 +92,40 @@ reuse timeout from that moment, in two cases.
 1. **The release word.** Each value slot of the counters file gains a word after the
    value, in bytes that were reserved. The one thread that holds the client's handle
    on the record stores 1 there, with a release store, as its last store to the slot,
-   when it gives the handle up. The driver loads it with an acquire load. A
-   subscription stores it on the thread that polls, between two polls, when it takes
-   an image out; a counter's owner when it removes the counter; every handle when it
-   is dropped. For a record the client was told of and never took a handle on, an
-   image it does not add or one announced for a subscription it has removed, its
-   conductor stores the word by the record's id. So the thread that stores and the
-   thread that says so are one, and no second thread is in the argument.
+   when it gives the handle up, and once: giving a handle up and dropping it are one
+   act. The driver loads it with an acquire load. A subscription gives an image's
+   handle up on the thread that polls, between two polls, when it takes the image
+   out; a counter's owner when it removes the counter. For a record the client was
+   told of and never took a handle on, an image it does not add or one announced for
+   a subscription it has removed, its conductor stores the word by the record's id,
+   and only into a record that holds no counter or is still that image's. So the
+   thread that stores and the thread that says so are one, and no second thread is in
+   the argument.
 2. **The client's lock.** A client creates `clients/<client id>.lock` in the driver's
    directory before its first command and holds an exclusive advisory lock on it, as
    the driver holds one on the directory (ADR 0079). Everything of the client that can
-   store into a counter shares the one open file, so the lock is let go when the last
-   of them is dropped, and by the system when the process ends. When a client closes
-   or is timed out the driver gives the file the name `clients/<client id>.gone`,
-   tries its lock ten times a second, and lets every record held for the client go
-   when it takes it.
+   store into a counter keeps the one open file, every handle on a record among
+   them, so the lock is let go when the last of them is dropped, no handle outlives
+   it, and the system lets go of it when the process ends. When a client closes or is
+   timed out the driver gives the file the name `clients/<client id>.gone`, before it
+   frees anything of the client's, tries its lock ten times a second, and lets every
+   record held for the client go when it takes it. Only the driver removes a lock
+   file, after it has taken the lock: client ids begin again with each driver, so a
+   file removed by its name could be another client's.
 
 In `cavalry-client` a handle on such a record is one type, `Owned`. It is not
-`Clone`, it stores the word in its drop, and nothing else in the crate holds a
+`Clone`. Its drop is the one place the word is stored, and its release takes the
+handle and drops it, so one handle stores one word by construction. It holds the
+client's shared state, which owns the lock. Nothing else in the crate holds a
 counter's writing handle. `cavalry-shm`'s own `Counter` stays `Clone` for the driver.
 
-A client that cannot take its lock attaches all the same. Its release words are read
-as any client's. What it leaves held with no word when it closes or is timed out is
-out of use until the driver starts again.
+The driver can learn that a client is gone only by a lock the client held. A client
+that holds none attaches all the same, and so do two more kinds the driver cannot ask
+about: one whose lock file could not be renamed or was removed by another hand, and
+one that goes while the driver's list of 256 clients that have gone is full. Such a
+client's release words are read as any client's. What it leaves held with no word
+when it closes or is timed out is out of use until the driver starts again. Nothing
+is refused for it, and nothing of it is given away.
 
 The counters file goes to version 1, since a reserved field became a field, and
 `spec/client-protocol.md` to version 11. A reader of either side rejects the other's
@@ -117,10 +134,12 @@ message says which side is the older and what to do. So no client of an earlier
 build stores into a record of a driver of this one, and this decision carries no rule
 for one.
 
-Two counters. `counters.held`, a gauge: the records freed and held. `counters.retired`:
-the records out of use until the driver starts again. `cavalry doctor` names each
-client that has gone and still holds its lock, by its `.gone` file, once it has held
-it for 2 s.
+Three counters. `counters.held`, a gauge: the records freed and held.
+`counters.retired`: the records out of use until the driver starts again.
+`client.without_lock`: the clients that held no lock at their first command, so that
+`cavalry doctor` warns while such a client still runs. `doctor` also names each
+client that has gone and still holds its lock, by its `.gone` file, once it has had
+that name for 2 s.
 
 ## Alternatives considered
 
@@ -182,7 +201,27 @@ it for 2 s.
 - **`cavalry-shm`**: `a_held_record_is_given_out_only_when_its_writer_has_let_it_go`,
   the version's two messages, and under loom
   `a_driver_that_acquires_the_release_word_sees_the_writers_last_store`.
+- **The driver's own tests**, in `conductor.rs`, `mod held`: a removed counter held
+  until its word; a gone client's records held until the driver takes its lock; the
+  lock tried once an interval; a client without a lock; a record freed after its
+  client's lock was taken, which is not held; the held records looked at in turn,
+  past one cycle's 64; the list of the clients that have gone at its capacity of
+  256, where the next client's records are put out of use and counted; and a lock
+  file removed by another hand, which is no answer.
 - **`doctor`**: `a_client_that_has_gone_and_holds_its_lock_is_named_by_its_file`.
+- **An independent read of the first build** found four faults that every gate,
+  twenty runs on both runners and seven mutants had passed over. A handle stored its
+  word twice, at its release and again at its drop, and the second store could set
+  the next owner's word. A handle could outlive the lock by the order in which a
+  struct's fields are dropped. A client removed its lock file by name when it went,
+  and the driver took a missing file for a client that was gone, so a client of the
+  driver before a restart could free a new client's records. And a record freed
+  after its client's lock was taken, as a position over UDP is, was held for ever
+  and counted nowhere. Each is closed by structure in the Decision above, and each
+  has a test: `a_handle_stores_its_release_word_once`,
+  `over_udp_a_position_is_held_until_its_writer_lets_it_go`,
+  `a_removed_subscription_is_forgotten_once_the_driver_has_answered`, and the
+  driver's.
 - **The upgrade gate** runs a program and the driver it is a client of from one build
   in every round (`conformance/upgrade/run.sh`, "The schedule"), so no round crosses
   this version with a client on one side and its driver on the other. It does run
@@ -224,9 +263,14 @@ Harder:
   thread no longer polls, which its client's queue of 64 image events closes. Held
   records count against the counters file's capacity. They are bounded by it, counted
   in `counters.held`, and `doctor` names the first two.
-- Each client holds one more open file. The driver makes a system call at a client's
-  first command, and three every 100 ms for each client that has gone and still holds
-  a record, on its conductor's thread, on the control plane.
+- Each client holds one more open file. The driver makes two system calls at a
+  client's first command, one more when the client goes, and two every 100 ms for
+  each client that has gone and whose lock it has not taken, on its conductor's
+  thread, on the control plane.
+- A client that closes cleanly leaves its lock file for the driver to remove, which
+  the driver does within 100 ms of the client's last object being dropped. A client
+  whose attach fails after its first command leaves a file that the driver removes
+  when it times the client out.
 - A caller of the C ABI that uses a handle from a second thread while the first
   closes it stores after the word. That was the caller's fault before, and the page
   now says so.

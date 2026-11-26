@@ -1919,6 +1919,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The conductor stores a release word by a record's id only into a record that is
+    /// the client's to release: one that holds no counter, which the driver has freed
+    /// and holds, or one that is still the image's own. Into a record that holds
+    /// another counter it stores nothing: that record is another owner's, and its
+    /// word would let the driver give it away under its writer (ADR 0179).
+    #[test]
+    fn the_conductor_releases_by_id_only_a_record_that_is_the_images_or_holds_no_counter() {
+        use cavalry_shm::counters::CountersFile;
+        use cavalry_shm::counters::generated::PUBLICATION_LIMIT;
+        let dir = std::env::temp_dir().join(format!(
+            "cavalry-client-conductor-release-by-id-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the directory");
+        let mut file = CountersFile::create(&dir, 256).expect("the counters file");
+        let writer = CountersWriter::open(&dir).expect("a client's mapping");
+        let (image, session) = (41i64, 7i32);
+        let mut key = [0u8; 16];
+        key[..8].copy_from_slice(&image.to_le_bytes());
+        key[8..12].copy_from_slice(&session.to_le_bytes());
+        let mut allocate = |type_id, key: &[u8]| {
+            file.allocate(type_id, key, "a counter")
+                .expect("a record")
+                .id()
+        };
+        let own = allocate(SUBSCRIPTION_POSITION, &key);
+        let held = allocate(SUBSCRIPTION_POSITION, &key);
+        let other_image = allocate(SUBSCRIPTION_POSITION, &[9u8; 16]);
+        let other_type = allocate(PUBLICATION_LIMIT, &key);
+        file.hold(held).expect("held");
+
+        for record in [own, held, other_image, other_type] {
+            assert!(!file.released(record).expect("a record"));
+            super::release_unheld(&writer, record, image, session);
+        }
+        assert!(file.released(own).expect("a record"), "the image's own");
+        assert!(
+            file.released(held).expect("a record"),
+            "freed and held for this client"
+        );
+        assert!(
+            !file.released(other_image).expect("a record"),
+            "another image's position is another owner's"
+        );
+        assert!(
+            !file.released(other_type).expect("a record"),
+            "and so is a counter of another kind"
+        );
+        super::release_unheld(&writer, 100_000, image, session);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// What [`announced`] makes of an `available image`, against a real driver's
     /// directory: the image when its log and its position counter are there; `gone`
     /// when the log is not there, or the record holds no counter, or another image's

@@ -160,6 +160,12 @@ impl Counter {
         if let Some(cell) = self.cell.take() {
             cell.release();
         }
+        // A client that is closed has nothing registered with the driver, which freed
+        // this counter's record with the client: a command from it now would read to
+        // the driver as a new client's first.
+        if self.shared.closed().is_some() {
+            return;
+        }
         let command = Command::RemoveCounter {
             client_id: self.client_id,
             correlation_id: self.producer.next_correlation_id(),

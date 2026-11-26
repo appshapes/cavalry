@@ -794,6 +794,14 @@ impl Subscription {
         // reads it, so that the conductor keeps the registration, and releases what
         // the driver still announces for it, until the driver has answered.
         self.release_images();
+        // A client that is closed has nothing registered with the driver, which
+        // removed this subscription with the client: a command from it now would read
+        // to the driver as a new client's first.
+        if self.shared.closed().is_some() {
+            self.removal.store(REMOVAL_NOT_SENT, Ordering::Release);
+            self.images.clear();
+            return;
+        }
         let correlation_id = self.producer.next_correlation_id();
         let command = Command::RemoveSubscription {
             client_id: self.client_id,

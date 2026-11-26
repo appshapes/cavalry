@@ -585,6 +585,80 @@ fn a_removed_subscription_is_forgotten_once_the_driver_has_answered() {
     driver.close().expect("the driver closes");
 }
 
+/// Client ids begin again with each driver, so the first client of a driver that
+/// started has the id that the first client of the driver before it had, and its lock
+/// file has the same name. A client of the earlier driver that goes after the restart
+/// removes nothing: the file by that name is not its own, and a client whose file
+/// were gone would be one the driver could not ask about (ADR 0179).
+#[test]
+fn a_client_of_the_driver_before_a_restart_removes_nothing_of_the_next_drivers() {
+    let dir = TestDir::new("restart");
+    let first_driver =
+        Driver::start(dir.path(), dir.path().join("log")).expect("the first driver starts");
+    let old = Cavalry::connect_to(dir.path()).expect("a client of the first driver");
+    let id = old.client_id();
+    let name = dir.path().join("clients").join(format!("{id}.lock"));
+    assert!(name.is_file(), "the client's lock file");
+    first_driver.close().expect("the first driver closes");
+
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the next driver starts");
+    assert!(
+        !name.exists(),
+        "a driver that starts removes what the last left"
+    );
+    let mut new = Cavalry::connect_to(dir.path()).expect("a client of the next driver");
+    assert_eq!(new.client_id(), id, "ids begin again with each driver");
+    assert!(name.is_file());
+    let counter = new
+        .add_counter(CLUSTER_COMMIT_POSITION.0, &1i32.to_le_bytes(), "a counter")
+        .expect("added");
+
+    // The earlier driver's client goes now, closed and dropped.
+    let _ = old.close();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        name.is_file(),
+        "the next driver's client still has its lock file after the earlier client went"
+    );
+    // And the driver still knows the new client as one it can ask: closed with a
+    // counter not given up, its record is held, and let go when the counter is dropped.
+    let watcher = Cavalry::connect_to(dir.path()).expect("a third client");
+    let read = |counter: cavalry_shm::counters::CounterId| {
+        watcher
+            .counters()
+            .read(counter.record())
+            .expect("a static counter")
+    };
+    new.close().expect("the new client closes");
+    wait("the record is held", Duration::from_secs(10), || {
+        (read(COUNTERS_HELD) == 1).then_some(())
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(read(COUNTERS_HELD), 1, "held while its handle exists");
+    assert_eq!(read(COUNTERS_RETIRED), 0);
+    drop(counter);
+    wait("the record is let go", Duration::from_secs(10), || {
+        (read(COUNTERS_HELD) == 0).then_some(())
+    });
+    assert_eq!(read(COUNTERS_RETIRED), 0);
+    // The last object of the client is gone, so its lock is free: the driver takes it
+    // and removes the file, which only the driver does.
+    let gone = dir.path().join("clients").join(format!("{id}.gone"));
+    wait(
+        "the driver removes the file of the client that went",
+        Duration::from_secs(10),
+        || (!gone.exists() && !name.exists()).then_some(()),
+    );
+    assert_eq!(
+        read(cavalry_shm::counters::generated::CLIENT_WITHOUT_LOCK),
+        0,
+        "every client held its lock, and a handle dropped after its client closed sent \
+         the driver no command, which would have read as a new client's first"
+    );
+    watcher.close().expect("the third client closes");
+    driver.close().expect("the driver closes");
+}
+
 /// A client and a driver of the two sides of ADR 0179 do not attach to each other: a
 /// client of this build refuses a counters file of version 0, which a driver before
 /// that decision wrote, before it sends a command, and its error says that the driver
