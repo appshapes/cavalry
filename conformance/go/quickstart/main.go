@@ -448,10 +448,35 @@ func edges(client *cavalry.Client) {
 	nestedHandler := func(body []byte, header *cavalry.Header) {
 		fail("%s: a poll from inside a handler of the same subscription delivered a fragment", name)
 	}
+	// The subscription's images, asked for from inside its own handler, after the poll from
+	// inside it, so that the thread's last error is that poll's: the ABI refuses the count
+	// there, and Images and ImageAt each return that refusal, with the count's own message,
+	// and no slice and no image. Images panicked there on a capacity of -1, and ImageAt
+	// returned no image and no error (work item 468).
+	type listedResult struct {
+		count int
+		none  bool
+		fn    string
+		code  int32
+		own   bool
+	}
+	var listed []listedResult
+	refusal := func(none bool, err error) listedResult {
+		var refusedList *cavalry.Error
+		if !errors.As(err, &refusedList) {
+			return listedResult{subscription.ImageCount(), none, "no *Error", 0, false}
+		}
+		return listedResult{subscription.ImageCount(), none, refusedList.Fn, refusedList.Code,
+			strings.HasPrefix(refusedList.Message, "cavalry_subscription_image_count refused (polling)")}
+	}
 	outerHandler := func(body []byte, header *cavalry.Header) {
 		outer = append(outer, indexOf(body))
 		count := must(subscription.Poll(nestedHandler, 10))
 		nested = append(nested, nestedResult{count, codeOf(subscription.Err()), cavalry.Errcode()})
+		images, listErr := subscription.Images()
+		listed = append(listed, refusal(images == nil, listErr))
+		image, imageErr := subscription.ImageAt(0)
+		listed = append(listed, refusal(image == nil, imageErr))
 	}
 	until = deadline()
 	for len(outer) < 3 {
@@ -464,6 +489,19 @@ func edges(client *cavalry.Client) {
 	if !slices.Equal(outer, []int{13, 14, 15}) || !slices.Equal(nested, []nestedResult{refusedPoll, refusedPoll, refusedPoll}) {
 		fail("%s: the outer handler saw %v and the polls from inside it returned %v (the count, Err's code, Errcode); "+
 			"expected messages 13 to 15, and -1 with ErrPolling (%d) each time", name, outer, nested, cavalry.ErrPolling)
+	}
+	refusedList := listedResult{-1, true, "cavalry_subscription_image_count", cavalry.ErrPolling, true}
+	if !slices.Equal(listed, slices.Repeat([]listedResult{refusedList}, 6)) {
+		fail("%s: the image count, Images and ImageAt(0), asked for from inside the handler, gave %v (the count, whether "+
+			"the slice or the image was nil, the error's Fn and Code, whether its message is the count's own); expected "+
+			"-1, nil and the ABI's refusal of cavalry_subscription_image_count with ErrPolling (%d), twice in each of the "+
+			"three handler calls", name, listed, cavalry.ErrPolling)
+	}
+	images := must(subscription.Images())
+	atZero, pastCount := must(subscription.ImageAt(0)), must(subscription.ImageAt(len(images)))
+	if len(images) != subscription.ImageCount() || len(images) < 1 || atZero == nil || pastCount != nil {
+		fail("%s: after the poll the subscription lists %d images and counts %d, with an image at index 0 (%v) and none "+
+			"past the count (%v) expected", name, len(images), subscription.ImageCount(), atZero != nil, pastCount == nil)
 	}
 	var abi *cavalry.Error
 	if !errors.As(subscription.Err(), &abi) || abi.Fn != "cavalry_subscription_poll" || !strings.Contains(abi.Message, "(polling)") {
@@ -579,7 +617,9 @@ func edges(client *cavalry.Client) {
 			"ErrNotUTF8 and its message", name, err)
 	}
 	say("%s: a poll from inside a handler of its own subscription returned -1 with ErrPolling, in the subscription's "+
-		"Err and the handler's Errcode, and the outer handler saw messages 13 to 15; a TryClaim with a claim outstanding "+
+		"Err and the handler's Errcode, the image count there was -1 and Images and ImageAt each returned the ABI's "+
+		"refusal with ErrPolling, "+
+		"and the outer handler saw messages 13 to 15; a TryClaim with a claim outstanding "+
 		"returned ERROR with ErrClaimOutstanding in Err, Claim stayed the first slice and its commit set it to nil; a "+
 		"second commit left ErrNoClaim in Err; a close with a claim outstanding set Claim to nil; a close from inside the "+
 		"handler returned *Error with ErrPolling, kept the subscription open for message 18, and the close after the poll "+

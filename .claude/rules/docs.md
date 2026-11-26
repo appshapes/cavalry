@@ -22,7 +22,7 @@ not ready to write the page.
 | --- | --- | --- | --- |
 | Tutorial | `docs/tutorials/` | "Teach me, by doing" | Numbered steps, a stated time budget, a visible result after every step, no choices offered |
 | How-to | `docs/how-to/` | "I need to do X" | Prerequisites, steps, how to verify it worked, link to the troubleshooting page |
-| Reference | `docs/reference/` | "What exactly does Y do" | Generated from `spec/`, `counters.toml`, `config.toml`, rustdoc. Do not edit by hand; edit the source |
+| Reference | `docs/reference/` | "What exactly does Y do" | Generated from `spec/`, `counters.toml`, `config.toml`, rustdoc, and the decisions (`scripts/decisions-index.py`). Do not edit by hand; edit the source |
 | Explanation | `docs/explanation/` | "Why is it like this" | The question in the title, the answer first, then the reasoning, then links to the ADRs |
 | Decision | `docs/decisions/` | "Why did we choose this" | The ADR template in `docs/decisions/0000-template.md` |
 

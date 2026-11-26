@@ -146,7 +146,10 @@ public final class Subscription implements AutoCloseable {
         }
     }
 
-    /** How many images the subscription has. */
+    /** How many images the subscription has, or -1 where the ABI refuses the call: from
+     * inside a handler of this subscription's own poll, with {@link Abi#ERR_POLLING} as
+     * the thread's error, and after this subscription's own {@code close()}, with
+     * {@link Abi#ERR_NULL}. */
     public int imageCount() {
         try {
             return (int) Abi.cavalry_subscription_image_count.invokeExact(handle);
@@ -155,9 +158,14 @@ public final class Subscription implements AutoCloseable {
         }
     }
 
-    /** The image at the index, with its constants copied now, or null; valid until the next
-     * poll or close. An {@code index} below zero throws {@link IllegalArgumentException}
-     * before the ABI is called. */
+    /** The image at the index, with its constants copied now, or null for an index past the
+     * count; valid until the next poll or close. An {@code index} below zero throws
+     * {@link IllegalArgumentException} before the ABI is called. Where the ABI refuses the
+     * call, from inside a handler of this subscription's own poll or after this
+     * subscription's own {@code close()}, it throws {@link CavalryException}, as
+     * {@link #images()} does: the ABI answers a refusal and an index past the count alike,
+     * and a success clears no error, so the count is asked, and its refusal is the
+     * answer. */
     public Image imageAt(int index) {
         if (index < 0) {
             Abi.negative("index", index);
@@ -168,12 +176,25 @@ public final class Subscription implements AutoCloseable {
         } catch (Throwable t) {
             throw Abi.failed("cavalry_subscription_image_at_index", t);
         }
-        return pointer.address() == 0 ? null : new Image(pointer);
+        if (pointer.address() != 0) {
+            return new Image(pointer);
+        }
+        if (imageCount() < 0) {
+            throw Abi.lastError("cavalry_subscription_image_count");
+        }
+        return null;
     }
 
-    /** Every image, valid until the next poll or close. */
+    /** Every image, valid until the next poll or close. Where the ABI refuses the count,
+     * from inside a handler of this subscription's own poll or after this subscription's
+     * own {@code close()}, it throws {@link CavalryException} with the ABI's code,
+     * {@link Abi#ERR_POLLING} or {@link Abi#ERR_NULL}: a refusal is no empty list (README,
+     * "What it must never do"). */
     public List<Image> images() {
         int count = imageCount();
+        if (count < 0) {
+            throw Abi.lastError("cavalry_subscription_image_count");
+        }
         List<Image> images = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             Image image = imageAt(i);

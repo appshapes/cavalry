@@ -480,11 +480,31 @@ public static class Quickstart
         List<int> outer = new();
         List<int[]> nested = new();
         FragmentHandler nestedHandler = (body, header) => Fail("a poll from inside a handler of the same subscription delivered a fragment");
+        // The subscription's images, asked for from inside its own handler, after the poll from
+        // inside it, so that the thread's last error is that poll's: the ABI refuses the count
+        // there, and the list and the image at an index are each that refusal, with the
+        // count's own message. The list threw ArgumentOutOfRangeException there for a
+        // capacity of -1, and the image at an index was null (work item 468).
+        List<string> listed = new();
+        Func<object?>[] asks = { () => subscription.Images(), () => subscription.ImageAt(0) };
         FragmentHandler outerHandler = (body, header) =>
         {
             outer.Add(IndexOf(body));
             int count = subscription.Poll(nestedHandler, 10);
             nested.Add(new[] { count, Abi.Errcode() });
+            foreach (Func<object?> ask in asks)
+            {
+                try
+                {
+                    object? answered = ask(); // asked before the count, whose own refusal would set the same error
+                    listed.Add(subscription.ImageCount() + " answered " + answered);
+                }
+                catch (CavalryException refusedList)
+                {
+                    listed.Add(subscription.ImageCount() + " " + refusedList.Function + " " + refusedList.Code + " "
+                        + refusedList.Message.Contains("cavalry_subscription_image_count refused (polling)"));
+                }
+            }
         };
         until = Deadline();
         while (outer.Count < 3)
@@ -498,6 +518,20 @@ public static class Quickstart
         {
             Fail(name + ": the outer handler saw " + Show(outer) + " and the polls from inside it returned " + nested.Count
                 + " results; expected messages 13 to 15, and -1 with ERR_POLLING (" + Abi.ERR_POLLING + ") each time");
+        }
+        string refusedList = "-1 cavalry_subscription_image_count " + Abi.ERR_POLLING + " True";
+        if (listed.Count != 6 || listed.Exists(one => one != refusedList))
+        {
+            Fail(name + ": the image count, the list of images and the image at index 0, asked for from inside the handler,"
+                + " gave " + string.Join("; ", listed) + "; expected -1 and a CavalryException of"
+                + " cavalry_subscription_image_count with ERR_POLLING and that call's own message, twice in each of the"
+                + " three handler calls");
+        }
+        if (subscription.Images().Count != subscription.ImageCount() || subscription.ImageCount() < 1
+            || subscription.ImageAt(0) == null || subscription.ImageAt(subscription.ImageCount()) != null)
+        {
+            Fail(name + ": after the poll the subscription lists " + subscription.Images().Count + " images and counts "
+                + subscription.ImageCount() + ", with an image at index 0 and none past the count expected");
         }
 
         claimed = ClaimOrFail(name, publication, 16);
@@ -603,7 +637,9 @@ public static class Quickstart
                 + " with error " + commitAfterCloseCode + "; expected -1 and ERROR with ERR_NULL (" + Abi.ERR_NULL
                 + "), and -1 with ERR_NO_CLAIM (" + Abi.ERR_NO_CLAIM + ")");
         }
-        Say(name + ": a poll from inside a handler of its own subscription returned -1 with ERR_POLLING and the outer handler saw"
+        Say(name + ": a poll from inside a handler of its own subscription returned -1 with ERR_POLLING, the image count there"
+            + " was -1 and the list of images and the image at an index each threw CavalryException with that code, and the"
+            + " outer handler saw"
             + " messages 13 to 15; a TryClaim with a claim outstanding returned ERROR with ERR_CLAIM_OUTSTANDING, the claim stayed"
             + " the first span and its commit left it empty; a close with a claim outstanding left the claim empty and its"
             + " Commit, Abort and SetReservedValue answered -1 with ERR_NO_CLAIM; a close"
