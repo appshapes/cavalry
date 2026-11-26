@@ -99,6 +99,24 @@ imports), Go (`go/`, by `generate_go.py`), the JVM (`jvm/`, by `generate_jvm.py`
   was written; and `restore` gives the restored code and the state together, the
   state a copy the caller owns. Each of the five clients has them.
 
+## The package a user installs
+
+A user installs a client from its language's package, with the native library inside,
+and a client finds that library in its own package before it looks anywhere else
+([ADR 0166](../docs/decisions/0166-carry-the-native-library-inside-a-clients-package-and-look-for-it-there-first.md)).
+The Python client is the first with such a package: the generator writes its manifest,
+`python/pyproject.toml`, its build backend, `python/cavalry_package.py`, and
+`python/LICENSE`, a copy of the repository's that the wheel carries
+(`generate_python_package.py` beside `generate.py`), and `python/README.md`, "The
+package", says how the wheel is built and where the library is found. `just package`
+builds the wheel, installs it into a new environment outside the checkout and runs
+the client README's example there, on both CI runners; then it installs the same
+wheel without its library, which must fail. `clients/package-test.py`, which `just
+test` runs, holds the backend and the search to made-up libraries and trees.
+`clients/lint.py` reads none of the three generated files: nothing in them runs when a
+message does. The other four clients take their library from a checkout until their own part
+of work item 369.
+
 ## Released together
 
 The clients version with `cavalry-ffi` and are released with it, at the version the
@@ -112,7 +130,7 @@ built from the same checkout, or regenerate the package from the library's heade
 
 | Client | Package | Runner | Decided in |
 | --- | --- | --- | --- |
-| `python/` | `cavalry`, `ctypes` over the shared library | `conformance/python/` | ADR 0046 (card 205); ADR 0124 (work item 229) |
+| `python/` | `cavalry`, `ctypes` over the shared library; installed as the wheel `cavalry-client` | `conformance/python/` | ADR 0046 (card 205); ADR 0124 (work item 229) |
 | `node/` | `@cavalry/client`, an N-API addon in C over the header, linked with the static library | `conformance/node/` | ADR 0046 (card 206); ADR 0124 (work item 229) |
 | `go/` | `github.com/appshapes/cavalry/clients/go`, cgo over the header, linked with the static library | `conformance/go/` | ADR 0046 (card 207); ADR 0124 (work item 229) |
 | `jvm/` | `com.appshapes.cavalry`, `java.lang.foreign` over the shared library, Java 25 and nothing else | `conformance/jvm/` | ADR 0046 (card 208); ADR 0124 (work item 229) |
