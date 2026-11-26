@@ -998,7 +998,7 @@ class Package(unittest.TestCase):
             self.assertEqual(raised.exception.code, _abi.CAVALRY_ERR_ABI_VERSION)
             self.assertEqual(raised.exception.function, "cavalry_abi_version")
             self.assertIn(f"is ABI version {found} and", raised.exception.message)
-            self.assertIn(f"from a header of ABI version {package}.", raised.exception.message)
+            self.assertIn(f"from a header of ABI version {package};", raised.exception.message)
             self.assertIn("python3 clients/generate.py python", raised.exception.message)
             # An installed package loads its own library before the variable is read, so the
             # message names what changes the library there (work item 469; ADR 0166).

@@ -20,11 +20,13 @@ the ABI's page promises (ADR 0046's boundary; ADR 0051). The package has no depe
 The package loads the library at its first use, `cavalry.Client()` or
 `cavalry.version()`, and calls `cavalry_abi_version()` before any other function. A
 library of another ABI version than the header the package was generated from raises
-`cavalry.CavalryError` with code `CAVALRY_ERR_ABI_VERSION` and both numbers: load the
-library built from the same checkout, or run `just generate-clients` against the
-library's header (`spec/c-abi.md`, "Versions and what a reader rejects"). Where the
-package looks for the library, and how the package a user installs carries one, is
-"The package" below.
+`cavalry.CavalryError` with code `CAVALRY_ERR_ABI_VERSION` and both numbers. In a
+checkout, load the library built from the same checkout, or run `just
+generate-clients` against the library's header (`spec/c-abi.md`, "Versions and what a
+reader rejects"). An installed package loads its own library before it reads
+`CAVALRY_FFI_LIBRARY`, so there the remedy is to build the package again after the
+library and install that one. Where the package looks for the library, and how the
+package a user installs carries one, is "The package" below.
 
 ### The committed log
 

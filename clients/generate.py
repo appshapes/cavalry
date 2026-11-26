@@ -517,7 +517,7 @@ def write_python(header: Header) -> dict[str, str]:
     out.append("        from . import CavalryError  # the package's error; the package has loaded by the time load runs")
     out.append('        raise CavalryError("cavalry_abi_version", CAVALRY_ERR_ABI_VERSION,')
     out.append('                           f"the library at {path} is ABI version {found} and this package was generated "')
-    out.append('                           f"from a header of ABI version {CAVALRY_ABI_VERSION}. The two must come from one "')
+    out.append('                           f"from a header of ABI version {CAVALRY_ABI_VERSION}; the two must come from one "')
     out.append('                           f"checkout. When the library is inside an installed package, build the package "')
     out.append('                           f"again after `cargo build --release -p cavalry-ffi --lib` and install that one "')
     out.append('                           f"(clients/python/README.md#the-package): a package\'s own library is loaded "')
