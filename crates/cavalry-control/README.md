@@ -42,7 +42,7 @@ is allowed here.
   `run::member_given_up` adds one to `run.member_given_up` in the driver's counters
   file when `cavalry run` gives up the cluster member it runs beside its driver, and
   `run::member_refused` adds one to `run.member_refused` when that member's start
-  fails, before any counter of its own was added. The
+  fails, so that none of its own counters remains. The
   counter is static, the driver's own, so it is in the directory a closed driver
   leaves, and `doctor` reports it there with its sentence from `counters.toml`; what
   the member counted is freed with its client. `doctor` reads a static counter only
