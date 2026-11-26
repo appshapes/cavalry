@@ -541,6 +541,8 @@ platform (work item 369), and until then a wheel is built from a checkout.
 
 ### How it is built
 
+Run both commands from the checkout's root:
+
 ```sh
 cargo build --release -p cavalry-ffi --lib                  # libcavalry_ffi, which the wheel will hold
 python3 clients/python/cavalry_package.py target/package    # writes the wheel and prints its path
@@ -556,6 +558,9 @@ manifest, names it. So an installer builds the same wheel, byte for byte:
 ```sh
 python3 -m pip wheel --no-deps --no-index --wheel-dir target/package clients/python
 ```
+
+The first way needs Python alone. The second needs pip, which a Python of Debian or
+Ubuntu has only with the package `python3-pip`.
 
 Both files are generated, like the rest of the package, and so is `LICENSE` beside
 them, a copy of the repository's, which the wheel carries. The backend uses Python's
@@ -576,13 +581,14 @@ system it is loaded on:
 
 | Library | Tag | Read from |
 | --- | --- | --- |
-| Mach-O, macOS | `macosx_11_0_arm64` | The least macOS version the file says it runs on, in the part of its header named `LC_BUILD_VERSION`, and its CPU. A tag has no third number, and from macOS 11 on an installer knows the tags `macosx_<major>_0` alone, so a least version that a tag cannot say is written as the next that it can: 11.3 as `macosx_12_0`. |
-| ELF, Linux | `manylinux_2_34_x86_64` | The newest version of glibc, the C library of most Linux systems, among the versions the file asks its functions in (`GLIBC_2.34` for one that glibc 2.34 added), so the oldest glibc it runs on (PEP 600), and its machine. |
+| Mach-O, macOS | `macosx_11_0_arm64` | The least macOS version the file says it runs on, in the part of its header named `LC_BUILD_VERSION`, or `LC_VERSION_MIN_MACOSX` in a file from an older linker, and its CPU. A tag has no third number, and from macOS 11 on an installer knows the tags `macosx_<major>_0` alone, so a least version that a tag cannot say is written as the next that it can: 11.3 as `macosx_12_0`. macOS on Apple silicon begins at 11.0, so a library for it is never tagged older. |
+| ELF, Linux | `manylinux_2_34_x86_64` | The newest version of glibc, the C library of most Linux systems, among the versions the file asks its functions in (`GLIBC_2.34` for one that glibc 2.34 added), so the oldest glibc it runs on (PEP 600), and its machine. A version with a third number is written as the next a tag can say: `GLIBC_2.3.4` as `manylinux_2_4`. |
 
 The two tags are those of the wheels CI builds, on its macOS and its Linux runner. A
 library the backend has no tag for is refused, with no wheel written: one built
 for musl, the C library of Alpine Linux, one for Windows, one for a machine other
-than x86-64 and 64-bit ARM, and a file that is not a shared library.
+than x86-64 and 64-bit ARM, a file that is not a shared library, and one cut short or
+without the part the tag is read from. The message says which, and what to build.
 
 ### Where the library is found
 
@@ -619,6 +625,10 @@ python3 -m venv /tmp/cavalry-client
 /tmp/cavalry-client/bin/python -m pip install --no-index target/package/cavalry_client-*.whl
 ```
 
+The install needs pip 20.3 or later, the first that knows both tags above; an older
+pip says the wheel `is not a supported wheel on this platform`.
+`/tmp/cavalry-client/bin/python -m pip --version` prints the environment's.
+
 The Example's program then runs from any directory with `/tmp/cavalry-client/bin/python
 - <<'PY'` as its first line, in place of `PYTHONPATH=clients/python python3 - <<'PY'`,
 and prints the same line.
@@ -626,8 +636,11 @@ and prints the same line.
 `just package` does all of this with a driver of its own
 (`scripts/package.sh`, `scripts/package-python.py`), and CI runs it on Linux for every
 pull request and on macOS too for every commit on `master`. It builds the wheel
-through pip, checks that the wheel holds the library `cargo` built under the tag that
-a second reader gives it, `objdump` on Linux and `otool` on macOS, installs it into a
+through pip and again with the backend run as a program, and fails unless the two are
+the same bytes. It checks that the wheel holds the library `cargo` built under the tag
+that a second reader gives it, `objdump` on Linux and `otool` on macOS, and on Linux
+that the library loads no library but glibc's own and `libgcc_s`, which is what a
+`manylinux` tag promises. It installs the wheel into a
 new virtual environment in a directory outside the checkout, and runs the Example's program
 there with neither `PYTHONPATH` nor `CAVALRY_FFI_LIBRARY` set. It fails unless the
 program prints the Example's line and the library the client names is the one inside

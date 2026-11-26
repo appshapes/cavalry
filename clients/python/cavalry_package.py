@@ -87,9 +87,14 @@ def library_path():
 def _elf_platform(data, path):
     """`("libcavalry_ffi.so", "manylinux_X_Y_<machine>")` for a 64-bit little-endian ELF
     library: X.Y is the newest `GLIBC_X.Y` among the symbol versions its version-needs
-    section asks of the libraries it loads, so the oldest glibc it runs on (PEP 600). An
-    entry's offset to the next is followed, and an offset of zero ends a list whatever
-    its count says."""
+    section asks of the libraries it loads, so the oldest glibc it runs on (PEP 600). A
+    version with a third number, `GLIBC_2.3.4`, is written as the next a tag can say,
+    2_4, as a Mach-O library's is. An entry's offset to the next is followed, an offset
+    of zero ends a list whatever its count says, and no list is read past the entries
+    its section has room for."""
+    if len(data) < 64:
+        raise PackageError(f"{path} is an ELF file of {len(data)} bytes, fewer than an ELF header's 64: it is cut "
+                           f"short; build it again with `cargo build --release -p cavalry-ffi --lib`; {HELP}")
     if data[4:6] != b"\x02\x01":
         raise PackageError(f"{path} is an ELF file that is not 64-bit little-endian, and this backend has a tag "
                            f"for x86_64 and aarch64 alone; build cavalry-ffi for one of them; {HELP}")
@@ -104,22 +109,29 @@ def _elf_platform(data, path):
         if machine not in _ELF_MACHINES:
             raise PackageError(f"{path} is an ELF library for machine {machine}, and this backend has a tag for "
                                f"x86_64 (62) and aarch64 (183) alone; build cavalry-ffi for one of them; {HELP}")
+        if section_offset == 0 or section_count == 0 or section_size < 64:
+            raise PackageError(f"{path} is an ELF library with no section headers, as a stripped one may be, and "
+                               f"the glibc it needs is read from its version-needs section; package the "
+                               f"libcavalry_ffi.so that `cargo build --release -p cavalry-ffi --lib` wrote, as "
+                               f"cargo wrote it; {HELP}")
         sections = [struct.unpack_from("<IIQQQQII", data, section_offset + index * section_size)
                     for index in range(section_count)]
         newest = None
-        for _, kind, _, _, offset, _, link, count in sections:
+        for _, kind, _, _, offset, size, link, count in sections:
             if kind != _SHT_GNU_VERNEED:
                 continue
             strings = sections[link][4]
-            for _ in range(count):
+            # An entry of either list is 16 bytes, so the section holds at most this many.
+            room = size // 16
+            for _ in range(min(count, room)):
                 _, aux_count, _, aux, following = struct.unpack_from("<HHIII", data, offset)
                 at = offset + aux
-                for _ in range(aux_count):
+                for _ in range(min(aux_count, room)):
                     _, _, _, name, aux_following = struct.unpack_from("<IHHII", data, at)
                     end = data.index(b"\0", strings + name)
-                    version = re.fullmatch(rb"GLIBC_(\d+)\.(\d+)(?:\.\d+)?", data[strings + name:end])
+                    version = re.fullmatch(rb"GLIBC_(\d+)\.(\d+)(?:\.(\d+))?", data[strings + name:end])
                     if version is not None:
-                        found = (int(version.group(1)), int(version.group(2)))
+                        found = (int(version.group(1)), int(version.group(2)) + (1 if int(version.group(3) or 0) else 0))
                         newest = found if newest is None or found > newest else newest
                     if aux_following == 0:
                         break
@@ -143,7 +155,9 @@ def _macho_platform(data, path):
     for a version's third number, and from macOS 11 on an installer knows the tags
     `macosx_<major>_0` alone. So a least version that a tag cannot say is written as the
     next one it can, the first that does not promise a system the library refuses:
-    10.9.5 as 10_10, 11.0.1 and 11.3 as 12_0."""
+    10.9.5 as 10_10, 11.0.1 and 11.3 as 12_0. macOS on arm64 begins at 11.0, so an
+    arm64 library that names an older system is tagged 11_0, the oldest tag an installer
+    there has. A least version of 0.0 is refused: no system matches its tag."""
     try:
         cpu, _, kind, command_count = struct.unpack_from("<iiII", data, 4)
         cpu &= 0xFFFFFFFF
@@ -175,6 +189,13 @@ def _macho_platform(data, path):
                            f"has a tag for macOS alone among Apple's systems; build cavalry-ffi for an "
                            f"`-apple-darwin` target; {HELP}")
     major, minor, patch = least >> 16, (least >> 8) & 0xFF, least & 0xFF
+    if major == 0:
+        raise PackageError(f"{path} names macOS {major}.{minor}.{patch} as the least it runs on, which is no "
+                           f"macOS, and no installer has a tag for it; build it again with `cargo build --release "
+                           f"-p cavalry-ffi --lib`, with MACOSX_DEPLOYMENT_TARGET unset or set to a real version; "
+                           f"{HELP}")
+    if _MACHO_CPUS[cpu] == "arm64" and major < 11:
+        major, minor, patch = 11, 0, 0
     if major >= 11:
         major, minor = (major, 0) if (minor, patch) == (0, 0) else (major + 1, 0)
     elif patch:

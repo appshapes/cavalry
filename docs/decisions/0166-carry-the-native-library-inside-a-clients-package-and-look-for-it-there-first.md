@@ -61,12 +61,16 @@ For the Python client:
   repository's `LICENSE` there, which the wheel carries.
 - **The wheel's platform tag is read from the library, never from the machine that
   builds it.** The least macOS a Mach-O library names, and the newest `GLIBC_` symbol
-  version an ELF library needs. A library the backend has no tag for is refused and
-  no wheel is written.
+  version an ELF library needs. A version that a tag cannot say is written as the
+  next one it can, so that no tag promises a system the library refuses. A library
+  the backend has no tag for is refused and no wheel is written.
 - **`just package` is the gate, a step of the gates jobs.** It builds the wheel through
-  pip, checks the tag against a second reader (`objdump`, `otool`), installs the wheel
-  into a new environment outside the checkout, and runs the client README's example
-  there against a driver of the same commit. Then it runs a control in every run: the
+  pip and with the backend run as a program, which must write the same bytes. It
+  checks the tag against a second reader (`objdump`, `otool`), and on Linux that the
+  library loads glibc's own libraries and `libgcc_s` alone, which is what a
+  `manylinux` tag promises. It installs the wheel into a new environment outside the
+  checkout, and runs the client README's example there against a driver of the same
+  commit. Then it runs a control in every run: the
   same wheel without its library must fail with the search's error.
 
 ## Alternatives considered
@@ -86,7 +90,7 @@ For the Python client:
   builds. And what auditwheel and delocate do beyond naming the tag, copying in the
   other libraries a library needs, has nothing to copy: on Linux the library needs
   `libc.so.6`, `libgcc_s.so.1` and the loader alone (Evidence), which every glibc
-  system has and which the `manylinux` tags let a wheel leave outside. The cost is about 260 lines of
+  system has and which the `manylinux` tags let a wheel leave outside. The cost is about 290 lines of
   generated Python that read two file formats, held by tests on made-up files and by
   a second reader in the gate.
 - **The build machine's tag.** Python's `sysconfig.get_platform()` says what the
@@ -128,8 +132,21 @@ For the Python client:
   package's directory cannot reach, and that pip's wheel came out without it, 357,030
   bytes against 361,183, with nothing said. An independent read of the change found
   it. The licence is now a generated file of the package's directory, and a directory
-  without it builds nothing. With that, the wheel is the same 361,232 bytes from both
-  Pythons, through pip and from the backend run as a program.
+  without it builds nothing. With that, the wheel is the same 361,674 bytes built
+  three ways: by the backend run as a program with each Python, and through pip
+  21.2.4.
+- **A second independent read**, of the tree that the runs below were made on. It gave
+  the backend's two readers 35 odd files, and none raised anything but the backend's
+  own refusal. It found four tags or messages that were wrong: `GLIBC_2.3.4` tagged
+  `manylinux_2_3`, a least macOS of 0.0 and an arm64 library older than macOS 11 each
+  given a tag that no installer matches, and a file cut short or without section
+  headers refused for another reason than its own. Each is now as the Decision and
+  the README say, with a test. It found the README's first way to build run by no
+  gate, and the gate now builds both ways and compares the bytes. And it found that
+  the client's error for a library of another ABI version told the user of an
+  installed package to set `CAVALRY_FFI_LIBRARY`, which an installed package no
+  longer reads first: the message now names the package's rebuild and
+  `Client(library_path=...)`.
 - **On CI's two runners**, run 45735860574 of a throwaway branch that held this
   change's tree at 1a27132e and one more workflow. Its jobs `package (linux)` and
   `package (macos)` each ran `just package` twenty times in a row, and all forty
@@ -164,6 +181,11 @@ For the Python client:
   20.04. A lower floor is a build on an older image or with a linker that targets an
   older glibc, and the release's ADR decides it with the platforms. The backend will
   tag what it is given.
+- **The macOS library records the path it was built at** as its install name
+  (`LC_ID_DYLIB`), since `cargo` sets none. `ctypes` loads the file by its path in the
+  package, so nothing reads the name, but the wheel's bytes differ from one checkout
+  to another for it. A release that wants one wheel from any build machine sets the
+  name at the link.
 - We maintain the backend's two readers. A new platform is a new tag there, with a
   made-up file in `clients/package-test.py`: Linux on musl, Windows, and a macOS
   library of two architectures are refused today, each with a message that says so.

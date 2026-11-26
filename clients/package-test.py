@@ -32,6 +32,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from unittest import mock
@@ -64,14 +65,15 @@ def macho(cpu=0x0100000C, commands=((0x32, struct.pack("<IIII", 1, 11 << 16, 15 
 
 
 def elf(machine=62, needs=(("libc.so.6", ("GLIBC_2.2.5", "GLIBC_2.34", "GLIBC_2.17")),), identity=b"\x02\x01",
-        kind=3, count=None, last_offset=0):
+        kind=3, count=None, last_offset=0, versions_count=None):
     """A 64-bit ELF file, a shared library's unless `kind` says otherwise, of four
     sections: the empty first one, a string table that is not the version needs' own, a
     version-needs section that asks each library of `needs` for its versions, and that
     section's string table, which it names by its link. The entries of the version-needs
     section lie 8 bytes apart, so that a reader must follow each entry's offset to the
     next. `count` is the section's count of libraries when it is not the true one, and
-    `last_offset` what the last library's entry gives as the offset to the next."""
+    `last_offset` what the last library's entry gives as the offset to the next.
+    `versions_count` is each library's count of versions when it is not the true one."""
     decoy = b"\0" + b"GLIBC_9.99\0" * 8
     strings = b"\0"
     offsets = {}
@@ -84,7 +86,8 @@ def elf(machine=62, needs=(("libc.so.6", ("GLIBC_2.2.5", "GLIBC_2.34", "GLIBC_2.
     for index, (library, versions) in enumerate(needs):
         size = 16 + len(gap) + (16 + len(gap)) * len(versions)
         following = size if index + 1 < len(needs) else last_offset
-        verneed += struct.pack("<HHIII", 1, len(versions), offsets[library], 16 + len(gap), following) + gap
+        verneed += struct.pack("<HHIII", 1, len(versions) if versions_count is None else versions_count,
+                               offsets[library], 16 + len(gap), following) + gap
         for at, version in enumerate(versions):
             verneed += struct.pack("<IHHII", 0, 0, 2 + at, offsets[version],
                                    16 + len(gap) if at + 1 < len(versions) else 0) + gap
@@ -147,11 +150,16 @@ class PlatformTag(unittest.TestCase):
         """An installer knows `macosx_<major>_0` alone from macOS 11 on, and no tag has a
         third number: a library that needs 11.3 tagged 11_0 would install on 11.0, where
         it does not load."""
-        for least, tag in (((11, 3, 0), "macosx_12_0_arm64"), ((11, 0, 1), "macosx_12_0_arm64"),
-                           ((14, 0, 0), "macosx_14_0_arm64"), ((10, 9, 5), "macosx_10_10_arm64"),
-                           ((10, 9, 0), "macosx_10_9_arm64"), ((10, 15, 7), "macosx_10_16_arm64")):
+        arm64, x86_64 = 0x0100000C, 0x01000007
+        for cpu, least, tag in ((arm64, (11, 3, 0), "macosx_12_0_arm64"), (arm64, (11, 0, 1), "macosx_12_0_arm64"),
+                                (arm64, (14, 0, 0), "macosx_14_0_arm64"), (x86_64, (10, 9, 5), "macosx_10_10_x86_64"),
+                                (x86_64, (10, 9, 0), "macosx_10_9_x86_64"), (x86_64, (10, 15, 7), "macosx_10_16_x86_64"),
+                                (x86_64, (11, 0, 0), "macosx_11_0_x86_64"),
+                                # macOS on arm64 begins at 11.0: an older least version there is 11_0,
+                                # the oldest tag an installer on arm64 has.
+                                (arm64, (10, 9, 0), "macosx_11_0_arm64"), (arm64, (10, 15, 7), "macosx_11_0_arm64")):
             version = (least[0] << 16) | (least[1] << 8) | least[2]
-            library = macho(commands=((0x32, struct.pack("<IIII", 1, version, 0, 0)),))
+            library = macho(cpu=cpu, commands=((0x32, struct.pack("<IIII", 1, version, 0, 0)),))
             self.assertEqual(backend.library_platform(library, "lib")[1], tag, least)
 
     def test_a_mach_o_library_with_no_tag_is_refused(self):
@@ -159,6 +167,9 @@ class PlatformTag(unittest.TestCase):
                               (macho(kind=2), "a Mach-O file of type 2, not a dynamic library (6)"),
                               (macho(commands=((0x32, struct.pack("<IIII", 2, 17 << 16, 0, 0)),)), "names no least macOS version"),
                               (macho(commands=()), "names no least macOS version"),
+                              (macho(commands=((0x32, struct.pack("<IIII", 1, 0, 0, 0)),)), "macOS 0.0.0 as the least"),
+                              (macho(cpu=0x01000007, commands=((0x24, struct.pack("<II", 5 << 8, 0)),)),
+                               "macOS 0.5.0 as the least"),
                               (macho()[:36], "could not be read as a Mach-O library"),
                               (macho(commands=((0x32, b""),))[:-1] + b"\0", "could not be read as a Mach-O library")):
             with self.assertRaises(backend.PackageError) as raised:
@@ -175,6 +186,13 @@ class PlatformTag(unittest.TestCase):
                                           ("libm.so.6", ("GLIBC_2.27",)),
                                           ("libc.so.6", ("GLIBC_2.4", "GLIBC_2.17", "GLIBC_2.2.5"))))
         self.assertEqual(backend.library_platform(several, "lib")[1], "manylinux_2_27_aarch64")
+        # A tag has no third number: a library that needs 2.3.4 does not run on 2.3, so its tag is 2_4.
+        for versions, tag in ((("GLIBC_2.3.4", "GLIBC_2.2.5"), "manylinux_2_4_x86_64"),
+                              (("GLIBC_2.2.5",), "manylinux_2_3_x86_64"),
+                              (("GLIBC_2.3.4", "GLIBC_2.4"), "manylinux_2_4_x86_64"),
+                              (("GLIBC_2.3.4", "GLIBC_2.5"), "manylinux_2_5_x86_64"),
+                              (("GLIBC_2.17.0",), "manylinux_2_17_x86_64")):
+            self.assertEqual(backend.library_platform(elf(needs=(("libc.so.6", versions),)), "lib")[1], tag, versions)
 
     def test_an_elf_library_with_no_tag_is_refused(self):
         whole = elf()
@@ -186,7 +204,12 @@ class PlatformTag(unittest.TestCase):
                               (elf(needs=()), "asks for no GLIBC symbol version"),
                               (whole[:len(whole) - 70], "could not be read as an ELF library"),
                               (elf(count=2, last_offset=1 << 30), "could not be read as an ELF library"),
-                              (whole[:30], "could not be read as an ELF library")):
+                              (whole[:30], "an ELF file of 30 bytes, fewer than an ELF header's 64: it is cut short"),
+                              (b"\x7fELF", "an ELF file of 4 bytes"),
+                              # No section headers: their count, their size or their place is zero.
+                              (whole[:60] + b"\0\0" + whole[62:], "an ELF library with no section headers"),
+                              (whole[:58] + b"\0\0" + whole[60:], "an ELF library with no section headers"),
+                              (whole[:40] + b"\0" * 8 + whole[48:], "an ELF library with no section headers")):
             with self.assertRaises(backend.PackageError) as raised:
                 backend.library_platform(library, "target/lib")
             self.assertIn(said, str(raised.exception))
@@ -195,8 +218,14 @@ class PlatformTag(unittest.TestCase):
 
     def test_a_count_that_is_wrong_does_not_keep_the_reader_past_the_lists_end(self):
         """An entry whose offset to the next is zero is the last, whatever the section's
-        count says: a count of four thousand million must not be read that many times."""
+        count says: a count of four thousand million must not be read that many times.
+        Two things hold that, and each alone would: the zero offset ends the list, and
+        no list is read past the entries its section has room for."""
         self.assertEqual(backend.library_platform(elf(count=0xFFFFFFFF), "lib")[1], "manylinux_2_34_x86_64")
+        started = time.monotonic()
+        self.assertEqual(backend.library_platform(elf(count=0xFFFFFFFF, versions_count=0xFFFF), "lib")[1],
+                         "manylinux_2_34_x86_64")
+        self.assertLess(time.monotonic() - started, 5)
         # And a count that is too small ends the list early: the reader trusts neither alone.
         two = (("libm.so.6", ("GLIBC_2.27",)), ("libc.so.6", ("GLIBC_2.34",)))
         self.assertEqual(backend.library_platform(elf(needs=two, count=1), "lib")[1], "manylinux_2_27_x86_64")
@@ -226,6 +255,8 @@ class Wheel(unittest.TestCase):
                                                     f"{info}/LICENSE", f"{info}/METADATA", f"{info}/WHEEL", f"{info}/RECORD"])
                 self.assertEqual(wheel.read("cavalry/libcavalry_ffi.so"), library)
                 self.assertEqual(wheel.getinfo("cavalry/libcavalry_ffi.so").external_attr >> 16, 0o100755)
+                # No member carries the time of its build: two builds are the same bytes on any day.
+                self.assertEqual({member.date_time for member in wheel.infolist()}, {(1980, 1, 1, 0, 0, 0)})
                 for source in ("__init__.py", "_abi.py"):
                     with open(os.path.join(HERE, "python", "cavalry", source), "rb") as f:
                         self.assertEqual(wheel.read(f"cavalry/{source}"), f.read())

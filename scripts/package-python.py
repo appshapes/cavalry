@@ -9,7 +9,10 @@ It makes a directory outside the checkout and in it:
    wheel from `clients/python` through the package's own build backend, with nothing
    from a package index, and the wheel must hold the library `cargo` built, byte for
    byte, under the platform tag a second reader gives it: `objdump` for the glibc an ELF
-   library needs, `otool` for the least macOS of a Mach-O one.
+   library needs, `otool` for the least macOS of a Mach-O one. An ELF library must load
+   no library but those of `NEEDED`, which is what its tag promises. The backend run as
+   a program, the README's first way to build, must write the same wheel, byte for
+   byte.
 2. The wheel installed into that environment, and the README's example run with the
    environment's Python: from a directory outside the checkout, with no `PYTHONPATH`
    and no `CAVALRY_FFI_LIBRARY`, so the client can find the library in one place alone,
@@ -41,9 +44,23 @@ HELP = "see clients/python/README.md#the-package"
 STEP_SECONDS = 300
 
 
+# What a glibc library of this package may load beside glibc's own: the libraries every
+# glibc system has (PEP 600 leaves the list to the manylinux policies; these are in
+# each), and the loader. Any other library is one the tag does not promise.
+NEEDED = {"libc.so.6", "libm.so.6", "libdl.so.2", "librt.so.1", "libpthread.so.0", "libgcc_s.so.1",
+          "ld-linux-x86-64.so.2", "ld-linux-aarch64.so.1"}
+
+
 def fail(what):
     print(f"package: python: {what}", file=sys.stderr)
     sys.exit(1)
+
+
+def shown(output):
+    """What a command had printed when its time ran out: text, bytes or nothing."""
+    if output is None:
+        return "nothing"
+    return repr(output.decode("utf-8", "replace") if isinstance(output, bytes) else output)
 
 
 def run(arguments, what, **options):
@@ -51,7 +68,7 @@ def run(arguments, what, **options):
     try:
         result = subprocess.run(arguments, capture_output=True, text=True, timeout=STEP_SECONDS, **options)
     except subprocess.TimeoutExpired as timeout:
-        fail(f"{what} did not finish in {STEP_SECONDS} s; it printed {timeout.stdout!r}")
+        fail(f"{what} did not finish in {STEP_SECONDS} s; it printed {shown(timeout.stdout)}")
     if result.returncode != 0:
         fail(f"{what} failed: `{' '.join(arguments)}` exited {result.returncode} and printed\n"
              f"{result.stdout}{result.stderr}")
@@ -73,7 +90,8 @@ def environment(directory):
         subprocess.run([sys.executable, "-m", "venv", directory], check=True, capture_output=True, text=True,
                        timeout=STEP_SECONDS)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-        fail(f"`{sys.executable} -m venv` made no environment; it printed\n{error.stdout}{error.stderr}\n"
+        fail(f"`{sys.executable} -m venv` made no environment; it printed {shown(error.stdout)} and "
+             f"{shown(error.stderr)}\n"
              f"On Debian and Ubuntu the module is the package python3-venv: install it and run this again; {HELP}")
     return os.path.join(directory, "bin", "python")
 
@@ -83,21 +101,38 @@ def expected_platform():
     machine = platform.machine()
     if sys.platform == "darwin":
         listing = run(["otool", "-l", LIBRARY], "otool's reading of the library's load commands")
-        least = re.search(r"cmd LC_BUILD_VERSION\n(?:.*\n)*? *minos (\d+)\.(\d+)", listing)
+        least = re.search(r"cmd LC_BUILD_VERSION\n(?:.*\n)*? *minos (\d+)\.(\d+)(?:\.(\d+))?", listing)
         if least is None:
             fail(f"otool shows no LC_BUILD_VERSION with a minos in {LIBRARY}; {HELP}")
-        major, minor = int(least.group(1)), int(least.group(2))
+        major, minor, patch = int(least.group(1)), int(least.group(2)), int(least.group(3) or 0)
+        # The same rule as the backend's, read from the other reader's numbers: a tag says
+        # `<major>_0` alone from macOS 11 on, no tag has a third number, and macOS on
+        # arm64 begins at 11.0.
+        if machine == "arm64" and major < 11:
+            major, minor, patch = 11, 0, 0
         if major >= 11:
-            major, minor = (major, 0) if minor == 0 else (major + 1, 0)
+            major, minor = (major, 0) if (minor, patch) == (0, 0) else (major + 1, 0)
+        elif patch:
+            minor += 1
         return f"macosx_{major}_{minor}_{machine}"
     if shutil.which("objdump") is None:
         fail("objdump is not installed, and it is the second reader of the glibc version the library needs; "
              f"install binutils and run this again; {HELP}")
     listing = run(["objdump", "-T", LIBRARY], "objdump's reading of the library's dynamic symbols")
-    versions = [(int(a), int(b)) for a, b in re.findall(r"GLIBC_(\d+)\.(\d+)", listing)]
+    # A version with a third number, 2.3.4, is the next a tag can say, 2_4, as in the backend.
+    versions = [(int(a), int(b) + (1 if int(c or 0) else 0))
+                for a, b, c in re.findall(r"GLIBC_(\d+)\.(\d+)(?:\.(\d+))?", listing)]
     if not versions:
         fail(f"objdump shows no symbol of a GLIBC version in {LIBRARY}; {HELP}")
     newest = max(versions)
+    needed = re.findall(r"^\s*NEEDED\s+(\S+)", run(["objdump", "-p", LIBRARY], "objdump's reading of the "
+                                                    "library's dynamic section"), flags=re.M)
+    other = sorted(set(needed) - NEEDED)
+    if other:
+        fail(f"{LIBRARY} loads {', '.join(other)}, and a `manylinux` tag promises a library that loads glibc's "
+             f"own libraries and libgcc_s alone: a system may not have that one. Link it statically into "
+             f"cavalry-ffi, or carry it in the package beside the library and say so in ADR 0166's successor; "
+             f"{HELP}")
     return f"manylinux_{newest[0]}_{newest[1]}_{machine}"
 
 
@@ -130,7 +165,7 @@ def run_example(python, directory, program):
                               cwd=directory, env=names)
     except subprocess.TimeoutExpired as timeout:
         fail(f"the README's example did not finish in {wait} s against the installed package; it printed "
-             f"{timeout.stdout!r}")
+             f"{shown(timeout.stdout)}")
 
 
 def main():
@@ -166,8 +201,21 @@ def main():
             member = "cavalry/libcavalry_ffi" + SUFFIX
             if member not in archive.namelist() or archive.read(member) != library.read():
                 fail(f"{built[0]} does not hold {member} with the bytes of {LIBRARY}; it holds {archive.namelist()}")
+        # The README's other way to build, the backend run as a program from the checkout's
+        # root, which finds the checkout's library by itself: the same wheel, byte for byte.
+        program_wheels = os.path.join(work, "wheel-by-program")
+        run([sys.executable, os.path.join("clients", "python", "cavalry_package.py"), program_wheels],
+            "the wheel's build by the backend run as a program", cwd=ROOT,
+            env={name: value for name, value in os.environ.items() if name != "CAVALRY_FFI_LIBRARY"})
+        by_program = os.path.join(program_wheels, built[0])
+        if os.listdir(program_wheels) != built:
+            fail(f"the backend run as a program wrote {os.listdir(program_wheels)}, and pip wrote {built}")
+        with open(wheel, "rb") as one, open(by_program, "rb") as two:
+            if one.read() != two.read():
+                fail(f"`python3 clients/python/cavalry_package.py <directory>` and pip wrote wheels named "
+                     f"{built[0]} that differ, and the README says the two builds are the same bytes; {HELP}")
         print(f"package: python: built {built[0]}, {os.path.getsize(wheel)} bytes, with {member} inside, the "
-              f"library cargo built")
+              f"library cargo built; the backend run as a program writes the same bytes")
 
         # 2. Install, and run the README's example as written.
         run([python, "-m", "pip", "install", "--no-deps", "--no-index", wheel], "the wheel's install", cwd=work)
