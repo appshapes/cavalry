@@ -13,6 +13,12 @@ use cavalry_driver::{Driver, spec};
 use cavalry_proto::client_protocol::{Command, ErrorCode, Event, IPC_CHANNEL};
 use cavalry_shm::broadcast::BroadcastBuffer;
 use cavalry_shm::command_ring::CommandRing;
+use cavalry_shm::counters::generated::DRIVER_LOG_CREATE_FAILED;
+
+// This test's port, from the one file that says how they are taken and why, which is
+// `cavalry-raft`'s: `crates/cavalry-raft/tests/ports/mod.rs`.
+#[path = "../../cavalry-raft/tests/ports/mod.rs"]
+mod ports;
 
 /// A directory of its own per test, removed when the guard drops.
 struct TestDir(PathBuf);
@@ -369,4 +375,112 @@ fn a_claim_or_an_offer_after_the_clients_close_is_closed_while_the_limit_has_roo
     );
     drop(held);
     driver.close().expect("the driver closes");
+}
+
+/// Where the child of
+/// [`a_driver_that_cannot_create_a_log_refuses_it_and_leaves_no_file`] runs its driver.
+const LIMITED_DIR: &str = "CAVALRY_CLIENT_TEST_LIMITED_DIR";
+
+/// The log files under a driver's directory: its publications' and its images'.
+fn log_files(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for kind in ["publications", "images"] {
+        let Ok(entries) = std::fs::read_dir(dir.join(kind)) else {
+            continue;
+        };
+        for entry in entries {
+            found.push(entry.expect("an entry").path());
+        }
+    }
+    found.sort();
+    found
+}
+
+/// A driver that cannot create a publication's log refuses the add with error code
+/// 12, counts it, and leaves no file in its directory, however often it is asked
+/// (invariant 3; `spec/log-buffer.md`, "The file"; ADR 0171; work item 492; GitHub
+/// issue 238). Each ask has a correlation id of its own, and so a file name of its
+/// own: before the removal each left a file as long as the log, and the first kept
+/// what room a full directory had left. The creation is made to fail for real, after
+/// its file exists, in a child process whose files the operating system limits to
+/// less than a `cavalry:ipc` log: the driver starts, and sizing a log of 192 MiB
+/// fails, as it does where the directory has no room.
+#[test]
+fn a_driver_that_cannot_create_a_log_refuses_it_and_leaves_no_file() {
+    let dir = TestDir::new("log-not-created");
+    // The limit is in blocks of 512 or 1,024 bytes, by the shell: 32 or 64 MiB, more
+    // than any file the driver makes for itself and less than the log's 192 MiB. The
+    // signal a write past the limit sends is ignored, so that the sizing returns its
+    // error.
+    let child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(
+            "trap '' XFSZ; ulimit -f 65536 && exec \"$0\" a_driver_runs_where_files_are_limited \
+             --exact --ignored --nocapture --test-threads=1",
+        )
+        .arg(std::env::current_exe().expect("this program's path"))
+        .env(LIMITED_DIR, dir.path())
+        .output()
+        .expect("the child runs");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert!(child.status.success(), "{said}");
+    assert!(said.contains("refused five times"), "{said}");
+}
+
+/// The child of [`a_driver_that_cannot_create_a_log_refuses_it_and_leaves_no_file`],
+/// which runs it in a process whose files are limited: on its own it has nothing to
+/// do.
+#[test]
+#[ignore = "the child of a_driver_that_cannot_create_a_log_refuses_it_and_leaves_no_file"]
+fn a_driver_runs_where_files_are_limited() {
+    let Some(dir) = std::env::var_os(LIMITED_DIR) else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    let driver = Driver::start(&dir, dir.join("log")).expect("the driver starts under the limit");
+    let mut client = Cavalry::connect_to(&dir).expect("the client connects");
+    let failed = |client: &Cavalry| {
+        let counters = client.counters();
+        (0..counters.capacity())
+            .find(|id| {
+                counters
+                    .record(*id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|record| record.type_id() == DRIVER_LOG_CREATE_FAILED.0)
+            })
+            .map(|id| counters.read(id).expect("the counter reads"))
+            .expect("the driver's counter")
+    };
+    assert_eq!(failed(&client), 0);
+    for ask in 1..=5 {
+        match client.add_exclusive_publication("cavalry:ipc", 10 + ask) {
+            Err(ClientError::Refused {
+                code: Some(ErrorCode::StorageSpace),
+                ..
+            }) => {}
+            Err(other) => panic!("ask {ask}: {other}"),
+            Ok(_) => panic!("ask {ask}: the log was created under the limit"),
+        }
+        assert_eq!(failed(&client), i64::from(ask), "one for each ask");
+        assert_eq!(log_files(&dir), Vec::<PathBuf>::new(), "after ask {ask}");
+    }
+    // The driver goes on: a log under the limit is created, and is the one file.
+    let channel = format!(
+        "cavalry:udp?endpoint=127.0.0.1:{}|term-length=64k",
+        ports::free_port()
+    );
+    let publication = client
+        .add_exclusive_publication(&channel, 10)
+        .expect("a publication whose log fits");
+    assert_eq!(log_files(&dir).len(), 1, "{:?}", log_files(&dir));
+    assert_eq!(failed(&client), 5);
+    drop(publication);
+    client.close().expect("the client closes");
+    driver.close().expect("the driver closes");
+    println!("refused five times");
 }
