@@ -91,6 +91,14 @@ the two crates where `unsafe` is permitted.
 - Keeps every shared layout `#[repr(C)]` with a version in its header. Atomics use
   `Acquire` for loads that gate reads of other memory and `Release` for stores that
   publish it.
+- Gives a counter's value slot a release word, by which a writer in a client says
+  that it has made its last store, and lets the driver hold a freed record until
+  that word is stored: `Counter::release` and `CountersWriter::release` store it,
+  and `CountersFile::hold`, `released` and `let_go` are the driver's side. A record
+  that is held is no counter to a reader and is not allocated again, whatever the
+  clock reads. The counters file is at version 1 for it, and a reader of either
+  version refuses the other's file with a message that says which side is the older
+  (`spec/counters-file.md`, "Metadata record" and "Value slot"; ADR 0179).
 
 In Aeron, this is the log buffer layout and the CnC file, which Agrona provides
 ([glossary](../../docs/glossary.md)).

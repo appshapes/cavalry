@@ -1,4 +1,4 @@
-# Counters file, version 0
+# Counters file, version 1
 
 The counters file is the shared-memory file where the driver publishes every counter:
 the primary instrument, cheaper than a log line, and it survives a crash (invariant 4).
@@ -8,6 +8,14 @@ allocated it for (ADR 0013). `cavalry doctor` and the control plane map it read-
 the CnC file, `cnc.dat` (ADR 0012; `docs/glossary.md`). It is the first layout written
 under ADR 0010 and ADR 0011: every field below names its writer, its readers and the
 bound a reader checks, and every counter value has a 128-byte slot of its own.
+Version 1 adds the release word to the value slot, in bytes that version 0 reserved,
+by which the thread that writes a counter in a client says that it has stopped, and
+keeps a freed record of a client's out of use until that word is stored or the client
+is gone (ADR 0179). No other field moves. A reader of version 0 rejects a version 1
+file with `version`, so a client of an earlier build does not attach to a driver of
+this one, and stores nothing there; nor does a client of this build attach to a
+driver of an earlier one. A reader that only reads, and is no client, `cavalry
+doctor`, also reads a file of version 0 ("What a reader rejects").
 
 ## File
 
@@ -28,7 +36,7 @@ for i from 0 to capacity − 1. Integers are little-endian (`spec/README.md`).
 | Offset | Size | Field | Type | Writer | Readers | Bound |
 | --- | --- | --- | --- | --- | --- | --- |
 | 0 | 8 | magic | bytes | the creator, last, with a release store | everyone, first, with an acquire load | the bytes `43 56 4C 59 43 4E 54 52` (`CVLYCNTR`) |
-| 8 | 4 | version | i32 | the creator | everyone | 0 |
+| 8 | 4 | version | i32 | the creator | everyone | 1 |
 | 12 | 4 | capacity | i32 | the creator | everyone | a power of two from 64 to 65536 |
 | 16 | 8 | creator pid | i64 | the creator | `doctor` | greater than 0 |
 | 24 | 8 | start timestamp | i64 | the creator | `doctor` | nanoseconds since the Unix epoch, 0 or more |
@@ -51,7 +59,7 @@ Record i is at offset 128 + i × 256 and is 256 bytes, Aeron's counter metadata 
 | --- | --- | --- | --- | --- | --- | --- |
 | 0 | 4 | state | i32 | the driver, with a release store | everyone, with an acquire load | 0 unused, 1 allocated, −1 reclaimed |
 | 4 | 4 | type id | i32 | the driver | everyone | the `id` of a counter in `counters.toml` |
-| 8 | 8 | reclaim deadline | i64 | the driver | the driver | a reading of the driver's nano clock, in nanoseconds, or 0 |
+| 8 | 8 | reclaim deadline | i64 | the driver | the driver | a reading of the driver's nano clock, in nanoseconds; 0; or the largest i64, for a record that is held (below) |
 | 16 | 112 | key | bytes | the driver | everyone | opaque; the counter's `doc` in `counters.toml` says its layout, a static counter's key is all zero, and a client counter's is the bytes its `add counter` gave, with zero bytes after them |
 | 128 | 4 | label length | i32 | the driver | everyone | 0 to 124 |
 | 132 | 124 | label | bytes | the driver | everyone | UTF-8; the first label-length bytes are the label, the rest are 0 |
@@ -64,7 +72,17 @@ reclaim deadline to the time after which the record may be reused, on its nano c
 (`spec/client-protocol.md`, "Liveness and timeouts"), which a step of the host's clock
 does not move. The value is a number to every reader but the driver that wrote it: a
 reading of that driver's clock, as the one in the vectors is. The driver reuses the record
-by allocating it again, after the deadline, which rewrites every field. The label of a
+by allocating it again, after the deadline, which rewrites every field.
+
+A record whose value a client writes, an image's position or a counter the client
+added, is **held** when it is freed: the driver sets state to −1 at once, so that no
+reader takes it for a counter, and sets reclaim deadline to the largest i64, which no
+clock reaches. The driver sets the deadline to a time, as above, only when the record's
+writer has let it go: its release word reads 1 ("Value slot"), or the driver holds the
+lock of the client it allocated the record for (`spec/client-protocol.md`, "The records
+a client writes"). The time between a free and a reuse is for a reader that loaded
+state before the free and is still reading. It is not what keeps a writer out: a thread
+that is not run for a while stores when it runs again, however long that was. The label of a
 static counter is its name in `counters.toml`; the label of an instance counter is that
 name, a space, and the key's text as the counter's `doc` defines it. A client counter's
 type id, key and label are the ones its `add counter` gave
@@ -80,7 +98,8 @@ counters never share the 128 bytes a core moves at once (ADR 0011).
 | Offset | Size | Field | Type | Writer | Readers | Bound |
 | --- | --- | --- | --- | --- | --- | --- |
 | 0 | 8 | value | i64 | the one thread that owns the counter, with relaxed stores or adds; a position (`spec/log-buffer.md`) with release stores | everyone, with relaxed loads; whoever branches on a position loads it with an acquire load | any value; a counter of kind `counter` never decreases while allocated, a `gauge` moves both ways |
-| 8 | 120 | reserved | bytes | the driver | nobody | written as 0 at allocation, never read |
+| 8 | 8 | release word | i64 | the driver, 0 at allocation; then the one thread that owns the counter in a client, once, 1, with a release store, as its last store to the slot | the driver, with an acquire load | 0 or 1 |
+| 16 | 112 | reserved | bytes | the driver | nobody | written as 0 at allocation, never read |
 
 Nobody branches on a value on the data plane, so relaxed ordering is enough
 (`.claude/rules/data-plane.md`), with one exception: a position is stored with a release
@@ -88,6 +107,14 @@ store by its owner and loaded with an acquire load by whoever branches on it, th
 on a subscriber's position before it cleans a term, the publisher on its limit before it
 writes into a term the driver cleaned (`spec/log-buffer.md`, ADR 0013). A reader that needs a
 consistent pair of counters reads each twice and retries when they moved.
+
+The release word is how a writer in a client says that it will not store into the slot
+again. It stores 1 there when it gives up its hold on the counter, and stores nothing
+in the slot after that, the word itself included: one store of the word for one
+hold. The driver stores 0 with the value at allocation and never
+stores 1. The driver's own counters have no release word to read: the driver frees
+them when its own threads have stopped writing them. A release word that is neither 0
+nor 1 reads as 0: the record stays held, which is the safe side.
 
 ## `counters.toml`
 
@@ -120,10 +147,20 @@ the file, so it returns the error, and `cavalry doctor` reports it.
 | `too-short` | The file is shorter than 128 bytes. |
 | `not-ready` | Magic is eight zero bytes: the creator has not finished. Wait and read again. |
 | `magic` | Magic is any other value than `CVLYCNTR`. |
-| `version` | Version is not 0. |
+| `version` | Version is not 1. |
 | `capacity` | Capacity is not a power of two from 64 to 65536. |
 | `length` | The file is shorter than 128 + capacity × 384 bytes. |
 | `changed` | The header read through the final mapping differs from the first read. |
+
+`version` is for whoever stores into the file, and for a client, which stores into
+the records the driver allocates for it: each reads version 1 alone. A reader that
+only reads and is no client of the driver, `cavalry doctor`, reads version 0 as well,
+and rejects a version above 1 or below 0. Version 0 differs from version 1 in nothing
+such a reader reads: the release word is the driver's to load, and the counters a
+later driver added are records an earlier one does not have, which read as
+unallocated. That is what lets the newer build's `doctor` read a driver of the older
+build while a cluster is upgraded one member at a time
+(`docs/how-to/upgrade-a-cluster.md`).
 
 For a record: `id` when a counter id is not below capacity; `state` when state is not
 −1, 0 or 1; `label` when label length is not 0 to 124. The checks are integer compares;

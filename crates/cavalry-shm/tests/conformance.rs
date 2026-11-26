@@ -158,7 +158,7 @@ fn record_vector(name: &str, bytes: &[u8], vector: &Value) {
 #[test]
 fn every_vector_in_spec_vectors_counters_file_json() {
     let doc: Value = serde_json::from_str(VECTORS).expect("counters-file.json parses");
-    assert_eq!(doc["version"], 0, "the vectors are for version 0");
+    assert_eq!(doc["version"], 1, "the vectors are for version 1");
     let vectors = doc["vectors"].as_array().expect("vectors is an array");
     assert!(
         vectors.len() >= 21,

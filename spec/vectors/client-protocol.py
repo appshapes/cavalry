@@ -521,7 +521,7 @@ def main():
     out = Path(__file__).with_suffix(".json")
     names = [v["name"] for v in VECTORS]
     assert len(names) == len(set(names)), "vector names must be unique"
-    out.write_text(json.dumps({"spec": "spec/client-protocol.md", "version": 10,
+    out.write_text(json.dumps({"spec": "spec/client-protocol.md", "version": 11,
                                "generated_by": "spec/vectors/client-protocol.py",
                                "vectors": VECTORS}, indent=1) + "\n")
     print(f"wrote {out} ({len(VECTORS)} vectors)")
