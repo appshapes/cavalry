@@ -19,8 +19,9 @@ const PAGE: usize = 4096;
 /// (5.14) faults the pages in with one call and reports a page the kernel cannot back,
 /// by name, and not with a bus error on the data plane; a kernel without it falls back
 /// to the touch loop, as every other system does. A file this crate creates has its
-/// room before it is mapped ([`allocate`](crate::allocate); ADR 0175), so on Linux
-/// neither path meets a page of such a file that the filesystem has no room for.
+/// room before it is mapped ([`allocate`](crate::allocate); ADR 0175), so on a Linux
+/// tmpfs, which the default driver directory is on wherever `/dev/shm` exists, neither
+/// path meets a page of such a file that the filesystem has no room for.
 pub(crate) fn readable(map: &Mmap) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     match map.advise(memmap2::Advice::PopulateRead) {

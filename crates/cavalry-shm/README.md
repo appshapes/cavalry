@@ -46,9 +46,11 @@ the two crates where `unsafe` is permitted.
   never race on a fresh page
   ([ADR 0027](../../docs/decisions/0027-pre-touch-shared-mappings-at-map-time.md)).
 - Gives a new file its room before it maps it, on Linux: `create` asks the filesystem
-  how much it has free and then for the room of the whole file, so a directory that
-  cannot hold the file fails there, by name, on every kernel, and never with a bus
-  error at the touch of a page
+  for the room of the whole file, and a tmpfs first for how much it has free, so a
+  directory that cannot hold the file fails there, by name. On a tmpfs, which the
+  default driver directory is on wherever `/dev/shm` exists, that is so with the
+  kernel's populate advice and without it, and never a bus error at the touch of a
+  page
   ([ADR 0175](../../docs/decisions/0175-give-a-new-shared-file-its-room-before-it-is-mapped.md)).
   A log buffer that fails there leaves no file behind
   ([ADR 0172](../../docs/decisions/0172-remove-the-file-of-a-log-that-could-not-be-created.md)).

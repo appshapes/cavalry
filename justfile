@@ -323,8 +323,13 @@ doctor:
 # not back killed the driver with a bus error. No runner has such a kernel, so the
 # advice is refused for the run. The other tests of that program then run under it too,
 # so that a log that does fit is created and used by the path such a kernel takes.
-# The recipe fails unless the one test ran and passed each time: a filter that matches
-# no test passes with nothing run.
+# Last, on Linux, the three tests of crates/cavalry-shm/src/allocate.rs that need a
+# tmpfs with no room run in `dir`, which CI's is: the allocation refuses by itself with
+# no look at the free room before it, a file written through is refused by a write, and
+# a file removed and asked for again at once is given. They run one at a time, since
+# each counts the room the others take.
+# The recipe fails unless each test it names ran and passed each time: a filter that
+# matches no test passes with nothing run.
 shm-exhaustion dir:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -342,6 +347,10 @@ shm-exhaustion dir:
         echo "shm-exhaustion: again without the populate advice, as a kernel before 5.14 runs it"
         no_room "$without"
         "$without" cargo test -p cavalry-client --test publication
+        echo "shm-exhaustion: the allocation itself in a tmpfs with no room"
+        said=$(CAVALRY_SHM_TEST_FULL_DIR={{dir}}/cavalry-shm cargo test -p cavalry-shm --lib allocate::linux::tests -- --ignored --test-threads=1 2>&1) || { echo "$said"; exit 1; }
+        echo "$said"
+        grep -q "^test result: ok. 3 passed" <<<"$said" || { echo "shm-exhaustion: the three tests of the allocation in a directory with no room did not all run; they are the ignored tests of crates/cavalry-shm/src/allocate.rs" >&2; exit 1; }
     fi
 
 # Miri on the unsafe crate: the layout, cell and conformance tests, which run on plain
