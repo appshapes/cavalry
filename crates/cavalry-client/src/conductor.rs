@@ -7,7 +7,9 @@
 //! a lap of the broadcast buffer. A ring or a buffer that fails a check of its page
 //! closes the client too. It shares
 //! two atomics with the user's thread and nothing else: the state and the time of the
-//! last command sent. It idles with a backoff, so a quiet client costs a sleeping thread.
+//! last command sent. It idles with a backoff, so a quiet client costs a parked thread.
+//! On macOS the client has a second thread, its watch, and each of the two ends a park
+//! of the other that outlived its timeout (ADR 0177; `watch.rs`).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

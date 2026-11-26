@@ -170,7 +170,10 @@ impl Unattached {
 /// driver directory's files, takes a client id and starts the client conductor thread,
 /// which keeps the client alive with the driver and reads every event. Publications and
 /// subscriptions are added from here. [`Cavalry::close`] tells the driver and stops the
-/// conductor; dropping a client does the same.
+/// conductor; dropping a client does the same. On macOS a client starts a second
+/// thread, its watch, which ends a park of the conductor that outlived its timeout, as
+/// the conductor ends the watch's; a park so ended is counted in a counter the client
+/// adds for itself, `client.conductor_parks_overdue` (ADR 0177).
 pub struct Cavalry {
     dir: PathBuf,
     client_id: i64,
