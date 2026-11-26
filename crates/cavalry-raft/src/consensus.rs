@@ -2842,7 +2842,8 @@ impl Consensus {
     /// voted, holds none. Such a member may have voted before it lost its directory and
     /// forgotten it, so it stands and votes only once every voter has reported, and then
     /// by the one guarded case (work item 476). A member that holds a candidate term
-    /// remembers the vote it cast in it.
+    /// holds one at or above every term it could have voted in, and votes only in a
+    /// term above it (ADR 0174).
     fn holds_nothing(&self) -> bool {
         self.log_empty() && self.candidate_term < 0
     }

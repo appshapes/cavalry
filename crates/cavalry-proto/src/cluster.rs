@@ -2891,8 +2891,10 @@ pub fn candidate(
 /// cluster's first ballot may have voted there, and a candidate it voted for names the
 /// term only in a report (work item 476). Once every voter has reported, it votes by
 /// the one case in which a member that withholds votes ([`withheld_vote`],
-/// [`votes_in_term`]). A member that holds a candidate term remembers the vote it cast
-/// in it, so it is not held back so.
+/// [`votes_in_term`]). A member that holds a candidate term holds one at or above every
+/// term it could have voted in, kept, or stored while it held nothing by standing
+/// ([`candidacy_term`]) or by that case, and it votes only in a term above it, so it is
+/// not held back so.
 pub const fn withholds(
     own: LogReport,
     vote_floor: i64,

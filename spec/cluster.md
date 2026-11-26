@@ -1383,13 +1383,16 @@ whether it withholds or not (work item 476; ADR 0174). When it stands, it takes 
 term above each term a member named in this election, where that is above candidate
 term + 1 (state 2), so that the vote it gives itself keeps the same term condition:
 a term it voted in before it lost its log is one a voter it heard named. A member
-whose log is empty and that holds a candidate term either kept its record of terms,
-and with it the vote it cast in that term, or stood while it held nothing, in a term
-above each term it could have voted in; so it is not held back so: when a new cluster's first leader stops
-before its new leadership term reaches the other two, and both voted in its
-election, the two elect again, as before, since each heard every voter in that
-election. A member that holds nothing and has not heard that leader in its present
-election waits for it to run again ("What it costs"). Without the rule, a member
+whose log is empty and that holds a candidate term kept its record of terms, and with
+it every vote it cast, or stored the term while it held nothing: standing above each
+term named, or voting by the one case above, in which every voter but the candidate
+named a lower term. Each way its candidate term is at or above every term it could
+have voted in, and a member votes only in a term above its candidate term, so it is
+not held back so: when a new cluster's first leader stops before its new leadership
+term reaches the other two, and both voted in its election, the two elect again, as
+before, since each heard every voter in that election. A member that holds nothing
+and has not heard that leader in its present election waits for it to run again
+("What it costs"). Without the rule, a member
 that voted for one candidate in the cluster's first ballot and lost its log before
 the term's first entry would vote for a second candidate of that term, since no log
 is heard, and the two would lead one term. Under the rule, every report such a
