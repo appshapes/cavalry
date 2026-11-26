@@ -137,8 +137,10 @@ whose one wait has lasted 3 s, and after 30 s wakes it. Each run is one process.
   `__semwait_signal`, the stack of every sighting, and a parked one in
   `semaphore_timedwait_trap`.
 - The standard library's loop after an interrupted sleep is not the cause: in two
-  short runs a signal interrupted 140,000 sleeps, and every remainder that
-  `nanosleep` wrote was right.
+  short runs on the laptop a signal interrupted 140,000 sleeps, and every remainder
+  that `nanosleep` wrote there was no more than was asked. A run of four seconds
+  on Linux, in this change's review, counted 254 of 5,188 remainders a little over
+  what was asked: a sleep that much longer, on a system where no wait stuck.
 - The two runners ran in `sleep probe (trial)` run 45768708805, from a throwaway
   branch, each posting a line off the runner every minute. At the laptop's rate the
   macOS runner would have shown 8 at the rate of the three runs together, and

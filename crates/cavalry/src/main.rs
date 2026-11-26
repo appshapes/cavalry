@@ -893,7 +893,9 @@ fn give_member_up(dir: &Path, error: &str) {
 /// which the cluster has counted the member out anyway.
 const MEMBER_FAILURE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long the member's thread waits after a duty cycle that failed before the next.
+/// How long the member's thread waits after a duty cycle that failed before the next,
+/// at most: the wait is a park, which the member's stop ends and which may end early
+/// by itself (ADR 0171).
 const MEMBER_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
 /// What the thread `cavalry-consensus` runs: a consensus module, or a test's stand-in
