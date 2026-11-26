@@ -269,6 +269,11 @@ commit path runs per message.
   double and allocates; its consensus stream holds at most 4,096 messages in flight and
   loses, and counts, one sent while it is full, and a leader's log publication and each
   member's log hold every entry appended or received for the cluster's life.
+  Three tests search seeds of it, each seed a run of these faults at moments it
+  draws, a leader's stalled module among them, with the check of every step:
+  `tests/lost_log_search.rs`, `tests/faulted_truncation_search.rs` and
+  `tests/timer_search.rs`. Each file's header says what its search draws and which
+  rule its seeds hold.
 - Is held to gate 3's faults over real drivers, by three tests beside the ones in
   memory (ADR 0111). `tests/cluster.rs` stops the leader's driver: the two that remain elect
   another and commit. `tests/partition.rs` sends every datagram between the members

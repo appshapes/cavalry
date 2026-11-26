@@ -3,14 +3,16 @@
 //! 1). Three members in memory under a delivery seed of loss and delay, with the
 //! leader cut off from both others for 11 s to 19 s, a leader halted within 300 ms of
 //! its election, members halted and resumed, parted one way or both, started again on
-//! the log directory they kept, and their recordings ended, each at a moment the seed
-//! draws; and truncations made to fault, at a member the seed draws, at a step it
-//! draws, the second, the file or the record of terms, for a number of attempts in a
-//! row it draws. A leader cut off appends a tail that the leader the others elect
-//! lacks, and truncates it when it comes back, so the seeds truncate, and fault,
-//! often. A leader halted just after its election can leave the member it named a
-//! truncation to the most up to date of those left, which is when a member whose
-//! truncation faulted could lead or join on the end it no longer holds.
+//! the log directory they kept, their recordings ended, and their modules stalled
+//! while their drivers run on, the leader's two times in three while one leads
+//! (`Cluster::stall`; work item 467), each at a moment the seed draws; and truncations
+//! made to fault, at a member the seed draws, at a step it draws, the second, the file
+//! or the record of terms, for a number of attempts in a row it draws. A leader cut
+//! off appends a tail that the leader the others elect lacks, and truncates it when it
+//! comes back, so the seeds truncate, and fault, often. A leader halted just after its
+//! election can leave the member it named a truncation to the most up to date of those
+//! left, which is when a member whose truncation faulted could lead or join on the end
+//! it no longer holds.
 //!
 //! The check of every step is `elected_cluster`'s, and three more of every member: it
 //! never added a log, joined one or subscribed for a replay while its log was cut
@@ -32,12 +34,11 @@ use elected_cluster::Safety;
 /// The members.
 const IDS: [i32; 3] = [0, 1, 2];
 
-/// The seeds `just test` runs: seed 1; seed 35, which truncates and faults more than
-/// most; and seeds 96 and 482, at which the search, with the rule of ADR 0148 taken out,
-/// finds a member that joins a log while its log is cut short of the end it reports.
-/// Seed 13 did so too until the floor answer of ADR 0163 moved its paths, and 482, the
-/// first such seed above 300 on that rule, took its place.
-const SEEDS: [u64; 4] = [1, 35, 96, 482];
+/// The seeds `just test` runs: seed 1, and seeds 226, 411 and 489, the first three at
+/// which the search, with the rule of ADR 0148 taken out, finds a member that joins a
+/// log while its log is cut short of the end it reports. Seeds 96 and 482 did so until
+/// the stalls of work item 467 moved the search's paths.
+const SEEDS: [u64; 4] = [1, 226, 411, 489];
 
 /// A xorshift generator: the search is the seed's alone.
 struct Draw(u64);
@@ -87,6 +88,10 @@ struct Seen {
     faulted: u64,
     /// Owed truncations that then finished, the member running all along.
     finished: u64,
+    /// Modules that stood still while their drivers ran on.
+    stalls: u64,
+    /// Of them, a leader's.
+    leaders_stalled: u64,
 }
 
 /// The three checks of this search, on every member, after a step.
@@ -122,6 +127,7 @@ fn search(seed: u64, length_ms: u64) -> Seen {
     cluster.set_delivery(loss, delay);
     let mut seen = Seen::default();
     let mut halted: Option<(i32, u64)> = None;
+    let mut stalled: Option<(i32, u64)> = None;
     let mut parted: Option<(i32, i32, u64)> = None;
     let mut isolated: Option<(i32, u64)> = None;
     // Per member: the count of truncations faulted last read, and whether it owed one.
@@ -141,6 +147,12 @@ fn search(seed: u64, length_ms: u64) -> Seen {
         {
             cluster.resume(member);
             halted = None;
+        }
+        if let Some((member, until)) = stalled
+            && ms >= until
+        {
+            cluster.unstall(member);
+            stalled = None;
         }
         if let Some((a, b, until)) = parted
             && ms >= until
@@ -168,10 +180,11 @@ fn search(seed: u64, length_ms: u64) -> Seen {
             }
             last_leader = leader;
         }
+        let is_stalled = |id: i32| stalled.is_some_and(|(member, _)| member == id);
         if let Some((member, at)) = halt_new_leader
             && ms >= at
         {
-            if halted.is_none() {
+            if halted.is_none() && !is_stalled(member) {
                 cluster.halt(member);
                 halted = Some((member, ms + 2_000 + draw.below(10_000)));
                 seen.new_leaders_halted += 1;
@@ -192,8 +205,10 @@ fn search(seed: u64, length_ms: u64) -> Seen {
             }
             10 if halted.is_none() => {
                 let member = draw.pick(&IDS);
-                cluster.halt(member);
-                halted = Some((member, ms + 300 + draw.below(10_000)));
+                if !is_stalled(member) {
+                    cluster.halt(member);
+                    halted = Some((member, ms + 300 + draw.below(10_000)));
+                }
             }
             11 if parted.is_none() => {
                 let a = draw.pick(&IDS);
@@ -210,6 +225,10 @@ fn search(seed: u64, length_ms: u64) -> Seen {
                 let member = draw.pick(&IDS);
                 if !is_halted(member) {
                     safety.restart(&mut cluster, member);
+                    // A start ends a stall: the process that stood still is gone.
+                    if is_stalled(member) {
+                        stalled = None;
+                    }
                     if let Some(index) = IDS.iter().position(|&id| id == member) {
                         faulted[index] = 0;
                         truncated[index] = 0;
@@ -230,6 +249,27 @@ fn search(seed: u64, length_ms: u64) -> Seen {
                 ]);
                 let times = draw.pick(&[1, 1, 3, 30, 300, 3_000]);
                 cluster.fault_truncation(member, at, times);
+            }
+            // A module that stands still while its driver runs on (work item 467): the
+            // leader's two times in three while one leads (the leader on half the draws,
+            // and a third of the rest), so that it stalls with entries appended after its
+            // duty cycle read its append position. Its recording syncs, its replays and
+            // its sender go on, and what is sent to it waits, for 1 ms to 20 s: within a
+            // heartbeat interval, or long enough that the others elect without it.
+            250..=256 if stalled.is_none() => {
+                let member = match cluster.leader() {
+                    Some(leader) if draw.below(2) == 0 => leader,
+                    _ => draw.pick(&IDS),
+                };
+                if !is_halted(member) {
+                    let span = draw.pick(&[2, 20, 200, 2_000, 20_000]);
+                    if cluster.leader() == Some(member) {
+                        seen.leaders_stalled += 1;
+                    }
+                    cluster.stall(member);
+                    stalled = Some((member, ms + 1 + draw.below(span)));
+                    seen.stalls += 1;
+                }
             }
             _ => {}
         }
@@ -267,23 +307,31 @@ fn no_member_leads_or_joins_on_an_end_its_faulted_truncation_cut() {
         }
         Err(_) => SEEDS.to_vec(),
     };
-    let (mut faulted, mut finished) = (0, 0);
+    let (mut faulted, mut finished, mut leaders_stalled) = (0, 0, 0);
     for &seed in &seeds {
         let seen = search(seed, length_ms);
         println!(
             "seed {seed}: {} entries, {} leaders cut off, {} new leaders halted, {} \
-             truncations, {} faulted, {} finished after",
+             truncations, {} faulted, {} finished after, {} modules stalled, {} of them a \
+             leader's",
             seen.entries,
             seen.isolations,
             seen.new_leaders_halted,
             seen.truncations,
             seen.faulted,
-            seen.finished
+            seen.finished,
+            seen.stalls,
+            seen.leaders_stalled
         );
         faulted += seen.faulted;
         finished += seen.finished;
+        leaders_stalled += seen.leaders_stalled;
     }
     assert!(faulted > 0, "seeds {seeds:?} faulted no truncation");
+    assert!(
+        leaders_stalled > 0,
+        "seeds {seeds:?} stalled no leader's module"
+    );
     assert!(
         finished > 0,
         "no truncation of seeds {seeds:?} that faulted finished"
