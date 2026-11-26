@@ -70,7 +70,10 @@ client is gone, which the driver reads from a lock the client holds on a file of
 own, `clients/<client id>.lock` ("The records a client writes"; ADR 0179). A version 10
 client does not attach to a version 11 driver, nor a version 11 client to a version 10
 driver: each rejects the other's counters file with `version`, before it sends a
-command.
+command. So this version is the exception to the order of an upgrade that the
+versions before it kept, the clients before the driver: a host crosses to version 11
+with its driver and every client of that driver stopped together ("The records a
+client writes", "Crossing to this version").
 
 ## The driver directory
 
@@ -825,7 +828,9 @@ closes on the first recording event a version 1 driver sends, a version 1 client
 the first replay event a version 2 driver sends, and a version 6 client on the first
 `counter ready` or `unavailable counter` a version 7 driver sends, so an upgrade
 restarts the clients before the driver; a client that sends a command to a driver of an earlier version is
-answered with code 6 and keeps running.
+answered with code 6 and keeps running. Neither holds across version 11, where a
+client and a driver of the two sides do not attach to each other at all ("The records
+a client writes", "Crossing to this version").
 
 | Event | Offset | Size | Field | Type | Bound |
 | --- | --- | --- | --- | --- | --- |
@@ -1080,6 +1085,19 @@ held. Records are held for long by a subscription whose thread no longer polls, 
 its client's queue of 64 image events closes; by a client that closed and keeps an
 object of the client alive; and by a process that was timed out and is stopped. `cavalry
 doctor` names the last two by their lock.
+
+**Crossing to this version.** A client of version 10 stores into a record with no
+word and no lock, so a driver of this version could give nothing of its back out, and
+a client of this version beside a driver of version 10 would be as exposed as it was.
+The counters file's version keeps the two apart: a reader of either side rejects the
+other's file with `version` when it attaches, and its message says which side is the
+older and what to do. So on one host the driver and every client of it are stopped
+together, and started from the newer build, the driver first. No order of the two
+works across this version, where every version before it let a newer client run
+beside an older driver for the length of an upgrade. Between hosts nothing changes:
+no frame and no message of `spec/udp.md` or `spec/cluster.md` moves, so a cluster is
+still upgraded one member at a time, each member with the driver and the service
+beside it (`docs/how-to/upgrade-a-cluster.md`).
 
 ## Sizes
 
