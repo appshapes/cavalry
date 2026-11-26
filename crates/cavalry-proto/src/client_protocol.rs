@@ -74,6 +74,11 @@ pub const CLIENT_LOCK_DIRECTORY: &str = "clients";
 /// `clients/<client id>.lock`.
 pub const CLIENT_LOCK_SUFFIX: &str = ".lock";
 
+/// What follows a client's id in the name the driver gives the lock file of a client
+/// that closed or was timed out, until it holds that lock: `clients/<client id>.gone`.
+/// `cavalry doctor` names such a client by it.
+pub const CLIENT_GONE_SUFFIX: &str = ".gone";
+
 /// The channel status indicator id of a `cavalry:ipc` publication or subscription,
 /// which has no endpoint: `publication ready` and `subscription ready` carry it
 /// (`spec/client-protocol.md`, "Events"; ADR 0040).

@@ -31,7 +31,9 @@ use std::time::Duration;
 use cavalry_log::dir::Recovery;
 
 use cavalry_proto::channel::{Channel, ChannelError, FlowControl, PublicationPosition, UdpChannel};
-use cavalry_proto::client_protocol::{CLIENT_LOCK_DIRECTORY, CLIENT_LOCK_SUFFIX};
+use cavalry_proto::client_protocol::{
+    CLIENT_GONE_SUFFIX, CLIENT_LOCK_DIRECTORY, CLIENT_LOCK_SUFFIX,
+};
 use cavalry_proto::client_protocol::{
     Command, ErrorCode, Event, IPC_CHANNEL, MAX_STRING_LENGTH, NO_CHANNEL_STATUS, NULL_LENGTH,
     ProtocolError, ReplayStopReason,
@@ -1887,7 +1889,10 @@ impl Conductor {
         // A client takes its lock before its first command, so at that command the
         // driver cannot take it. A file that is not there, or a lock the driver takes,
         // is a client that holds none.
-        let locks = matches!(self.try_client_lock(client_id), LockTry::Held);
+        let locks = matches!(
+            self.try_client_lock(&self.client_lock_path(client_id)),
+            LockTry::Held
+        );
         self.clients.push(Client {
             id: client_id,
             last_seen: now,
@@ -1905,18 +1910,25 @@ impl Conductor {
             .map(|subscription| subscription.client_id)
     }
 
-    /// The path of client `client_id`'s lock file.
+    /// The path of client `client_id`'s lock file, as the client made it.
     fn client_lock_path(&self, client_id: i64) -> PathBuf {
         self.dir
             .join(CLIENT_LOCK_DIRECTORY)
             .join(format!("{client_id}{CLIENT_LOCK_SUFFIX}"))
     }
 
-    /// Tries client `client_id`'s lock once, without waiting, and lets go of it at once
-    /// when it takes it: the answer is what is wanted, and the file's close drops the
-    /// lock.
-    fn try_client_lock(&self, client_id: i64) -> LockTry {
-        match File::open(self.client_lock_path(client_id)) {
+    /// The path of the lock file of a client that has gone, as the driver renames it.
+    fn client_gone_path(&self, client_id: i64) -> PathBuf {
+        self.dir
+            .join(CLIENT_LOCK_DIRECTORY)
+            .join(format!("{client_id}{CLIENT_GONE_SUFFIX}"))
+    }
+
+    /// Tries the lock on the file at `path` once, without waiting, and lets go of it at
+    /// once when it takes it: the answer is what is wanted, and the file's close drops
+    /// the lock.
+    fn try_client_lock(&self, path: &Path) -> LockTry {
+        match File::open(path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => LockTry::NoFile,
             Err(_) => LockTry::Unknown,
             Ok(file) => match file.try_lock() {
@@ -1974,8 +1986,8 @@ impl Conductor {
     }
 
     /// Tries the lock of each client that has gone, once every
-    /// [`spec::LOCK_CHECK_INTERVAL`]. A lock the driver takes, and a file the client
-    /// removed as it let go of it, is a client of which nothing can store: every
+    /// [`spec::LOCK_CHECK_INTERVAL`]. A lock the driver takes is a client of which
+    /// nothing can store: every
     /// record held for it is let go, and the file is removed. Returns how many
     /// clients it finished.
     fn try_locks(&mut self, now: i64) -> usize {
@@ -1987,10 +1999,14 @@ impl Conductor {
         let mut index = 0;
         while index < self.gone.len() {
             let client_id = self.gone[index];
-            match self.try_client_lock(client_id) {
+            let mut path = self.client_gone_path(client_id);
+            if !path.exists() {
+                path = self.client_lock_path(client_id);
+            }
+            match self.try_client_lock(&path) {
                 LockTry::Held | LockTry::Unknown => index += 1,
                 LockTry::Taken | LockTry::NoFile => {
-                    let _ = std::fs::remove_file(self.client_lock_path(client_id));
+                    let _ = std::fs::remove_file(&path);
                     self.gone.swap_remove(index);
                     let mut held = 0;
                     while held < self.held.len() {
@@ -2014,7 +2030,26 @@ impl Conductor {
     /// client leaves when the list of the clients that have gone is full.
     fn client_gone(&mut self, client_id: i64, locks: bool, now: i64) {
         if locks && self.gone.len() < spec::MAX_CLIENTS {
-            self.gone.push(client_id);
+            // The file takes the name by which `doctor` tells a client that has gone
+            // from one that runs. The lock is on the file and goes with it. A client
+            // that has dropped everything removed its file as it let go: no file
+            // under either name is the same answer as a lock the driver takes.
+            let gone = self.client_gone_path(client_id);
+            match std::fs::rename(self.client_lock_path(client_id), &gone) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let mut index = 0;
+                    while index < self.held.len() {
+                        if self.held[index].client_id == client_id {
+                            self.let_go(index, now);
+                        } else {
+                            index += 1;
+                        }
+                    }
+                }
+                // Renamed, or not for another reason: the lock is tried under the name
+                // the file has.
+                Ok(()) | Err(_) => self.gone.push(client_id),
+            }
             return;
         }
         let mut index = 0;
