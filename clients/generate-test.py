@@ -137,7 +137,9 @@ class Package(unittest.TestCase):
 
     def test_the_committed_package_is_what_the_header_gives(self):
         files = gen.write_python(self.header)
-        self.assertEqual(sorted(files), ["cavalry/__init__.py", "cavalry/_abi.py"])
+        # The client's two modules, and what the package is built from (work item 469; ADR 0166).
+        self.assertEqual(sorted(files), ["LICENSE", "cavalry/__init__.py", "cavalry/_abi.py", "cavalry_package.py",
+                                         "pyproject.toml"])
         for name, content in files.items():
             self.assertEqual(self.committed(name), content, name)
 
