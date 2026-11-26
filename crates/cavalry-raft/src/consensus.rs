@@ -75,7 +75,9 @@ pub enum ElectionState {
     /// moves it on too.
     Canvass = 1,
     /// Waits a random delay of up to half the election timeout, canvassing still, then
-    /// stores candidate term + 1 and votes for itself.
+    /// stores the term it stands in, candidate term + 1 or, for a member that holds
+    /// nothing, the term above each term named ([`candidacy_term`]), and votes for
+    /// itself.
     Nominate = 2,
     /// A candidate asks every other member for its vote, and leads the term at once
     /// when a quorum has voted for it and every member it has heard is among them, or
@@ -2921,12 +2923,18 @@ impl Consensus {
     /// asks for the others' votes in candidate ballot. A member that holds nothing takes
     /// the term above each term a member named in this election too, where that is
     /// higher, so that it gives itself no second vote in a term it voted in before it
-    /// lost its log ([`candidacy_term`]; ADR 0174). A fault at the store leaves it here,
-    /// and the next cycle stores that term, or a higher one named since, again.
+    /// lost its log ([`candidacy_term`]; ADR 0174). A member that withholds when the
+    /// delay ends, having heard a report that holds a log during it, goes back to canvass
+    /// and stores nothing, so that it is no candidate while it withholds, in the delay
+    /// as in canvass. A fault at the store leaves it here, and the next cycle stores that
+    /// term, or a higher one named since, again.
     fn nominate<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         let work = self.send_canvass_position(clock, io);
         if clock.now_ns < self.nomination_deadline_ns {
             return Ok(work);
+        }
+        if self.withholds(None) {
+            return Ok(work.saturating_add(self.step(ElectionState::Canvass, clock)));
         }
         let term = candidacy_term(
             self.own_report(),

@@ -1319,7 +1319,7 @@ id = 127
 name = "cluster.candidacies"
 kind = "counter"
 scope = "client"
-doc = "Ballots one cluster member began as a candidate: it stored candidate term + 1, voted for itself and asked every other member for its vote, going from nominate to candidate ballot (spec/cluster.md, Roles and the election, state 3; ADR 0081); key: member id (i32), little-endian; label text: the member id in decimal."
+doc = "Ballots one cluster member began as a candidate: it stored the term it stands in, candidate term + 1 or, for a member that holds nothing, its log empty and no candidate term stored, the term above each term a member named in its election (ADR 0174), voted for itself and asked every other member for its vote, going from nominate to candidate ballot (spec/cluster.md, Roles and the election, state 3; ADR 0081); key: member id (i32), little-endian; label text: the member id in decimal."
 doctor = ""
 
 [[counter]]

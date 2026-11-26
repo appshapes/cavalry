@@ -16,7 +16,8 @@
 //! cluster's first ballot then voted a second time in that term (work item 476, lost-log
 //! search seed 804). Now a member that holds nothing, its log empty and no candidate
 //! term stored, withholds too until every voter has reported, and votes by the case
-//! whether it withholds or not (ADR 0174).
+//! whether it withholds or not; and it stands in the term above each term named, so
+//! the vote it gives itself keeps the term condition too (ADR 0174).
 //!
 //! [`Io`]: cavalry_raft::Io
 
@@ -354,4 +355,41 @@ fn a_member_that_holds_nothing_stands_above_each_term_a_voter_named() {
     member.do_work(at(ms + 2), &mut io).expect("no fault");
     assert_eq!(member.role(), cavalry_raft::Role::Candidate);
     assert_eq!(member.counts().terms_led, 0);
+}
+
+/// A member that holds nothing and hears a report that holds a log while its
+/// nomination delay runs goes back to canvass when the delay ends, and stores no term:
+/// it is no candidate while it withholds, in the delay as in canvass (ADR 0174). It
+/// heard both voters with empty logs, so it went to nominate; member 0 then reports a
+/// log, as a report held behind a stale one reaches a new run.
+#[test]
+fn a_member_that_hears_a_log_during_its_nomination_delay_stands_for_nothing() {
+    let mut io = Stub::new();
+    let mut member = wiped(1, &mut io);
+    for voter in [0, 1] {
+        member
+            .on_message(at(2), &empty_canvass(voter, -1), &mut io)
+            .expect("no fault");
+    }
+    member.do_work(at(3), &mut io).expect("no fault");
+    assert_eq!(
+        member.election_state(),
+        cavalry_raft::ElectionState::Nominate
+    );
+    member
+        .on_message(at(4), &canvass(0, 3), &mut io)
+        .expect("no fault");
+    io.clear();
+    for ms in 5..2_000 {
+        member.do_work(at(ms), &mut io).expect("no fault");
+    }
+    assert_eq!(member.counts().candidacies, 0);
+    assert_eq!(
+        io.count(|call| matches!(call, Call::StoreCandidateTerm(_))),
+        0
+    );
+    assert_eq!(
+        member.election_state(),
+        cavalry_raft::ElectionState::Canvass
+    );
 }

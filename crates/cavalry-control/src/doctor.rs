@@ -8861,9 +8861,10 @@ mod tests {
         // It is the voters that report in canvass and that make the quorum.
         assert!(
             no_leader.contains(
-                "for every voter to report, and moves to nominate at once when all have. If \
-                 this member stays without a leader, fewer than a quorum of the voters run \
-                 or reach each other"
+                "for every voter to report, and moves to nominate at once when all have; one \
+                 that holds nothing, its log empty and no candidate term stored, waits for \
+                 every voter, with no bound. If this member stays without a leader, fewer \
+                 than a quorum of the voters run or reach each other"
             ),
             "{no_leader}"
         );

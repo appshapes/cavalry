@@ -474,6 +474,12 @@ fn unheard_since(disks: &[Disk], cuts: &[Cut], from: usize, to: usize) -> Option
     own.chain(between).min()
 }
 
+/// The place of the member that sent `flight`, as `session_of` writes it in the
+/// session's top byte.
+fn sender_of(flight: &Flight) -> usize {
+    usize::try_from((flight.session >> 24) & 0xFF).unwrap_or(usize::MAX)
+}
+
 /// One member's [`Io`], for the length of one call into its core.
 struct MemberIo<'a> {
     world: &'a mut World,
@@ -2381,30 +2387,68 @@ impl Cluster {
     }
 
     /// Lets the stream from `from` to `to` go: the messages it kept are sent now, in the
-    /// order written, each with the delay the delivery setting draws, and what `from`
-    /// sends `to` next goes as any message does.
+    /// order written, each to arrive at the next step, and what `from` sends `to` next
+    /// goes as any message does.
     pub fn release_stream(&mut self, from: i32, to: i32) {
         let index = |id: i32| self.world.disks.iter().position(|disk| disk.id == id);
         let (Some(from), Some(to)) = (index(from), index(to)) else {
             return;
         };
         self.world.held_streams.retain(|&pair| pair != (from, to));
+        self.send_held(from, to, usize::MAX);
+    }
+
+    /// Sends the first `count` messages the stream from `from` to `to` kept, in the order
+    /// written, each to arrive at the next step, and keeps holding the rest and what
+    /// `from` sends `to` next, as a sender sends the frames it held to a receiver's new
+    /// image one receiver window at a time (`spec/udp.md`, "The sender"; ADR 0174).
+    /// [`Cluster::held_stream_count`] says how many it keeps.
+    pub fn release_stream_first(&mut self, from: i32, to: i32, count: usize) {
+        let index = |id: i32| self.world.disks.iter().position(|disk| disk.id == id);
+        if let (Some(from), Some(to)) = (index(from), index(to)) {
+            self.send_held(from, to, count);
+        }
+    }
+
+    /// How many messages the stream from `from` to `to` keeps, of its sender's present
+    /// run: 0 for a stream not held.
+    pub fn held_stream_count(&self, from: i32, to: i32) -> usize {
+        let index = |id: i32| self.world.disks.iter().position(|disk| disk.id == id);
+        let (Some(from), Some(to)) = (index(from), index(to)) else {
+            return 0;
+        };
+        let run = self.world.runs.get(from).copied().unwrap_or(0);
+        self.world
+            .stream_queue
+            .iter()
+            .filter(|flight| flight.to == to && sender_of(flight) == from && flight.run == run)
+            .count()
+    }
+
+    /// Sends the first `count` messages the stream from place `from` to place `to` kept,
+    /// and drops what an earlier run of the sender wrote on it: a message that run wrote
+    /// went with that run's publication, as a process that stops takes its unsent
+    /// frames with it.
+    fn send_held(&mut self, from: usize, to: usize, count: usize) {
         let now_ns = self.world.clock.now_ns;
-        // A message the sender's earlier run wrote went with that run's publication, as
-        // a process that stops takes its unsent frames with it.
         let run = self.world.runs.get(from).copied().unwrap_or(0);
         let queue = std::mem::take(&mut self.world.stream_queue);
         let mut kept = Vec::with_capacity(queue.len());
+        let mut sent = 0;
         for mut flight in queue {
-            // The sender's place, as `session_of` writes it in the session's top byte.
-            let sender = usize::try_from((flight.session >> 24) & 0xFF).unwrap_or(usize::MAX);
-            if flight.to != to || sender != from {
+            if flight.to != to || sender_of(&flight) != from {
                 kept.push(flight);
-            } else if flight.run == run && self.world.net.len() < IN_FLIGHT_CAPACITY {
+            } else if flight.run != run {
+                // An earlier run's message: dropped, and no loss of a held stream.
+            } else if sent >= count {
+                kept.push(flight);
+            } else if self.world.net.len() < IN_FLIGHT_CAPACITY {
                 flight.deliver_at_ns = now_ns.saturating_add(STEP_NS);
                 self.world.net.push_back(flight);
-            } else if flight.run == run {
+                sent += 1;
+            } else {
                 self.world.stream_losses = self.world.stream_losses.saturating_add(1);
+                sent += 1;
             }
         }
         self.world.stream_queue = kept;
