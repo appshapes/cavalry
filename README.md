@@ -19,7 +19,8 @@ generated from the header and run against a driver by `just conformance`; three
 drivers, each started as a member, form a cluster over Raft: they elect a leader,
 replicate one log, serve sessions and services in the six languages, catch a member
 up, take snapshots, run a standby and upgrade one member at a time, gated on one
-host's loopback; the ten-minute path below runs in CI on Linux and macOS, and the
+host's loopback; the ten-minute path below runs in CI on Linux for every commit and
+on macOS each week, and the
 latency gate runs each night on two dedicated hosts and across the cable between
 them, as a coarse check. Not yet:
 a release on any registry, a cluster gated across hosts, wire encryption and
@@ -55,7 +56,7 @@ twelve features
 ## The ten-minute path
 
 Six commands, from a checkout, on a laptop or a cloud VM; `just quickstart` runs the
-same six in CI on Linux and macOS, and
+same six in CI, on Linux for every commit and on macOS each week, and
 [the tutorial](docs/tutorials/publish-and-subscribe.md) says what each one shows.
 
 ```sh
