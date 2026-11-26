@@ -19,13 +19,14 @@ use cavalry_proto::cluster::{
     LOG_RECORDINGS_FILE_PREFIX, LogRecording, MAX_LOG_RECORDINGS_LENGTH, MAX_SESSIONS, Message,
     Stream, TimeUnit, write_log_recordings,
 };
-use cavalry_shm::counters::CountersError;
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_LEADER_MEMBER_ID,
     CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID, CLUSTER_REPLIES_DROPPED,
+    CLUSTER_SERVICE_SNAPSHOTS_FAILED, CLUSTER_SERVICE_SNAPSHOTS_TAKEN,
     CLUSTER_SERVICE_TIMER_CANCELS_DROPPED, CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER,
     CLUSTER_SERVICE_TIMERS,
 };
+use cavalry_shm::counters::{CountersError, CountersReader};
 
 // This test's ports, from the one file that says how they are taken and why, which is
 // `cavalry-raft`'s: `crates/cavalry-raft/tests/ports/mod.rs`.
@@ -1455,7 +1456,18 @@ fn poll_timers(
 /// The value of one of the service's counters of the member, or `None` while no
 /// service has added it.
 fn service_counter(client: &Cavalry, counter: i32) -> Option<i64> {
-    let counters = client.counters();
+    counter_in(client.counters(), counter)
+}
+
+/// How many records a counters file holds.
+fn allocated(counters: &CountersReader) -> usize {
+    (0..counters.capacity())
+        .filter(|id| counters.record(*id).ok().flatten().is_some())
+        .count()
+}
+
+/// [`service_counter`], from a reader of the driver's counters file.
+fn counter_in(counters: &CountersReader, counter: i32) -> Option<i64> {
     let ours = |id: u32| {
         counters.record(id).ok().flatten().filter(|record| {
             record.type_id() == counter && record.key().starts_with(&MEMBER.to_le_bytes())
@@ -1846,18 +1858,27 @@ fn a_program_is_refused_a_timer_beyond_the_bound_and_schedules_one_again_in_its_
     member.close();
 }
 
-/// A service that reads history with a timer pending, and passes no event over in
-/// it, adds no counter of its timers while it reads that history: the page names
-/// three moments for them, its first snapshot, the first thing it has to tell its
-/// member of a timer and the first timer event it passes over, and a service tells
-/// its member nothing of its history (`spec/cluster.md`, "A service's snapshot",
-/// "What a service tells its member"). Once it has read it, its gauge holds the
-/// timer and its member is told of it.
+/// A service adds its five counters and its publication to its member when it first
+/// opens its member's log, before it hands its program an entry, whatever the
+/// program does (`spec/cluster.md`, "A service's snapshot", "What a service tells
+/// its member"; ADR 0168). So the poll in which a program schedules its first timer
+/// sends the driver no command: the driver's counters hold no more records after
+/// the timer is told than before the entry that scheduled it. A service that reads
+/// history with a timer pending holds it in its gauge meanwhile and tells its member
+/// nothing of it; once it has read its history, its member is told.
 #[test]
-fn a_service_adds_its_timers_counters_at_the_end_of_a_history_that_passes_no_event_over() {
+fn a_service_adds_its_counters_and_its_publication_when_it_first_opens_its_members_log() {
+    const FIVE: [i32; 5] = [
+        CLUSTER_SERVICE_SNAPSHOTS_TAKEN.0,
+        CLUSTER_SERVICE_SNAPSHOTS_FAILED.0,
+        CLUSTER_SERVICE_TIMERS.0,
+        CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER.0,
+        CLUSTER_SERVICE_TIMER_CANCELS_DROPPED.0,
+    ];
     let mut member = Member::start("timers-history");
-    // The history: a timer scheduled, and two entries after it.
+    // The history: two entries, a timer scheduled, and two entries after it.
     member.term(0, MEMBER);
+    member.message(0, -1, b"no timer yet");
     member.message(0, -1, &schedule(7, TIME + 1_000_000));
     // The position after the entry that schedules it.
     let scheduled = member.message(0, -1, b"no timer").0;
@@ -1865,14 +1886,60 @@ fn a_service_adds_its_timers_counters_at_the_end_of_a_history_that_passes_no_eve
     member.name();
     member.commit();
     let history = member.end;
+    // The member reads the consensus module stream from before the service starts.
+    let mut stream = member
+        .client
+        .add_subscription("cavalry:ipc", CONSENSUS_MODULE_STREAM_ID)
+        .expect("the member's subscription");
+    let mut told: Vec<(i64, i64)> = Vec::new();
+    let mut read_stream = |told: &mut Vec<(i64, i64)>| {
+        stream
+            .poll(
+                |bytes, _| match Message::parse(Stream::ConsensusModule, bytes) {
+                    Ok(Message::ScheduleTimer {
+                        correlation_id,
+                        deadline,
+                    }) => told.push((correlation_id, deadline)),
+                    other => panic!("a schedule timer and nothing else: {other:?}"),
+                },
+                16,
+            )
+            .expect("the stream is read");
+        stream.image_count()
+    };
     let mut client = Cavalry::connect_to(&member.dir).expect("the service's client connects");
     let mut service = client.cluster_service();
+    // The counters as a handler reads them, while the poll holds the client.
+    let counters = CountersReader::open(&member.dir).expect("the counters file opens");
+    for counter in FIVE {
+        assert_eq!(
+            counter_in(&counters, counter),
+            None,
+            "before the first poll"
+        );
+    }
+    assert_eq!(
+        read_stream(&mut told),
+        0,
+        "no publication before the first poll"
+    );
+    // What each handled entry saw: its position, whether the five counters were all
+    // there, and how many records the counters file held.
+    let mut seen: Vec<(i64, bool, usize)> = Vec::new();
     // One entry a poll, so that what each poll in the history added can be read.
-    let poll = |service: &mut ClusterService, client: &mut Cavalry| {
+    let poll = |service: &mut ClusterService,
+                client: &mut Cavalry,
+                seen: &mut Vec<(i64, bool, usize)>| {
         service
             .poll(
                 client,
                 |committed: &Committed<'_>, replies| {
+                    seen.push((
+                        committed.position,
+                        FIVE.iter()
+                            .all(|counter| counter_in(&counters, *counter).is_some()),
+                        allocated(&counters),
+                    ));
                     if let Entry::SessionMessage { payload, .. } = committed.entry
                         && payload.first() == Some(&b's')
                     {
@@ -1892,17 +1959,15 @@ fn a_service_adds_its_timers_counters_at_the_end_of_a_history_that_passes_no_eve
     // The polls that ended in the history with the timer pending.
     let mut pending_in_history = 0;
     wait("the service reads its history", || {
-        poll(&mut service, &mut client);
-        if service.position() < history {
+        poll(&mut service, &mut client, &mut seen);
+        if service.position() < history && service.position() >= scheduled {
             assert_eq!(
                 service_counter(&client, CLUSTER_SERVICE_TIMERS.0),
-                None,
-                "no counter of a service's timers at {} of a history that ends at {history}",
+                Some(1),
+                "the gauge holds the timer at {} of a history that ends at {history}",
                 service.position()
             );
-            if service.position() >= scheduled {
-                pending_in_history += 1;
-            }
+            pending_in_history += 1;
         }
         service.position() == history
     });
@@ -1910,44 +1975,45 @@ fn a_service_adds_its_timers_counters_at_the_end_of_a_history_that_passes_no_eve
         pending_in_history >= 2,
         "two polls end in the history with the timer pending, one entry a poll: {pending_in_history}"
     );
-    wait(
-        "the service has read its history and stores its gauge",
-        || {
-            poll(&mut service, &mut client);
-            service_counter(&client, CLUSTER_SERVICE_TIMERS.0) == Some(1)
-        },
+    // Every entry was handed over with the five counters there, the first one too,
+    // and with the publication there: the member's subscription has its image.
+    assert!(seen.len() >= 5, "{seen:?}");
+    assert!(seen.iter().all(|(_, five, _)| *five), "{seen:?}");
+    assert_eq!(read_stream(&mut told), 1, "the service's publication");
+    // The poll that scheduled the timer, and every poll after it, added no record
+    // to the driver's counters: no counter, and no publication, whose position and
+    // limit are records too.
+    let records: Vec<usize> = seen.iter().map(|(_, _, records)| *records).collect();
+    assert!(
+        records.windows(2).all(|pair| pair[0] == pair[1]),
+        "{seen:?}"
     );
+    // Nothing of the history was told while it was read.
     assert_eq!(
-        service_counter(&client, CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER.0),
-        Some(0)
+        told,
+        [],
+        "a service tells its member nothing of its history"
     );
-    // And the timer is what it tells its member, on the publication it added with
-    // the counters.
-    let mut stream = member
-        .client
-        .add_subscription("cavalry:ipc", CONSENSUS_MODULE_STREAM_ID)
-        .expect("the member's subscription");
-    let mut told: Vec<(i64, i64)> = Vec::new();
     wait("the member is told of the timer", || {
-        poll(&mut service, &mut client);
-        stream
-            .poll(
-                |bytes, _| match Message::parse(Stream::ConsensusModule, bytes) {
-                    Ok(Message::ScheduleTimer {
-                        correlation_id,
-                        deadline,
-                    }) => told.push((correlation_id, deadline)),
-                    other => panic!("a schedule timer and nothing else: {other:?}"),
-                },
-                16,
-            )
-            .expect("the stream is read");
+        poll(&mut service, &mut client, &mut seen);
+        read_stream(&mut told);
         !told.is_empty()
     });
     assert!(
         told.iter().all(|word| *word == (7, TIME + 1_000_000)),
         "{told:?}"
     );
+    assert_eq!(service_counter(&client, CLUSTER_SERVICE_TIMERS.0), Some(1));
+    assert_eq!(
+        service_counter(&client, CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER.0),
+        Some(0)
+    );
+    assert_eq!(
+        allocated(&counters),
+        records[0],
+        "telling the member of the timer added no record"
+    );
+    drop(read_stream);
     drop(stream);
 
     service.close(&mut client).expect("the service closes");
