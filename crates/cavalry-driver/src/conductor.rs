@@ -240,10 +240,6 @@ pub(crate) fn prepare_dir(dir: &Path) -> Result<DirLock, DriverError> {
         }
         .map_err(|source| io("remove what the last driver left in the directory", source))?;
     }
-    // Where each client keeps its lock file (`spec/client-protocol.md`, "The records a
-    // client writes"). A client of this version finds it and takes its lock there.
-    std::fs::create_dir(dir.join(CLIENT_LOCK_DIRECTORY))
-        .map_err(|source| io("create the directory of the clients' locks", source))?;
     Ok(DirLock { _dir: lock })
 }
 
@@ -1110,6 +1106,19 @@ impl Conductor {
         receiver: ReceiverLink,
     ) -> Result<Self, DriverError> {
         let counters = CountersFile::create(dir, spec::COUNTERS_CAPACITY)?;
+        // Where each client keeps its lock file (`spec/client-protocol.md`, "The records
+        // a client writes"), created after the counters file and before the command
+        // ring. After the counters file, because a lock file's name carries which
+        // counters file its client has mapped, and that tells this driver's clients
+        // from the last driver's only while both files are open: so no lock file is
+        // made here before this driver's counters file is. Before the command ring,
+        // because a client attaches when it finds the ring, and takes its lock here.
+        let clients = dir.join(CLIENT_LOCK_DIRECTORY);
+        std::fs::create_dir(&clients).map_err(|source| DriverError::Io {
+            what: "create the directory of the clients' locks",
+            path: clients.clone(),
+            source,
+        })?;
         let statics = Statics::new(&counters)?;
         counters
             .counter(CONDUCTOR_IDLE_STRATEGY.record())?
@@ -1442,7 +1451,22 @@ impl Conductor {
             }
         };
         let correlation_id = command.correlation_id();
-        if !self.touch_client(command.client_id(), now) {
+        // A client that has gone, and that the driver has not finished with, is not
+        // registered again by a command that comes late: the keepalive that a client
+        // which was stopped sends when it is continued, before it has read its
+        // `client timeout`, or a command a thread of it wrote meanwhile. The command is
+        // dropped and nothing is answered: the client was told that it had gone, or
+        // said so itself. Registered again, it would be a second client of one id, with
+        // no lock file under the name the first one's was renamed from, and its own
+        // going would put the first one's held records out of use. Once the driver has
+        // finished with a client it has taken the client's lock, so nothing of that
+        // client is left to send (`spec/client-protocol.md`, "The records a client
+        // writes").
+        let client_id = command.client_id();
+        if self.gone.iter().any(|gone| gone.client_id == client_id) {
+            return;
+        }
+        if !self.touch_client(client_id, now) {
             self.statics.registry_full.increment();
             self.send_error(
                 correlation_id,
@@ -1937,18 +1961,21 @@ impl Conductor {
             .map(|subscription| subscription.client_id)
     }
 
-    /// The path of client `client_id`'s lock file, as the client made it.
+    /// The path of client `client_id`'s lock file, as a client of this driver made
+    /// it: the name carries this driver's counters file, so a file that a client of
+    /// the driver before this one made here, under an id this driver gives out again,
+    /// has another name and is never looked at ([`cavalry_shm::client_lock`]).
     fn client_lock_path(&self, client_id: i64) -> PathBuf {
-        self.dir
-            .join(CLIENT_LOCK_DIRECTORY)
-            .join(format!("{client_id}{CLIENT_LOCK_SUFFIX}"))
+        self.counters
+            .file_id()
+            .client_file(&self.dir, client_id, CLIENT_LOCK_SUFFIX)
     }
 
     /// The path of the lock file of a client that has gone, as the driver renames it.
     fn client_gone_path(&self, client_id: i64) -> PathBuf {
-        self.dir
-            .join(CLIENT_LOCK_DIRECTORY)
-            .join(format!("{client_id}{CLIENT_GONE_SUFFIX}"))
+        self.counters
+            .file_id()
+            .client_file(&self.dir, client_id, CLIENT_GONE_SUFFIX)
     }
 
     /// Tries the lock on the file at `path` once, without waiting, and lets go of it at
@@ -19726,7 +19753,8 @@ mod held {
 
     use cavalry_shm::counters::CountersWriter;
     use cavalry_shm::counters::generated::{
-        CLIENT_WITHOUT_LOCK, CLUSTER_COMMIT_POSITION, COUNTERS_HELD, COUNTERS_RETIRED,
+        CLIENT_WITHOUT_LOCK, CLUSTER_COMMIT_POSITION, COUNTERS_ALLOCATED,
+        COUNTERS_ALLOCATION_FAILED, COUNTERS_HELD, COUNTERS_RETIRED,
     };
 
     use super::recording::Harness;
@@ -20058,5 +20086,176 @@ mod held {
         h.now += 100 * SECOND;
         h.cycle();
         assert!(held(&h, record));
+    }
+
+    /// One command of `client_id`, as the driver reads it from the ring.
+    fn keepalive(h: &mut Harness, client_id: i64, correlation_id: i64) {
+        let command = Command::ClientKeepalive {
+            client_id,
+            correlation_id,
+        };
+        let mut bytes = [0u8; 64];
+        let length = command.write(&mut bytes).expect("a keepalive");
+        let now = h.now;
+        h.conductor
+            .handle(command.command_type() as i32, &bytes[..length], now);
+    }
+
+    /// A client that was stopped past its timeout and is continued sends a keepalive
+    /// before it reads that it was timed out. The driver registers nobody for it: a
+    /// second client of that id would hold no lock under the name the first one's file
+    /// had, and its own timeout would put the first one's records out of use.
+    #[test]
+    fn a_client_that_has_gone_is_not_registered_again_by_a_command_that_comes_late() {
+        let mut h = Harness::new("held-late-command");
+        let held_by_client = lock(&h, 7);
+        let record = add(&mut h, 7, 100);
+        let now = h.now;
+        h.conductor.remove_client(7, now);
+        assert_eq!(h.counter(COUNTERS_HELD), 1);
+        // The client is continued: its keepalive, and a second one a while later.
+        keepalive(&mut h, 7, 200);
+        assert!(
+            h.conductor.clients.iter().all(|client| client.id != 7),
+            "no second client of the id"
+        );
+        h.now += 2 * spec::nanos(spec::CLIENT_LIVENESS_TIMEOUT);
+        h.cycle();
+        keepalive(&mut h, 7, 202);
+        h.now += 2 * spec::nanos(spec::CLIENT_LIVENESS_TIMEOUT);
+        h.cycle();
+        assert_eq!(h.counter(CLIENT_WITHOUT_LOCK), 0);
+        assert_eq!(h.counter(COUNTERS_RETIRED), 0);
+        assert_eq!(h.counter(COUNTERS_HELD), 1);
+        assert!(held(&h, record));
+        // The client's process ends, and its record is let go, as the page says.
+        drop(held_by_client);
+        h.now += spec::nanos(spec::LOCK_CHECK_INTERVAL) + MS;
+        h.cycle();
+        assert_eq!(h.counter(COUNTERS_HELD), 0);
+        assert_eq!(h.counter(COUNTERS_RETIRED), 0);
+        assert!(!held(&h, record));
+        // The driver has finished with the client, and nothing of it is left to send:
+        // a command with that id now is a new client's first, as it always was.
+        assert!(h.conductor.gone.is_empty());
+        keepalive(&mut h, 7, 204);
+        assert!(h.conductor.clients.iter().any(|client| client.id == 7));
+    }
+
+    /// A lock file under this client's id that names another counters file: what a
+    /// client of the driver before this one makes here, when it was stopped between
+    /// taking its id and making its file, and the driver was started again meanwhile.
+    /// It is not this client's lock, however long its maker holds it. The driver does
+    /// not look at it, does not rename it and never takes it for an answer.
+    #[test]
+    fn a_lock_file_that_names_another_counters_file_is_not_this_clients_lock() {
+        let mut h = Harness::new("held-other-driver");
+        // Any file that is open while the driver's counters file is has another
+        // identity; the command ring stands for the last driver's counters file.
+        let other = cavalry_shm::client_lock::FileId::at(&h.dir.path().join("command-ring"))
+            .expect("a file's identity");
+        let stray = other.client_file(h.dir.path(), 7, CLIENT_LOCK_SUFFIX);
+        assert_ne!(stray, h.conductor.client_lock_path(7));
+        let file = File::options()
+            .write(true)
+            .create_new(true)
+            .open(&stray)
+            .expect("the other client's file");
+        file.try_lock().expect("the other client's lock");
+        // This driver's client 7, which made no file of its own.
+        let record = add(&mut h, 7, 100);
+        assert_eq!(
+            h.counter(CLIENT_WITHOUT_LOCK),
+            1,
+            "another driver's client's lock is not this client's"
+        );
+        let now = h.now;
+        h.conductor.remove_client(7, now);
+        assert_eq!(h.counter(COUNTERS_HELD), 0);
+        assert_eq!(h.counter(COUNTERS_RETIRED), 1);
+        assert!(h.conductor.gone.is_empty());
+        // The other process ends. Nothing follows from it.
+        drop(file);
+        h.now += 100 * SECOND;
+        h.cycle();
+        assert!(held(&h, record), "out of use, and given to nobody");
+        assert!(stray.exists(), "the driver did not touch the file");
+    }
+
+    /// The table of held records at its capacity, which is the counters file's: one
+    /// client adds and removes counters and stores no word, until every record of the
+    /// file is a counter or is held. The next `add counter` is answered with the
+    /// file's own error and counted, the table has not grown, nothing was given to
+    /// another owner, and every record comes back when its word is stored.
+    #[test]
+    fn the_table_of_held_records_is_full_when_the_counters_file_is() {
+        let mut h = Harness::new("held-full");
+        let writer = CountersWriter::open(h.dir.path()).expect("a client's mapping");
+        let _held_by_client = lock(&h, 7);
+        let capacity = h.conductor.held.capacity();
+        assert_eq!(capacity, h.conductor.counters.capacity() as usize);
+        let mut records = Vec::new();
+        let mut correlation_id = 100;
+        let refused = loop {
+            let now = h.now;
+            assert!(h.conductor.touch_client(7, now));
+            h.conductor.add_counter(
+                7,
+                correlation_id,
+                CLUSTER_COMMIT_POSITION.0,
+                &correlation_id.to_le_bytes(),
+                b"cluster.commit_position 1",
+            );
+            let Some(counter) = h
+                .conductor
+                .client_counters
+                .iter()
+                .find(|counter| counter.registration_id == correlation_id)
+            else {
+                break correlation_id;
+            };
+            records.push(counter.counter_id);
+            h.conductor
+                .remove_counter(7, correlation_id + 1, correlation_id, now);
+            correlation_id += 2;
+            assert!(
+                records.len() <= capacity,
+                "more held than the file has records"
+            );
+        };
+        let held_now = i64::try_from(records.len()).expect("small");
+        assert_eq!(h.counter(COUNTERS_HELD), held_now);
+        assert_eq!(h.conductor.held.len(), records.len());
+        assert_eq!(
+            h.conductor.held.capacity(),
+            capacity,
+            "the table did not grow"
+        );
+        assert_eq!(
+            held_now + h.counter(COUNTERS_ALLOCATED),
+            i64::try_from(capacity).expect("small"),
+            "every record is a counter or is held"
+        );
+        assert_eq!(h.counter(COUNTERS_ALLOCATION_FAILED), 1);
+        assert!(
+            h.last_error(refused).is_some(),
+            "the add that found the file full is answered"
+        );
+        let mut sorted = records.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), records.len(), "no record was given out twice");
+        assert_eq!(h.counter(COUNTERS_RETIRED), 0);
+        // The writer's words: every record is let go, in a bounded number of cycles.
+        for record in &records {
+            writer.release(*record).expect("the word is stored");
+        }
+        for _ in 0..=records.len().div_ceil(HELD_PER_CYCLE) {
+            h.cycle();
+        }
+        assert_eq!(h.counter(COUNTERS_HELD), 0);
+        assert!(h.conductor.held.is_empty());
+        assert!(!held(&h, records[0]) && !held(&h, records[records.len() - 1]));
+        assert_eq!(h.counter(COUNTERS_RETIRED), 0);
     }
 }
