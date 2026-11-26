@@ -1048,6 +1048,55 @@ fn one_cluster_key_without_the_other_stops_run_and_fails_doctor() {
     assert!(!dir.0.exists(), "nothing was started");
 }
 
+/// A cluster member whose start fails stops `cavalry run`, which closes the driver,
+/// and the member, which never ran, counted nothing of its own. `cavalry run` counts
+/// the refusal in the driver's `run.member_refused` before it closes, so `cavalry
+/// doctor` names it from the directory the closed driver left, with where the reason
+/// was printed and what to do (work item 472). The refusal here is a member id the
+/// members string does not hold, which the consensus module refuses before it binds
+/// anything.
+#[test]
+fn a_member_whose_start_is_refused_stops_run_and_doctor_names_it() {
+    let dir = TestDir::new("cluster-refused");
+    let log_dir = TestDir::new("cluster-refused-log");
+    let output = cavalry()
+        .args(["run", "--dir", &dir.arg(), "--log-dir", &log_dir.arg()])
+        .env(
+            "CAVALRY_CLUSTER_MEMBERS",
+            "0,127.0.0.1:9000,127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003,127.0.0.1:9004",
+        )
+        .env("CAVALRY_CLUSTER_MEMBER_ID", "5")
+        .output()
+        .expect("runs");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cavalry run: member refused ("), "{stderr}");
+    assert!(
+        !stderr.contains("run.member_refused could not be written"),
+        "{stderr}"
+    );
+
+    let output = cavalry()
+        .args(["doctor", "--dir", &dir.arg()])
+        .output()
+        .expect("doctor runs");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("WARN run.member_refused"), "{text}");
+    assert!(
+        text.contains(
+            "run.member_refused is 1: `cavalry run` stopped this driver because its cluster \
+             member's start failed"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("`cavalry run: member refused (`")
+            && text.contains("docs/how-to/run-a-cluster.md")
+            && text.contains("start `cavalry run` again"),
+        "where the reason is and what to do: {text}"
+    );
+}
+
 #[test]
 fn a_member_id_of_minus_one_written_out_is_no_member() {
     // The id's default, -1, written into a unit file, is no member: without a members

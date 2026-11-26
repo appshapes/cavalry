@@ -38,7 +38,8 @@ binary's `main`.
   before the driver, and refuses one key without the other. When the member cannot go
   on, its duty cycle failing for 10 s on end or its thread panicking, `run` gives it
   up at once, counts that in the driver's `run.member_given_up`, closes the driver
-  and exits 1, and `doctor` reports the count from the directory the driver left;
+  and exits 1, and `doctor` reports the count from the directory the driver left. A
+  member whose start fails is counted in `run.member_refused` the same way;
   `doctor` explains the
   driver from its counters and exits 0 when no check failed, listing every recording's
   two positions and, on a driver that is a cluster member, what the member is and

@@ -803,6 +803,7 @@ fn run(config: &Config) -> ExitCode {
             Ok(thread) => member_thread = Some(thread),
             Err(error) => {
                 eprintln!("cavalry run: {error}");
+                refuse_member(dir);
                 failed = true;
             }
         }
@@ -856,6 +857,19 @@ fn run(config: &Config) -> ExitCode {
 /// directory once the driver has closed, where `cavalry doctor` reports it with what to
 /// do (invariant 4); what the member counted is gone by then, freed with its client. A
 /// count that cannot be written is said and stops nothing: the driver closes either way.
+/// The cluster member's start failed and `cavalry run` closes the driver: adds one to
+/// `run.member_refused` in the counters file, so that `cavalry doctor` names the
+/// refusal once the process is gone (work item 472). The line already printed says
+/// why, and what to do.
+fn refuse_member(dir: &Path) {
+    if let Err(error) = cavalry_control::run::member_refused(dir) {
+        eprintln!(
+            "cavalry run: the counter run.member_refused could not be written, so `cavalry \
+             doctor` will not say that the member's start was refused: {error}"
+        );
+    }
+}
+
 fn give_member_up(dir: &Path, error: &str) {
     eprintln!("cavalry run: the cluster member stopped, so the driver stops: {error}");
     if let Err(error) = cavalry_control::run::member_given_up(dir) {

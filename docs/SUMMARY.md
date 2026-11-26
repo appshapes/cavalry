@@ -224,3 +224,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0164. Refuse a count below zero in the Go, the JVM and the .NET client, before the ABI is called](decisions/0164-refuse-a-count-below-zero-in-the-go-the-jvm-and-the-dotnet-client-before-the-abi-is-called.md)
 - [0165. Index the decisions in the book's search by what each decided, and leave their pages out](decisions/0165-index-the-decisions-in-the-books-search-by-what-each-decided-and-leave-their-pages-out.md)
 - [0167. Have doctor name a leader beside which no service runs](decisions/0167-have-doctor-name-a-leader-beside-which-no-service-runs.md)
+- [0169. Count a cluster member's failed start, and say what no check holds](decisions/0169-count-a-cluster-members-failed-start-and-say-what-no-check-holds.md)

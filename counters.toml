@@ -1497,6 +1497,14 @@ scope = "static"
 doc = "Times `cavalry run` gave up the cluster member it ran beside this driver, and then closed the driver: the member's duty cycle had failed for 10 s on end, or its thread had panicked. `cavalry run` adds one before it closes the driver, so the count is in the directory a closed driver leaves."
 doctor = "`cavalry run` stopped this driver because its cluster member could not go on: the member's duty cycle failed for 10 s on end, or its thread panicked. The line that process printed beginning `cavalry run: the cluster member stopped` says why, and what to do. Correct what it names, then start `cavalry run` again with the same directories: the member starts on the log directory it kept, and the other members elect a leader meanwhile."
 
+[[counter]]
+id = 204
+name = "run.member_refused"
+kind = "counter"
+scope = "static"
+doc = "Times `cavalry run` started this driver for a cluster member whose start failed, and then closed the driver: the consensus module refused to start on the members string, the member id or the log directory it was given, or its thread could not start (work item 472). `cavalry run` adds one before it closes the driver, so the count is in the directory a closed driver leaves, though the member, which never ran, counted nothing."
+doctor = "`cavalry run` stopped this driver because its cluster member's start failed, so the member never ran and added none of its own counters. The line that process printed after it started the driver, beginning `cavalry run: member refused (` or `cavalry run: member stopped (`, names the reason in its brackets and what to do, and docs/how-to/run-a-cluster.md, When it does not work, explains each reason; under systemd, `journalctl -u` with the unit reads that line again. Correct what it names, then start `cavalry run` again with the same directories."
+
 # A cluster member's sessions (spec/cluster.md, "Sessions" and "Counters"; ADR 0052,
 # feature 5; ADR 0115): what `cavalry_raft::Sessions` counts, stored by the member's
 # consensus module as its other counters are, keyed by the member id. A session is
