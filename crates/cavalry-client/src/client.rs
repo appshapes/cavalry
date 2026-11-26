@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use cavalry_proto::client_protocol::{Command, ErrorCode};
 use cavalry_shm::broadcast::{BroadcastBuffer, BroadcastError};
+use cavalry_shm::client_lock::ClientsDir;
 use cavalry_shm::command_ring::layout::DRIVER_CLOSED;
 use cavalry_shm::command_ring::{CommandRing, CommandRingError, Producer};
 use cavalry_shm::counters::generated::REPLAY_POSITION;
@@ -47,6 +48,12 @@ pub const DIR_ENV: &str = "CAVALRY_DIR";
 /// bounds the work of a client that waits the whole driver timeout: a thousand reads.
 const ATTACH_POLL: Duration = Duration::from_millis(10);
 
+/// How many client ids in a row a connecting client takes while it finds a lock file
+/// of each one's name already there, before it gives up with the error of the last.
+/// No client of the driver makes such a file: ids are distinct within a ring. It is
+/// what another hand left in `clients/`.
+const LOCK_NAMES_TRIED: usize = 8;
+
 /// The driver directory's three files, each open and past its page's checks, beside a
 /// driver whose heartbeat is fresh: what one read of the directory gives a connecting
 /// client.
@@ -54,6 +61,12 @@ struct Attached {
     ring: CommandRing,
     broadcast: BroadcastBuffer,
     counters: CountersReader,
+    /// The mapping this client stores into records through. Every later one is a
+    /// share of it, never a second open by the directory's name.
+    writer: CountersWriter,
+    /// The handle on `clients/`, opened before the three files: the client's lock
+    /// file is made through it (`cavalry_shm::client_lock`).
+    clients: ClientsDir,
 }
 
 /// Why one read of the driver directory attached nothing.
@@ -112,6 +125,14 @@ impl Attached {
                 dir: dir.to_path_buf(),
             }));
         }
+        // The handle on `clients/` first, before any of the driver's files is opened:
+        // the client's lock file is made through it, after the last of them, and a
+        // file is made in no directory that has been removed. A driver that starts
+        // removes `clients/` with everything else the last driver left, and only then
+        // creates its own. So a lock file that is made says that every file opened
+        // between here and there is of the one driver whose `clients/` this is
+        // (`spec/client-protocol.md`, "The driver directory").
+        let clients = ClientsDir::open(dir);
         let ring = match CommandRing::open(dir, true) {
             Ok(ring) => ring,
             Err(CommandRingError::NotReady | CommandRingError::TooShort { given: 0 }) => {
@@ -145,40 +166,24 @@ impl Attached {
         let counters = CountersReader::open(dir).map_err(|error| {
             Unattached::other(counters_unfinished(&error), error.into(), heartbeat)
         })?;
-        // One driver's three files, and no mix of two drivers'. A driver that starts
-        // removes everything the last one left before it creates a file of its own, so
-        // at any moment the directory names files of one driver. Each of the three
-        // names was this mapping's file when it was opened and is again now, and a
-        // file's identity is not given to another file while this process has it
-        // mapped; so between the last open and the first look here, all three names
-        // were these three files at once. A name that is another file's now is a
-        // driver starting: the directory is read again.
-        if !(ring.is_named_in(dir) && broadcast.is_named_in(dir) && counters.is_named_in(dir)) {
+        let writer = CountersWriter::open(dir).map_err(|error| {
+            Unattached::other(counters_unfinished(&error), error.into(), heartbeat)
+        })?;
+        // A command ring with no `clients/` beside it is a driver that is starting, or
+        // a directory that a driver which starts is emptying: read again. A driver of
+        // a version before the lock has none either, and its counters file was
+        // refused above, with the message that says so.
+        let Ok(clients) = clients else {
             return Err(Unattached::Creating(Unfinished::CommandRing));
-        }
+        };
         Ok(Self {
             ring,
             broadcast,
             counters,
+            writer,
+            clients,
         })
     }
-}
-
-/// A writing mapping of the counters file in `dir`, which must be the file `counters`
-/// is a mapping of: the driver this client attached to. Opened by its path, it is
-/// whatever file the directory names now, and that is another driver's once a driver
-/// has started there again; this client's handles are on records of its own driver's
-/// file, and a store through another driver's mapping would land in a record this
-/// client was never given (`spec/client-protocol.md`, "The records a client writes").
-fn open_writer(dir: &Path, counters: &CountersReader) -> Result<CountersWriter, ClientError> {
-    let writer = CountersWriter::open(dir)?;
-    if writer.file_id() != counters.file_id() {
-        return Err(ClientError::DriverGone {
-            dir: dir.to_path_buf(),
-            reason: Closed::DriverTimeout,
-        });
-    }
-    Ok(writer)
 }
 
 impl Unattached {
@@ -213,7 +218,7 @@ pub struct Cavalry {
     counters: Arc<CountersReader>,
     /// The counters file mapped writable, for the counters this client adds and owns;
     /// opened at the first [`Cavalry::add_counter`] (ADR 0062).
-    counters_writer: Option<CountersWriter>,
+    counters_writer: CountersWriter,
     responses: spsc::Consumer<Response>,
     registrations: spsc::Producer<Registration>,
     replay_registrations: spsc::Producer<ReplayRegistration>,
@@ -270,18 +275,112 @@ impl Cavalry {
     /// is measured on a clock that never goes back, so a wall clock that is set
     /// during the wait neither lengthens it nor changes its answer.
     pub fn connect_to(dir: impl AsRef<Path>) -> Result<Self, ClientError> {
-        let dir = dir.as_ref().to_path_buf();
+        Self::connect_in(dir.as_ref())
+    }
+
+    /// The client's id, its lock and its first command, in that order, on what
+    /// `attached` holds: the id from the ring's correlation id counter, the lock file
+    /// made through the handle on `clients/` and locked, and then the keepalive by
+    /// which the driver learns of the client. A client that has no lock sends no
+    /// command, so the driver never reads a command of a client it cannot ask about
+    /// (`spec/client-protocol.md`, "The records a client writes"; ADR 0179).
+    ///
+    /// `Ok(None)` when the directory of the locks has been removed: a driver has
+    /// started in this directory since `attached` was opened, and the caller reads
+    /// the directory again. A name that is already taken, which no client of this
+    /// driver can have made, costs the id: the next one is taken, up to
+    /// [`LOCK_NAMES_TRIED`] in all.
+    #[allow(clippy::type_complexity)]
+    fn first_command(
+        dir: &Path,
+        attached: &Attached,
+        scratch: &mut [u8],
+        taken: &mut usize,
+    ) -> Result<Option<(i64, crate::owned::ClientLock, Producer, Producer)>, ClientError> {
+        let mut producer = attached.ring.producer(DRIVER_TIMEOUT)?;
+        let conductor_producer = attached.ring.producer(DRIVER_TIMEOUT)?;
+        let (client_id, lock) = loop {
+            let client_id = producer.next_correlation_id();
+            match crate::owned::ClientLock::take(&attached.clients, dir, client_id) {
+                Ok(lock) => break (client_id, lock),
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+                Err(error)
+                    if error.kind() == ErrorKind::AlreadyExists
+                        && *taken + 1 < LOCK_NAMES_TRIED =>
+                {
+                    *taken += 1;
+                }
+                Err(source) => {
+                    return Err(ClientError::Io {
+                        what: "make and lock this client's lock file; the driver's directory \
+                               must be one this user can write, on a filesystem that keeps \
+                               advisory locks, as the driver's own lock on it needs",
+                        path: cavalry_shm::client_lock::path(
+                            dir,
+                            client_id,
+                            cavalry_proto::client_protocol::CLIENT_LOCK_SUFFIX,
+                        ),
+                        source,
+                    });
+                }
+            }
+        };
+        let keepalive = Command::ClientKeepalive {
+            client_id,
+            correlation_id: producer.next_correlation_id(),
+        };
+        let length = keepalive.write(scratch)?;
+        // From the command on, the driver knows the client and removes the file when
+        // the client has gone; a command that could not be written leaves a file the
+        // driver never learns of, which is removed here.
+        if let Err(error) = producer.write(
+            keepalive.command_type() as i32,
+            &scratch[..length],
+            epoch_time(),
+        ) {
+            lock.abandon();
+            return Err(error.into());
+        }
+        Ok(Some((client_id, lock, producer, conductor_producer)))
+    }
+
+    fn connect_in(dir: &Path) -> Result<Self, ClientError> {
+        let dir = dir.to_path_buf();
         let deadline = Instant::now() + DRIVER_TIMEOUT;
         // The heartbeat on the first read that found the command ring finished and
         // another file not.
         let mut first_heartbeat = None;
-        let Attached {
-            ring,
-            broadcast,
-            counters,
-        } = loop {
+        let mut scratch = vec![0u8; COMMAND_SCRATCH];
+        // How many ids in a row had a lock file of their name already.
+        let mut taken = 0;
+        let (broadcast, counters, counters_writer, ring, producer, conductor_producer) = loop {
             let unfinished = match Attached::open(&dir) {
-                Ok(attached) => break attached,
+                Ok(attached) => {
+                    match Self::first_command(&dir, &attached, &mut scratch, &mut taken) {
+                        Ok(Some((client_id, lock, producer, conductor_producer))) => {
+                            let Attached {
+                                ring,
+                                broadcast,
+                                counters,
+                                writer,
+                                clients: _,
+                            } = attached;
+                            break (
+                                broadcast,
+                                counters,
+                                writer,
+                                ring,
+                                (client_id, lock, producer),
+                                conductor_producer,
+                            );
+                        }
+                        // The directory of the locks was removed under the client: a
+                        // driver is starting. Everything is opened again, and the id
+                        // is taken again, from the ring that is there then.
+                        Ok(None) => Unfinished::CommandRing,
+                        Err(error) => return Err(error),
+                    }
+                }
                 Err(Unattached::Refused(error)) => return Err(error),
                 Err(Unattached::Creating(unfinished)) => unfinished,
             };
@@ -307,44 +406,17 @@ impl Cavalry {
                 },
             });
         };
-        // Every mapping this client will use, before its id is taken and its lock is
-        // made: the conductor's handle on the ring is the same mapping, and the
-        // mapping it stores release words through is of the same counters file.
+        let (client_id, lock, mut producer) = producer;
+        // The conductor's handle on the ring: the same mapping, not a second open by
+        // the directory's name.
         let conductor_ring = ring.share();
-        let counters_writer = open_writer(&dir, &counters)?;
-        let mut producer = ring.producer(DRIVER_TIMEOUT)?;
-        let conductor_producer = ring.producer(DRIVER_TIMEOUT)?;
-        let client_id = producer.next_correlation_id();
         let receiver = broadcast.receiver()?;
         let counters = Arc::new(counters);
+        // The conductor's mapping to store release words through; the client's own is
+        // a share of it, the same file by construction.
+        let own_writer = counters_writer.share();
 
-        let mut scratch = vec![0u8; COMMAND_SCRATCH];
-        let keepalive = Command::ClientKeepalive {
-            client_id,
-            correlation_id: producer.next_correlation_id(),
-        };
-        let length = keepalive.write(&mut scratch)?;
-        // The client's lock, taken just before its first command: the driver tries it
-        // when it reads that command, and a client that holds it is one whose records
-        // are given back out when the driver holds it in turn
-        // (`spec/client-protocol.md`, "The records a client writes"; ADR 0179). A
-        // client that cannot take it attaches all the same. From the command on, the
-        // driver knows the client and removes the file when the client has gone; a
-        // command that could not be written leaves a file the driver never learns of,
-        // which is removed here.
-        let lock = crate::owned::ClientLock::take(&dir, client_id, counters.file_id());
-        if let Err(error) = producer.write(
-            keepalive.command_type() as i32,
-            &scratch[..length],
-            epoch_time(),
-        ) {
-            if let Some(lock) = lock {
-                lock.abandon();
-            }
-            return Err(error.into());
-        }
-
-        let shared = Arc::new(Shared::new(nano_time(), lock));
+        let shared = Arc::new(Shared::new(nano_time(), Some(lock)));
         let (response_producer, responses) = spsc::queue::<Response>(RESPONSE_QUEUE);
         let (registrations, registration_consumer) =
             spsc::queue::<Registration>(REGISTRATION_QUEUE);
@@ -452,7 +524,7 @@ impl Cavalry {
             producer,
             ring,
             counters,
-            counters_writer: None,
+            counters_writer: own_writer,
             responses,
             registrations,
             replay_registrations,
@@ -949,9 +1021,6 @@ impl Cavalry {
     ) -> Result<Counter, ClientError> {
         // Everything that can fail on this side fails before the command is sent, so
         // that the driver never holds a counter this client has no handle on.
-        if self.counters_writer.is_none() {
-            self.counters_writer = Some(open_writer(&self.dir, &self.counters)?);
-        }
         let producer = self.ring.producer(DRIVER_TIMEOUT)?;
         let correlation_id = self.producer.next_correlation_id();
         let command = Command::AddCounter {
@@ -965,8 +1034,7 @@ impl Cavalry {
             Response::CounterReady { counter_id, .. } => {
                 let cell = u32::try_from(counter_id)
                     .ok()
-                    .zip(self.counters_writer.as_ref())
-                    .and_then(|(id, writer)| writer.counter(id).ok());
+                    .and_then(|id| self.counters_writer.counter(id).ok());
                 let Some(cell) = cell else {
                     // The driver named a record this client cannot write: give the
                     // counter back, so the registry does not keep it until the close.
@@ -1825,46 +1893,5 @@ impl std::fmt::Debug for Cavalry {
             .field("client_id", &self.client_id)
             .field("closed", &self.closed())
             .finish()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use cavalry_shm::counters::CountersFile;
-
-    use super::*;
-
-    /// A driver that starts again in a directory makes a new counters file under the
-    /// old one's name. A client of the driver before it, which opens a writing mapping
-    /// by that name later, is refused it: its handles are on records of the file it
-    /// attached to, and a release word stored through the new file would be stored
-    /// into a record of another driver's client.
-    #[test]
-    fn a_writing_mapping_of_another_drivers_counters_file_is_refused() {
-        let dir = std::env::temp_dir().join(format!("cavalry-open-writer-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("a directory");
-        let first = CountersFile::create(&dir, 256).expect("the first driver's counters file");
-        let attached = CountersReader::open(&dir).expect("the client's mapping");
-        let writer = open_writer(&dir, &attached).expect("the same file, by its name");
-        assert_eq!(writer.file_id(), attached.file_id());
-        assert_eq!(first.file_id(), attached.file_id());
-
-        // The driver before is gone and the next one starts: it removes what was left
-        // and creates its own. The client still has the first file mapped.
-        std::fs::remove_file(dir.join("counters")).expect("the next driver removes the file");
-        let second = CountersFile::create(&dir, 256).expect("the next driver's counters file");
-        assert_ne!(second.file_id(), attached.file_id());
-        assert!(!attached.is_named_in(&dir));
-        match open_writer(&dir, &attached) {
-            Err(ClientError::DriverGone {
-                reason: Closed::DriverTimeout,
-                ..
-            }) => {}
-            Err(other) => panic!("{other}"),
-            Ok(_) => panic!("a client mapped the next driver's counters file to write"),
-        }
-        drop((first, second, attached, writer));
-        std::fs::remove_dir_all(&dir).expect("remove the directory");
     }
 }

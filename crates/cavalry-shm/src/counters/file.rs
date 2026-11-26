@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use memmap2::{Mmap, MmapMut, MmapOptions};
 
-use crate::client_lock::FileId;
 use crate::clock;
 use crate::pretouch;
 
@@ -51,8 +50,6 @@ struct Mapped {
     base: *const u8,
     length: usize,
     fields: HeaderFields,
-    /// Which file the mapping is of, read from the open file that was mapped.
-    file: FileId,
 }
 
 // SAFETY: `base` points into `_map`, which lives as long as `self`, and the only accesses
@@ -64,7 +61,7 @@ unsafe impl Sync for Mapped {}
 
 impl Mapped {
     /// A mapping of at least `fields.file_length()` bytes, or [`CountersError::Length`].
-    fn new(mut map: Map, fields: HeaderFields, file: FileId) -> Result<Self, CountersError> {
+    fn new(mut map: Map, fields: HeaderFields) -> Result<Self, CountersError> {
         // The writer's pointer comes from `&mut [u8]`, so it keeps permission to write; the
         // map is never dereferenced again, so nothing invalidates it.
         let (base, length) = match &mut map {
@@ -83,7 +80,6 @@ impl Mapped {
             base,
             length,
             fields,
-            file,
         })
     }
 
@@ -200,7 +196,6 @@ impl CountersFile {
             .open(dir.join(FILE_NAME))?;
         let length = fields.file_length();
         file.set_len(length)?;
-        let id = FileId::of(&file)?;
         // SAFETY: memmap2 marks mapping a file `unsafe` because another process could
         // truncate the file under the mapping and turn a load into a fault. This call
         // created the file, in the driver's directory, which is the trust boundary every
@@ -208,7 +203,7 @@ impl CountersFile {
         // the file exists. A truncation is a fault, never silent misbehaviour.
         let map = unsafe { MmapOptions::new().len(length as usize).map_mut(&file)? };
         pretouch::writable(&map)?;
-        let mapped = Arc::new(Mapped::new(Map::Writer(map), fields, id)?);
+        let mapped = Arc::new(Mapped::new(Map::Writer(map), fields)?);
         let mut count: i64 = 0;
         for def in COUNTERS.iter().filter(|def| def.scope == Scope::Static) {
             let record = static_record(def.id, capacity)?;
@@ -248,18 +243,6 @@ impl CountersFile {
     /// The header's fields: capacity, creator pid and start timestamp.
     pub fn header(&self) -> HeaderFields {
         self.mapped.fields
-    }
-
-    /// Whether `dir/counters` is, now, the file this mapping is of.
-    pub fn is_named_in(&self, dir: &Path) -> bool {
-        FileId::at(&dir.join(FILE_NAME)).is_ok_and(|named| named == self.mapped.file)
-    }
-
-    /// Which file this mapping is of: the identity that a client's lock file carries in
-    /// its name, and that tells a mapping of this driver's counters file from one of
-    /// the driver before it ([`crate::client_lock`]).
-    pub fn file_id(&self) -> FileId {
-        self.mapped.file
     }
 
     /// How many counters the file holds.
@@ -477,6 +460,17 @@ pub struct CountersWriter {
 }
 
 impl CountersWriter {
+    /// A second handle on this mapping, for another part of one process: the same
+    /// file by construction, where a second [`CountersWriter::open`] would map
+    /// whatever file the directory names by then, which is another driver's once a
+    /// driver has started there again. A store through that one would land in a
+    /// record this process was never given.
+    pub fn share(&self) -> Self {
+        Self {
+            mapped: Arc::clone(&self.mapped),
+        }
+    }
+
     /// Opens `dir/counters` writable and runs the checks of [`CountersReader::open`].
     pub fn open(dir: &Path) -> Result<Self, CountersError> {
         Ok(Self {
@@ -487,18 +481,6 @@ impl CountersWriter {
     /// The header's fields: capacity, creator pid and start timestamp.
     pub fn header(&self) -> HeaderFields {
         self.mapped.fields
-    }
-
-    /// Whether `dir/counters` is, now, the file this mapping is of.
-    pub fn is_named_in(&self, dir: &Path) -> bool {
-        FileId::at(&dir.join(FILE_NAME)).is_ok_and(|named| named == self.mapped.file)
-    }
-
-    /// Which file this mapping is of: the identity that a client's lock file carries in
-    /// its name, and that tells a mapping of this driver's counters file from one of
-    /// the driver before it ([`crate::client_lock`]).
-    pub fn file_id(&self) -> FileId {
-        self.mapped.file
     }
 
     /// How many counters the file holds; ids run from 0 to one below it.
@@ -605,7 +587,6 @@ fn open_mapped(dir: &Path, writable: bool, oldest: i32) -> Result<Arc<Mapped>, C
         .read(true)
         .write(writable)
         .open(dir.join(FILE_NAME))?;
-    let id = FileId::of(&file)?;
     let file_length = file.metadata()?.len();
     if file_length < HEADER_LENGTH as u64 {
         return Err(CountersError::TooShort { given: file_length });
@@ -637,7 +618,7 @@ fn open_mapped(dir: &Path, writable: bool, oldest: i32) -> Result<Arc<Mapped>, C
         pretouch::readable(&map)?;
         Map::Reader(map)
     };
-    let mapped = Mapped::new(map, first, id)?;
+    let mapped = Mapped::new(map, first)?;
     let second = mapped.header_cells().read_from(file_length, oldest)?;
     if second != first {
         return Err(CountersError::Changed);
@@ -682,18 +663,6 @@ impl CountersReader {
     /// The header's fields: capacity, creator pid and start timestamp.
     pub fn header(&self) -> HeaderFields {
         self.mapped.fields
-    }
-
-    /// Whether `dir/counters` is, now, the file this mapping is of.
-    pub fn is_named_in(&self, dir: &Path) -> bool {
-        FileId::at(&dir.join(FILE_NAME)).is_ok_and(|named| named == self.mapped.file)
-    }
-
-    /// Which file this mapping is of: the identity that a client's lock file carries in
-    /// its name, and that tells a mapping of this driver's counters file from one of
-    /// the driver before it ([`crate::client_lock`]).
-    pub fn file_id(&self) -> FileId {
-        self.mapped.file
     }
 
     /// How many counters the file holds; ids run from 0 to one below it.

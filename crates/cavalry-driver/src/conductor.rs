@@ -1107,12 +1107,12 @@ impl Conductor {
     ) -> Result<Self, DriverError> {
         let counters = CountersFile::create(dir, spec::COUNTERS_CAPACITY)?;
         // Where each client keeps its lock file (`spec/client-protocol.md`, "The records
-        // a client writes"), created after the counters file and before the command
-        // ring. After the counters file, because a lock file's name carries which
-        // counters file its client has mapped, and that tells this driver's clients
-        // from the last driver's only while both files are open: so no lock file is
-        // made here before this driver's counters file is. Before the command ring,
-        // because a client attaches when it finds the ring, and takes its lock here.
+        // a client writes"), created before the command ring: a client attaches when
+        // it finds the ring, opens a handle on this directory first, and makes its
+        // lock file through that handle. `prepare_dir` removed the directory of the
+        // driver before this one, with everything else it left, before anything here
+        // was created: a client of that driver holds a handle on a directory that is
+        // gone, and can make no file in this one.
         let clients = dir.join(CLIENT_LOCK_DIRECTORY);
         std::fs::create_dir(&clients).map_err(|source| DriverError::Io {
             what: "create the directory of the clients' locks",
@@ -1961,21 +1961,18 @@ impl Conductor {
             .map(|subscription| subscription.client_id)
     }
 
-    /// The path of client `client_id`'s lock file, as a client of this driver made
-    /// it: the name carries this driver's counters file, so a file that a client of
-    /// the driver before this one made here, under an id this driver gives out again,
-    /// has another name and is never looked at ([`cavalry_shm::client_lock`]).
+    /// The path of client `client_id`'s lock file. A file of that name in this
+    /// driver's `clients/` was made by this driver's client of that id and by no
+    /// other process: a client makes it through a handle on the directory, which a
+    /// client of the driver before this one cannot do here
+    /// ([`cavalry_shm::client_lock`]).
     fn client_lock_path(&self, client_id: i64) -> PathBuf {
-        self.counters
-            .file_id()
-            .client_file(&self.dir, client_id, CLIENT_LOCK_SUFFIX)
+        cavalry_shm::client_lock::path(&self.dir, client_id, CLIENT_LOCK_SUFFIX)
     }
 
     /// The path of the lock file of a client that has gone, as the driver renames it.
     fn client_gone_path(&self, client_id: i64) -> PathBuf {
-        self.counters
-            .file_id()
-            .client_file(&self.dir, client_id, CLIENT_GONE_SUFFIX)
+        cavalry_shm::client_lock::path(&self.dir, client_id, CLIENT_GONE_SUFFIX)
     }
 
     /// Tries the lock on the file at `path` once, without waiting, and lets go of it at
@@ -20167,46 +20164,6 @@ mod held {
         assert!(h.conductor.gone.is_empty());
         keepalive(&mut h, 7, 204);
         assert!(h.conductor.clients.iter().any(|client| client.id == 7));
-    }
-
-    /// A lock file under this client's id that names another counters file: what a
-    /// client of the driver before this one makes here, when it was stopped between
-    /// taking its id and making its file, and the driver was started again meanwhile.
-    /// It is not this client's lock, however long its maker holds it. The driver does
-    /// not look at it, does not rename it and never takes it for an answer.
-    #[test]
-    fn a_lock_file_that_names_another_counters_file_is_not_this_clients_lock() {
-        let mut h = Harness::new("held-other-driver");
-        // Any file that is open while the driver's counters file is has another
-        // identity; the command ring stands for the last driver's counters file.
-        let other = cavalry_shm::client_lock::FileId::at(&h.dir.path().join("command-ring"))
-            .expect("a file's identity");
-        let stray = other.client_file(h.dir.path(), 7, CLIENT_LOCK_SUFFIX);
-        assert_ne!(stray, h.conductor.client_lock_path(7));
-        let file = File::options()
-            .write(true)
-            .create_new(true)
-            .open(&stray)
-            .expect("the other client's file");
-        file.try_lock().expect("the other client's lock");
-        // This driver's client 7, which made no file of its own.
-        let record = add(&mut h, 7, 100);
-        assert_eq!(
-            h.counter(CLIENT_WITHOUT_LOCK),
-            1,
-            "another driver's client's lock is not this client's"
-        );
-        let now = h.now;
-        h.conductor.remove_client(7, now);
-        assert_eq!(h.counter(COUNTERS_HELD), 0);
-        assert_eq!(h.counter(COUNTERS_RETIRED), 1);
-        assert!(h.conductor.gone.is_empty());
-        // The other process ends. Nothing follows from it.
-        drop(file);
-        h.now += 100 * SECOND;
-        h.cycle();
-        assert!(held(&h, record), "out of use, and given to nobody");
-        assert!(stray.exists(), "the driver did not touch the file");
     }
 
     /// The table of held records at its capacity, which is the counters file's: one

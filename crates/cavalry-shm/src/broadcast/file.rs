@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use memmap2::{Mmap, MmapMut, MmapOptions};
 
-use crate::client_lock::FileId;
 use crate::pretouch;
 
 use super::BroadcastError;
@@ -41,8 +40,6 @@ struct Mapped {
     base: *const u8,
     length: usize,
     fields: HeaderFields,
-    /// Which file the mapping is of, read from the open file that was mapped.
-    file: FileId,
     writable: bool,
     /// Whether this process created the buffer: only the creator, the driver, transmits.
     created: bool,
@@ -59,12 +56,7 @@ unsafe impl Send for Mapped {}
 unsafe impl Sync for Mapped {}
 
 impl Mapped {
-    fn new(
-        mut map: Map,
-        fields: HeaderFields,
-        file: FileId,
-        created: bool,
-    ) -> Result<Self, BroadcastError> {
+    fn new(mut map: Map, fields: HeaderFields, created: bool) -> Result<Self, BroadcastError> {
         // The writer's pointer comes from `&mut [u8]`, so it keeps permission to write;
         // the map is never dereferenced again, so nothing invalidates it.
         let (base, length, writable) = match &mut map {
@@ -83,7 +75,6 @@ impl Mapped {
             base,
             length,
             fields,
-            file,
             writable,
             created,
             transmitter_taken: AtomicBool::new(false),
@@ -153,7 +144,6 @@ impl BroadcastBuffer {
             .open(dir.join(FILE_NAME))?;
         let length = fields.file_length();
         file.set_len(length)?;
-        let id = FileId::of(&file)?;
         // SAFETY: memmap2 marks mapping a file `unsafe` because another process could
         // truncate it under the mapping and turn a load into a fault. This call created
         // the file, in the driver's directory, the trust boundary every shared layout
@@ -161,7 +151,7 @@ impl BroadcastBuffer {
         // exists); a truncation is a fault, never silent misbehaviour.
         let map = unsafe { MmapOptions::new().len(length as usize).map_mut(&file)? };
         pretouch::writable(&map)?;
-        let mapped = Arc::new(Mapped::new(Map::Writer(map), fields, id, true)?);
+        let mapped = Arc::new(Mapped::new(Map::Writer(map), fields, true)?);
         mapped.trailer().publish(&fields);
         Ok(Self { mapped })
     }
@@ -177,7 +167,6 @@ impl BroadcastBuffer {
             .read(true)
             .write(writable)
             .open(dir.join(FILE_NAME))?;
-        let id = FileId::of(&file)?;
         let file_length = file.metadata()?.len();
         if file_length < TRAILER_LENGTH as u64 {
             return Err(BroadcastError::TooShort { given: file_length });
@@ -203,7 +192,7 @@ impl BroadcastBuffer {
             pretouch::readable(&map)?;
             Map::Reader(map)
         };
-        let mapped = Mapped::new(map, first, id, false)?;
+        let mapped = Mapped::new(map, first, false)?;
         let second = mapped.trailer().read(file_length)?;
         if second != first {
             return Err(BroadcastError::Changed);
@@ -216,18 +205,6 @@ impl BroadcastBuffer {
     /// The header's fields.
     pub fn header(&self) -> HeaderFields {
         self.mapped.fields
-    }
-
-    /// Whether `dir/broadcast-buffer` is, now, the file this mapping is of.
-    pub fn is_named_in(&self, dir: &Path) -> bool {
-        FileId::at(&dir.join(FILE_NAME)).is_ok_and(|named| named == self.mapped.file)
-    }
-
-    /// Which file this mapping is of. A client compares it with the file its driver's
-    /// directory names, to know that its broadcast buffer, its other two mappings and
-    /// every later mapping it opens are of one driver ([`crate::client_lock`]).
-    pub fn file_id(&self) -> FileId {
-        self.mapped.file
     }
 
     /// The buffer's capacity in bytes.

@@ -15,61 +15,63 @@
 //! through. It holds the client's shared state, which owns the client's lock, so no
 //! handle outlives the lock, whatever order the things around it are dropped in.
 
-use std::fs::File;
+use std::fs::{File, TryLockError};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cavalry_proto::client_protocol::CLIENT_LOCK_SUFFIX;
-use cavalry_shm::client_lock::FileId;
+use cavalry_shm::client_lock::ClientsDir;
 use cavalry_shm::counters::Counter;
 
 use crate::conductor::Shared;
 
-/// A client's lock: an exclusive advisory lock on the client's own file in `clients/`
-/// of the driver's directory, taken before the client's first command and held for as long
+/// A client's lock: an exclusive advisory lock on `clients/<client id>.lock` in the
+/// driver's directory, taken before the client's first command and held for as long
 /// as anything of the client that can store into a counter exists. Every such thing
 /// shares the client's state, which owns this, so the lock is let go when the last of
 /// them is dropped, and by the system when the process ends. The driver gives a
 /// closed or timed-out client's records to another owner when it holds this lock
 /// (`spec/client-protocol.md`, "The records a client writes"; ADR 0179).
 ///
-/// The file's name is the client's id and which counters file the client has mapped
-/// ([`cavalry_shm::client_lock`]). Ids begin again with each driver, and the path
-/// names whatever driver holds the directory when the file is made: a client that was
-/// stopped between taking its id and making its file, while the driver was started
-/// again, makes its file in the new driver's directory. The counters file in the name
-/// is the old driver's, so the new driver, which looks only at names that carry its
-/// own, never takes that file for the lock of its own client of the same id.
+/// The file is made through a handle on `clients/` that the client opened before it
+/// mapped any of the driver's files, and not by its path: so it is in the directory
+/// of the driver whose ring gave the client its id, whatever driver has started in
+/// that place since ([`cavalry_shm::client_lock`]).
 ///
 /// The client does not remove the file when it lets go: the driver does, once it has
 /// taken the lock.
+#[derive(Debug)]
 pub(crate) struct ClientLock {
     file: File,
     path: PathBuf,
 }
 
 impl ClientLock {
-    /// Creates the client's lock file and takes its lock, or returns `None` when the
-    /// directory has no `clients/`, the file cannot be created or the lock is refused:
-    /// the client attaches all the same, and the driver, which finds no lock held at
-    /// the client's first command, gives nothing of the client's that carries no
-    /// release word to another owner before it starts again.
+    /// Creates the lock file of client `client_id` through `clients` and takes its
+    /// lock. `dir` is the driver's directory, for the file's path in
+    /// [`ClientLock::abandon`].
     ///
-    /// `counters` is the counters file the client has mapped and will store into, and
-    /// the caller holds that mapping across this call: the name tells this client's
-    /// driver from another only while both drivers' counters files are open.
-    pub(crate) fn take(dir: &Path, client_id: i64, counters: FileId) -> Option<Self> {
-        let path = counters.client_file(dir, client_id, CLIENT_LOCK_SUFFIX);
-        let file = File::options()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .ok()?;
-        if file.try_lock().is_err() {
-            let _ = std::fs::remove_file(&path);
-            return None;
-        }
-        Some(Self { file, path })
+    /// An error is a client that has no lock, and a client without its lock sends no
+    /// command. `NotFound` is a directory that was removed: a driver has started in
+    /// its place, and the caller attaches again from the beginning, with a new id.
+    /// `AlreadyExists` is a name that some other hand has taken: the caller takes its
+    /// next id. A lock that the system refuses on the file this call has just made is
+    /// an error like any other; the file is left for the driver that starts next,
+    /// which removes the directory.
+    pub(crate) fn take(clients: &ClientsDir, dir: &Path, client_id: i64) -> io::Result<Self> {
+        let file = clients.create(client_id)?;
+        file.try_lock().map_err(|refused| match refused {
+            TryLockError::WouldBlock => io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "the lock file this client has just made is locked by another process",
+            ),
+            TryLockError::Error(error) => error,
+        })?;
+        Ok(Self {
+            file,
+            path: cavalry_shm::client_lock::path(dir, client_id, CLIENT_LOCK_SUFFIX),
+        })
     }
 
     /// Gives the lock up for a client that sent no command, so that the driver never
@@ -154,5 +156,66 @@ impl Drop for Owned {
 impl std::fmt::Debug for Owned {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Owned").field("id", &self.id()).finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use cavalry_proto::client_protocol::CLIENT_LOCK_DIRECTORY;
+
+    use super::*;
+
+    fn scratch(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cavalry-owned-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(CLIENT_LOCK_DIRECTORY)).expect("a directory");
+        dir
+    }
+
+    #[test]
+    fn a_clients_lock_is_held_on_its_file_until_it_is_dropped() {
+        let dir = scratch("held");
+        let clients = ClientsDir::open(&dir).expect("the handle");
+        let lock = ClientLock::take(&clients, &dir, 7).expect("the lock");
+        let path = cavalry_shm::client_lock::path(&dir, 7, CLIENT_LOCK_SUFFIX);
+        // As the driver tries it: a second open of the file, and a try that does not wait.
+        let tried = File::open(&path).expect("the file by its name");
+        assert!(matches!(tried.try_lock(), Err(TryLockError::WouldBlock)));
+        // The name is taken: a second client of that id is refused, and nothing of the
+        // first one's is touched.
+        let second = ClientLock::take(&clients, &dir, 7).expect_err("a second lock of one id");
+        assert_eq!(second.kind(), io::ErrorKind::AlreadyExists);
+        assert!(matches!(tried.try_lock(), Err(TryLockError::WouldBlock)));
+        drop(lock);
+        assert!(path.is_file(), "the client does not remove its file");
+        tried
+            .try_lock()
+            .expect("the lock is free once the client let go");
+        std::fs::remove_dir_all(&dir).expect("remove the directory");
+    }
+
+    /// A client of the driver before a restart, stopped between its id and its lock
+    /// file: continued, it makes no file in the directory of the driver that started,
+    /// under the id it took or any other, and is told that the directory is gone, so
+    /// that it attaches again from the beginning.
+    #[test]
+    fn a_lock_is_not_taken_in_the_directory_of_a_driver_that_started_since() {
+        let dir = scratch("restarted");
+        let clients = ClientsDir::open(&dir).expect("the earlier client's handle");
+        // The next driver starts: what the last one left goes, and its own is made.
+        std::fs::remove_dir_all(dir.join(CLIENT_LOCK_DIRECTORY)).expect("removed");
+        std::fs::create_dir(dir.join(CLIENT_LOCK_DIRECTORY)).expect("made again");
+        let refused = ClientLock::take(&clients, &dir, 7).expect_err("no lock there");
+        assert_eq!(refused.kind(), io::ErrorKind::NotFound);
+        assert_eq!(
+            std::fs::read_dir(dir.join(CLIENT_LOCK_DIRECTORY))
+                .expect("the new directory")
+                .count(),
+            0,
+            "the next driver's directory holds no file of the earlier client"
+        );
+        std::fs::remove_dir_all(&dir).expect("remove the directory");
     }
 }

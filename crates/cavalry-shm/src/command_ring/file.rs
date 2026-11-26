@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use memmap2::{Mmap, MmapMut, MmapOptions};
 
-use crate::client_lock::FileId;
 use crate::pretouch;
 
 use super::CommandRingError;
@@ -46,8 +45,6 @@ struct Mapped {
     base: *const u8,
     length: usize,
     fields: HeaderFields,
-    /// Which file the mapping is of, read from the open file that was mapped.
-    file: FileId,
     writable: bool,
     /// Whether this process created the ring: only the creator, the driver, consumes.
     created: bool,
@@ -64,12 +61,7 @@ unsafe impl Send for Mapped {}
 unsafe impl Sync for Mapped {}
 
 impl Mapped {
-    fn new(
-        mut map: Map,
-        fields: HeaderFields,
-        file: FileId,
-        created: bool,
-    ) -> Result<Self, CommandRingError> {
+    fn new(mut map: Map, fields: HeaderFields, created: bool) -> Result<Self, CommandRingError> {
         // The writer's pointer comes from `&mut [u8]`, so it keeps permission to write;
         // the map is never dereferenced again, so nothing invalidates it.
         let (base, length, writable) = match &mut map {
@@ -88,7 +80,6 @@ impl Mapped {
             base,
             length,
             fields,
-            file,
             writable,
             created,
             consumer_taken: AtomicBool::new(false),
@@ -207,7 +198,6 @@ impl CommandRing {
             .open(dir.join(FILE_NAME))?;
         let length = fields.file_length();
         file.set_len(length)?;
-        let id = FileId::of(&file)?;
         // SAFETY: memmap2 marks mapping a file `unsafe` because another process could
         // truncate it under the mapping and turn a load into a fault. This call created
         // the file, in the driver's directory, the trust boundary every shared layout
@@ -215,7 +205,7 @@ impl CommandRing {
         // exists); a truncation is a fault, never silent misbehaviour.
         let map = unsafe { MmapOptions::new().len(length as usize).map_mut(&file)? };
         pretouch::writable(&map)?;
-        let mapped = Arc::new(Mapped::new(Map::Writer(map), fields, id, true)?);
+        let mapped = Arc::new(Mapped::new(Map::Writer(map), fields, true)?);
         let trailer = mapped.trailer();
         trailer.heartbeat.store_release(fields.start_timestamp());
         trailer.publish(&fields);
@@ -233,7 +223,6 @@ impl CommandRing {
             .read(true)
             .write(writable)
             .open(dir.join(FILE_NAME))?;
-        let id = FileId::of(&file)?;
         let file_length = file.metadata()?.len();
         if file_length < TRAILER_LENGTH as u64 {
             return Err(CommandRingError::TooShort { given: file_length });
@@ -259,7 +248,7 @@ impl CommandRing {
             pretouch::readable(&map)?;
             Map::Reader(map)
         };
-        let mapped = Mapped::new(map, first, id, false)?;
+        let mapped = Mapped::new(map, first, false)?;
         let second = mapped.trailer().read(file_length)?;
         if second != first {
             return Err(CommandRingError::Changed);
@@ -282,18 +271,6 @@ impl CommandRing {
         Self {
             mapped: Arc::clone(&self.mapped),
         }
-    }
-
-    /// Whether `dir/command-ring` is, now, the file this mapping is of.
-    pub fn is_named_in(&self, dir: &Path) -> bool {
-        FileId::at(&dir.join(FILE_NAME)).is_ok_and(|named| named == self.mapped.file)
-    }
-
-    /// Which file this mapping is of. A client compares it with the file its driver's
-    /// directory names, to know that its command ring, its other two mappings and
-    /// every later mapping it opens are of one driver ([`crate::client_lock`]).
-    pub fn file_id(&self) -> FileId {
-        self.mapped.file
     }
 
     /// The ring's capacity in bytes.

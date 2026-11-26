@@ -1,80 +1,85 @@
-//! The name of a client's lock file in the driver's directory, and the identity of a
-//! file that it is built from (`spec/client-protocol.md`, "The records a client
-//! writes"; ADR 0179).
+//! Where a client's lock file is, and how a client makes it
+//! (`spec/client-protocol.md`, "The records a client writes"; ADR 0179).
 //!
 //! The driver gives the records of a client that has gone to other owners when it
-//! holds that client's lock, so the file it tries must be the one that client holds
-//! and no other process's. A client's id alone does not say that: ids begin again with
-//! each driver, and a client makes its file by a path, which names whatever driver
-//! holds the directory at that moment. So the name also carries which counters file
-//! the client has mapped, by the file's device and file numbers, and the driver looks
-//! only at names that carry its own.
+//! holds that client's lock, so the file it tries, `clients/<client id>.lock` in its
+//! directory, must be the file of its own client of that id and no other process's.
+//! A path does not say that. Client ids begin again with each driver, and a path
+//! names the directory of whichever driver holds it at that moment: a client that was
+//! stopped between taking its id and making its file, while the driver was started
+//! again, would make its file in the next driver's `clients/`, under an id that driver
+//! gives out again.
 //!
-//! That cannot name another driver's client, and no clock is in the reason. The system
-//! gives two files that exist at once on one device different file numbers. A client
-//! has its counters file open when it makes its lock file; a driver has created its own
-//! counters file before it creates `clients/`, and keeps it open for as long as it
-//! runs. So at the moment a lock file is made in a running driver's `clients/`, both
-//! counters files are open, and the two names agree only when the two are one file.
+//! So a client makes its lock file through a handle on `clients/` itself,
+//! [`ClientsDir`], which it opens before it maps any of the driver's files. A driver
+//! that starts removes `clients/` with everything else the driver before it left, and
+//! only then creates anything of its own; and no file can be made in a directory that
+//! has been removed. So when the file is made, the directory the handle is on was
+//! still there: the next driver had created nothing yet, and everything the client
+//! opened between the handle and the file is of the one driver whose `clients/` that
+//! is. No clock, no name and no file number is in that reason.
 
 use std::fs::File;
 use std::io;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use cavalry_proto::client_protocol::CLIENT_LOCK_DIRECTORY;
+use cavalry_proto::client_protocol::{CLIENT_LOCK_DIRECTORY, CLIENT_LOCK_SUFFIX};
+use nix::fcntl::{OFlag, openat};
+use nix::sys::stat::Mode;
 
-/// Which file a mapping is of: the device it is on and its file number there, read
-/// from the open file that was mapped. Two files that exist at the same time never
-/// share both, so two mappings that are held at once are of one file exactly when
-/// their identities are equal. A number is used again once its file is removed and no
-/// process has it open, so an identity is compared only with one that is held at the
-/// same time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct FileId {
-    device: u64,
-    number: u64,
+/// A handle on `clients/` of a driver's directory: on the directory that had that name
+/// when [`ClientsDir::open`] ran, whatever the name is given to afterwards.
+#[derive(Debug)]
+pub struct ClientsDir {
+    dir: File,
 }
 
-impl FileId {
-    /// The identity of the open file `file`.
-    pub fn of(file: &File) -> io::Result<Self> {
-        let metadata = file.metadata()?;
-        Ok(Self {
-            device: metadata.dev(),
-            number: metadata.ino(),
-        })
+impl ClientsDir {
+    /// Opens `dir/clients`. An error of kind `NotFound` is a directory with none: a
+    /// driver that is starting, or one of a version before the lock.
+    pub fn open(dir: &Path) -> io::Result<Self> {
+        let path = dir.join(CLIENT_LOCK_DIRECTORY);
+        let dir = File::open(&path)?;
+        if !dir.metadata()?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                format!("{} is not a directory", path.display()),
+            ));
+        }
+        Ok(Self { dir })
     }
 
-    /// The identity of the file that `path` names now.
-    pub fn at(path: &Path) -> io::Result<Self> {
-        let metadata = std::fs::metadata(path)?;
-        Ok(Self {
-            device: metadata.dev(),
-            number: metadata.ino(),
-        })
-    }
-
-    /// The path, in driver directory `dir`, of the file of client `client_id` of the
-    /// driver whose counters file this is, with `suffix`, `.lock` or `.gone`:
-    /// `clients/<client id>-<device>-<file number>` and the suffix, the two numbers
-    /// in hexadecimal.
-    pub fn client_file(&self, dir: &Path, client_id: i64, suffix: &str) -> PathBuf {
-        dir.join(CLIENT_LOCK_DIRECTORY).join(format!(
-            "{client_id}-{:x}-{:x}{suffix}",
-            self.device, self.number
-        ))
+    /// Creates the lock file of client `client_id`, `<client id>.lock`, empty, in the
+    /// directory this handle is on, and returns it open for writing. It is not locked
+    /// yet. The file is created, never opened: `AlreadyExists` when the name is taken.
+    /// `NotFound` when the directory has been removed, though another directory may
+    /// have its name by now: a driver has started there since the handle was opened.
+    pub fn create(&self, client_id: i64) -> io::Result<File> {
+        let name = format!("{client_id}{CLIENT_LOCK_SUFFIX}");
+        let file = openat(
+            &self.dir,
+            name.as_str(),
+            OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_CLOEXEC,
+            Mode::from_bits_truncate(0o666),
+        )?;
+        Ok(File::from(file))
     }
 }
 
-/// The client id in the name of a file of `clients/` with `suffix`, whichever counters
-/// file it names: the decimal number before the first hyphen. `None` for a name that
-/// is no such file.
+/// The path, in driver directory `dir`, of the file of client `client_id` with
+/// `suffix`, `.lock` or `.gone`: `clients/<client id>` and the suffix, the id in
+/// decimal. How the driver and `cavalry doctor` name a file, in the directory they
+/// read; a client makes its file through [`ClientsDir`] and not by this path.
+pub fn path(dir: &Path, client_id: i64, suffix: &str) -> PathBuf {
+    dir.join(CLIENT_LOCK_DIRECTORY)
+        .join(format!("{client_id}{suffix}"))
+}
+
+/// The client id in the name of a file of `clients/` with `suffix`: the decimal
+/// number before it, as [`path`] writes it. `None` for a name that is no such file.
 pub fn client_id(file_name: &str, suffix: &str) -> Option<i64> {
-    let (id, counters) = file_name.strip_suffix(suffix)?.split_once('-')?;
-    let (device, number) = counters.split_once('-')?;
-    let hexadecimal = |text: &str| u64::from_str_radix(text, 16).is_ok();
-    if !hexadecimal(device) || !hexadecimal(number) || id.starts_with('+') {
+    let id = file_name.strip_suffix(suffix)?;
+    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     id.parse().ok()
@@ -84,39 +89,33 @@ pub fn client_id(file_name: &str, suffix: &str) -> Option<i64> {
 mod tests {
     use super::*;
 
+    fn scratch(test: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("cavalry-client-lock-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(CLIENT_LOCK_DIRECTORY)).expect("a directory");
+        dir
+    }
+
     #[test]
-    fn a_name_carries_the_client_and_the_counters_files_identity() {
-        let id = FileId {
-            device: 0x0100_0004,
-            number: 0xabcd,
-        };
-        let path = id.client_file(Path::new("/d"), 41, ".lock");
-        assert_eq!(path, Path::new("/d/clients/41-1000004-abcd.lock"));
+    fn a_name_is_the_client_id_and_the_suffix() {
         assert_eq!(
-            id.client_file(Path::new("/d"), 41, ".gone"),
-            Path::new("/d/clients/41-1000004-abcd.gone")
+            path(Path::new("/d"), 41, ".lock"),
+            Path::new("/d/clients/41.lock")
         );
-        // Another counters file on the same device: no name of the one is a name of
-        // the other, for any client id.
-        let other = FileId {
-            device: 0x0100_0004,
-            number: 0xabce,
-        };
-        assert_ne!(
-            other.client_file(Path::new("/d"), 41, ".lock"),
-            id.client_file(Path::new("/d"), 41, ".lock")
+        assert_eq!(
+            path(Path::new("/d"), 41, ".gone"),
+            Path::new("/d/clients/41.gone")
         );
-        assert_eq!(client_id("41-1000004-abcd.lock", ".lock"), Some(41));
-        assert_eq!(client_id("41-1000004-abcd.gone", ".gone"), Some(41));
+        assert_eq!(client_id("41.lock", ".lock"), Some(41));
+        assert_eq!(client_id("41.gone", ".gone"), Some(41));
         for name in [
-            "41.lock",
-            "41-.lock",
-            "41-1000004.lock",
-            "41-1000004-.lock",
-            "41-x-abcd.lock",
-            "x-1-2.lock",
-            "+41-1-2.lock",
-            "41-1000004-abcd.gone",
+            "41.gone",
+            ".lock",
+            "x.lock",
+            "+41.lock",
+            "-41.lock",
+            "41-1.lock",
             "notes",
         ] {
             assert_eq!(client_id(name, ".lock"), None, "{name}");
@@ -124,23 +123,55 @@ mod tests {
     }
 
     #[test]
-    fn two_files_that_exist_at_once_have_different_identities_and_one_file_has_one() {
-        let dir = std::env::temp_dir().join(format!("cavalry-file-id-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("a directory");
-        let first = dir.join("first");
-        let second = dir.join("second");
-        let held = File::create(&first).expect("a file");
-        let other = File::create(&second).expect("another file");
-        let id = FileId::of(&held).expect("an open file's identity");
-        assert_eq!(FileId::at(&first).expect("the same file by its path"), id);
-        assert_ne!(FileId::of(&other).expect("the other's identity"), id);
-        // The name is given to another file while the first is still open: the path's
-        // identity is the new file's, and the open file keeps its own.
-        std::fs::remove_file(&first).expect("remove the name");
-        let again = File::create(&first).expect("a new file of that name");
-        assert_ne!(FileId::of(&again).expect("the new file's identity"), id);
-        assert_ne!(FileId::at(&first).expect("the path's identity"), id);
-        assert_eq!(FileId::of(&held).expect("the held file's identity"), id);
+    #[cfg_attr(miri, ignore)] // makes files in a directory, which Miri's isolation has none of
+    fn a_lock_file_is_made_through_the_handle_once() {
+        let dir = scratch("once");
+        let clients = ClientsDir::open(&dir).expect("the handle");
+        let file = clients.create(41).expect("the file is made");
+        assert_eq!(file.metadata().expect("its metadata").len(), 0);
+        assert!(path(&dir, 41, CLIENT_LOCK_SUFFIX).is_file());
+        let again = clients.create(41).expect_err("the name is taken");
+        assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            ClientsDir::open(&dir.join("nowhere"))
+                .expect_err("no such directory")
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        std::fs::remove_dir_all(&dir).expect("remove the directory");
+    }
+
+    /// What the whole rule stands on: a driver starts again, removes `clients/` and
+    /// makes it anew, and a client of the driver before it, which opened its handle
+    /// before that, makes no file in the new directory, under any id.
+    #[test]
+    #[cfg_attr(miri, ignore)] // makes files in a directory, which Miri's isolation has none of
+    fn no_file_is_made_through_a_handle_on_a_directory_that_was_removed() {
+        let dir = scratch("removed");
+        let earlier = ClientsDir::open(&dir).expect("the earlier client's handle");
+        earlier
+            .create(1)
+            .expect("made while the directory is there");
+        // The next driver: everything the last one left goes, and then its own.
+        std::fs::remove_dir_all(dir.join(CLIENT_LOCK_DIRECTORY)).expect("removed");
+        std::fs::create_dir(dir.join(CLIENT_LOCK_DIRECTORY)).expect("made again");
+        for id in [1, 2] {
+            let refused = earlier
+                .create(id)
+                .expect_err("a file was made in a directory that is gone");
+            assert_eq!(refused.kind(), io::ErrorKind::NotFound, "client {id}");
+            assert!(!path(&dir, id, CLIENT_LOCK_SUFFIX).exists());
+        }
+        assert_eq!(
+            std::fs::read_dir(dir.join(CLIENT_LOCK_DIRECTORY))
+                .expect("the new directory")
+                .count(),
+            0,
+            "the next driver's directory holds nothing of the earlier client"
+        );
+        // A client of the next driver opens its own handle and makes its file.
+        let next = ClientsDir::open(&dir).expect("the next client's handle");
+        next.create(1).expect("the next driver's client 1");
         std::fs::remove_dir_all(&dir).expect("remove the directory");
     }
 }

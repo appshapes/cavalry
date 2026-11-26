@@ -4129,11 +4129,9 @@ fn list_of(items: &[&str]) -> String {
 }
 
 /// The clients that have gone and whose lock the driver has not taken for
-/// [`GONE_CLIENT_SECONDS`], each with its file's name: the files of `clients/` that the
-/// driver renamed to end `.gone` and whose name is that old, by the time the file's
-/// entry last changed, in order of client id. Only the driver gives a file that name,
-/// and only to a lock file of its own client, so every such file is a client of the
-/// driver that runs. `now` is seconds since the Unix epoch.
+/// [`GONE_CLIENT_SECONDS`], each with its file's name: the files
+/// `clients/<client id>.gone` whose name is that old, by the time the file's entry
+/// last changed, in order of client id. `now` is seconds since the Unix epoch.
 fn gone_clients(dir: &Path, now: i64) -> Vec<(i64, String)> {
     use std::os::unix::fs::MetadataExt;
     let Ok(entries) = std::fs::read_dir(dir.join(CLIENT_LOCK_DIRECTORY)) else {
@@ -5892,25 +5890,16 @@ mod tests {
     #[test]
     fn a_client_that_has_gone_and_holds_its_lock_is_named_by_its_file() {
         let dir = TestDir::new("gone-client");
-        let counters = CountersFile::create(&dir.0, 256).expect("counters");
+        let _counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let clients = dir.0.join(CLIENT_LOCK_DIRECTORY);
         std::fs::create_dir(&clients).expect("the directory");
-        // The names as the driver gives them: the client's id and its counters file.
-        let gone = counters
-            .file_id()
-            .client_file(&dir.0, 41, CLIENT_GONE_SUFFIX);
-        let gone_name = gone
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("a name")
-            .to_owned();
-        std::fs::write(&gone, b"").expect("a gone client's file");
-        std::fs::write(counters.file_id().client_file(&dir.0, 40, ".lock"), b"")
-            .expect("a running client's file");
+        let gone_name = String::from("41.gone");
+        std::fs::write(clients.join(&gone_name), b"").expect("a gone client's file");
+        std::fs::write(clients.join("40.lock"), b"").expect("a running client's file");
         std::fs::write(clients.join("notes.gone"), b"").expect("a file that names no client");
-        std::fs::write(clients.join("39.gone"), b"").expect("a name of no counters file");
+        std::fs::write(clients.join("39-1.gone"), b"").expect("a name that is no client id");
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("after the epoch")
