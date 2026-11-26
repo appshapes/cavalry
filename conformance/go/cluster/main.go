@@ -71,11 +71,12 @@ const (
 	timerID      = int64(77) // the timer that is handed over
 	cancelledID  = int64(78) // the timer that is scheduled and cancelled in the same handling
 	// How long after the message's entry the timer is due, in the cluster's milliseconds. A
-	// second: a service tells its member of a timer only once the poll that took the entry
-	// has sent the six commands of its first timer, some 25 ms on a laptop and more on a
-	// busy host, so the event of a timer that was wrongly due at once is stamped tens of
-	// milliseconds after the message, 49 ms in the Python round's and the Node round's runs,
-	// and a margin of that size would let it pass. The round prints what it was in its own
+	// second: the event of a timer that is due at once is stamped tens of milliseconds
+	// after its message, the time an entry takes to be committed and read by a service on a
+	// laptop, and more on a busy host, so the event of a timer that was wrongly due at once
+	// is stamped that late, and a margin of that size would let it pass. Before ADR 0168 a
+	// service's first timer waited for its publication to its member too, 49 ms in the
+	// Python round's and the Node round's runs. The round prints what it was in its own
 	// run.
 	timerAfterMs = int64(1000)
 	hourMs       = int64(3600000)          // the deadline its first schedule gives it, which the second replaces

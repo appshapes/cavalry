@@ -311,8 +311,9 @@ ADR 0157):
 
 Both calls are one ABI call each, which allocates nothing and waits for nothing.
 What they changed is told to the service's member by the poll, once the handler
-has taken the entry, and the poll in which a program first schedules a timer
-sends six commands more, once in a service's life ("The call").
+has taken the entry. That poll sends the driver no command for it, a program's
+first timer included: the service added its counters and its publication to its
+member when it first opened its member's log ("The call"; ADR 0168).
 `conformance/node/cluster.js` schedules timers and cancels one beside three
 members; what it holds, and what rests on the library's own tests, is in
 `conformance/README.md`.
@@ -597,15 +598,15 @@ most.
 
 A cluster service's poll is the one per-message function that can wait for the driver.
 It sends commands with the service's client when it opens the member's log, at a
-session's opening, where a term's leader changes and at a recording's end, and six
-more once in a service's life, at the most, its five counters and its publication
-to its member, in the poll in which its program first schedules a timer or the
-service first passes a timer event over. It
+session's opening, where a term's leader changes and at a recording's end, and six more once in a service's life, its five counters and its
+publication to its member, in the poll that first opens the member's log, before
+that poll's entries (ADR 0168). It
 waits for each answer on the calling thread; a session message costs no command. A
 driver that refuses one of the six is that poll's −1, after the entries its handler
-took are taken, and the service adds them again at a later poll (ADR 0159). What a
-service tells its member of its timers after that, each pending timer again every
-second among it, is offered and waits for nothing. The
+took are taken, and the
+service adds them again before the entries of each poll after it (ADR 0159). What a
+service tells its member of its timers, each pending timer again every second among
+it, is offered and waits for nothing, a program's first timer too. The
 runner's cluster round reports the waits. On an Apple M5 Pro laptop (macOS 26.6.1,
 Node v24.16.0), in each of 10 runs, 7 of about 42,500 polls of three services took
 over 1 ms, where 4 of about 18,500 did in each of 25 runs before the round scheduled

@@ -1184,12 +1184,13 @@ class ClusterService {
    * while the service answers. Those are commands sent with the service's client, at a
    * session's opening, where a term's leader changes and at a recording's end, and the poll
    * waits for the driver's answer to each on the calling thread; none is sent for a session
-   * message. Six more are sent once in a service's life, at the most: its five counters and
-   * its publication to its member, in the poll in which the program first schedules a timer
-   * or the service first passes a timer event over, after that poll's entries, where a
-   * snapshot has not added them already; that poll returns -1 with the driver's refusal of
-   * one of them, after the entries its handler took are taken. After that the poll tells the
-   * member what each taken entry changed, and every pending timer again each second, by
+   * message. Six more are sent once in a service's life: its five counters and its
+   * publication to its member, in the poll that first opens the member's log, before
+   * that poll's entries, so that the poll which tells the member of the program's first
+   * timer sends none; that poll returns -1 with the driver's refusal of one of them,
+   * after the entries its handler took are taken, and each poll after it adds what is
+   * missing. After its entries a poll tells the member
+   * what each taken entry changed, and every pending timer again each second, by
    * offers that wait for nothing. When the handler threw, or returned what is no action, or the
    * runtime kept the entry from it, the addon's trampoline aborted the entry and this throws
    * `HandlerError` with `cluster` "service" after the ABI call returns: its `fragments` is the

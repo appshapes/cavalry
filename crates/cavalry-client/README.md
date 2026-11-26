@@ -247,8 +247,10 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   long as the stream takes its messages, and every pending timer again each
   second, so that a member that started again, or one that leads next, holds
   them: 2,048 messages in a poll at the most, the poll after a refresh of a full
-  table. A driver that refuses the service's publication on that stream is the
-  poll's error (ADR 0159). The pending
+  table. The service adds that publication, after its five counters, in the poll
+  that first opens its member's log, so the poll that tells of a program's first
+  timer sends the driver no command (ADR 0168). A driver that refuses the
+  publication is the poll's error (ADR 0159). The pending
   timers are in the service's snapshot and come back with `restore`. A program
   that schedules none pays a few compares for each entry and for each poll, and
   no copy, no clock's reading and no message. `cluster.service_timers`,
