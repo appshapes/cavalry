@@ -130,24 +130,29 @@ For the Python client:
   it. The licence is now a generated file of the package's directory, and a directory
   without it builds nothing. With that, the wheel is the same 361,232 bytes from both
   Pythons, through pip and from the backend run as a program.
-- **On CI's two runners**, run 45712527335 of a throwaway branch. Linux, Ubuntu
-  24.04 with Python 3.12.3, pip 24.0 and glibc 2.39: the wheel is
-  `cavalry_client-0.1.0-py3-none-manylinux_2_34_x86_64.whl`, 401,968 bytes around a
+- **On CI's two runners**, run 45735860574 of a throwaway branch that held this
+  change's tree at 1a27132e and one more workflow. Its jobs `package (linux)` and
+  `package (macos)` each ran `just package` twenty times in a row, and all forty
+  passed. Linux, Ubuntu 24.04 with Python 3.12.3, pip 24.0 and glibc 2.39: the wheel
+  is `cavalry_client-0.1.0-py3-none-manylinux_2_34_x86_64.whl`, 402,317 bytes around a
   library of 955,384, and `objdump` agrees that the newest symbol version the library
   needs is `GLIBC_2.34`; its `NEEDED` entries are `libgcc_s.so.1`, `libc.so.6` and
   `ld-linux-x86-64.so.2`. macOS on Apple silicon, Python 3.14.6 and pip 26.1.2:
-  `cavalry_client-0.1.0-py3-none-macosx_11_0_arm64.whl`, 360,185 bytes, and `otool`
-  agrees. Both ran the README's example in the new environment and printed its line,
-  and both controls failed as they must. The runner's own Python made the
-  environment on both: Ubuntu's `venv` module was there.
-- **With the library left out by the backend**, the same step fails: the two jobs of
-  that run that remove the backend's line for the library exited 1 at `does not hold
+  `cavalry_client-0.1.0-py3-none-macosx_11_0_arm64.whl`, 360,534 bytes around a
+  library of 844,864, and `otool` agrees: `minos 11.0`. Every run ran the README's
+  example in the new environment and printed its line, and every control failed as
+  it must. The runner's own Python made the environment on both: Ubuntu's `venv`
+  module was there.
+- **With the library left out by the backend**, the same step fails. That run reads
+  as failed for this reason alone: its two other jobs remove the backend's line for
+  the library and must fail, and they exited 1 at `does not hold
   cavalry/libcavalry_ffi.so with the bytes of` the built library, and the same for
   `.dylib`.
 - **The time.** With the driver and the library built, `just package` took 3.8 s on
-  the laptop and 3.4 s to 4.5 s on the Linux runner, twenty runs in a row. With the
-  build, from a warm cache of dependencies, it took 15.8 s on the Linux runner and
-  17.4 s on the macOS one. In a gates job the build is done by the steps before it.
+  the laptop, 3.4 s on the Linux runner and 3.4 s to 4.1 s on the macOS one, nineteen
+  runs in a row on each. With the build, from a warm cache of dependencies, the first
+  run took 9.6 s on the Linux runner and 12.7 s on the macOS one. In a gates job the
+  build is done by the steps before it.
 
 ## Consequences
 
