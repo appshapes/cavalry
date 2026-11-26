@@ -447,8 +447,16 @@ mod linux {
                 (Errno::EIO, false),
             ] {
                 let (path, file) = new_file("errno");
-                let error = sized_by(&file, 8192, |_| None, |_, _| Err(errno))
-                    .expect_err("the filesystem's error is the caller's");
+                let error = sized_by(
+                    &file,
+                    8192,
+                    |_| None,
+                    |_, _| {
+                        held();
+                        Err(errno)
+                    },
+                )
+                .expect_err("the filesystem's error is the caller's");
                 assert_eq!(error.kind(), io::Error::from(errno).kind(), "{errno}");
                 let said = error.to_string();
                 assert!(
