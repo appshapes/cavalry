@@ -60,12 +60,6 @@ impl WakeDue {
             && now.saturating_sub(due) > i64::try_from(OVERDUE.as_nanos()).unwrap_or(i64::MAX))
         .then_some(due)
     }
-
-    /// What the slot holds, for a test: a due time, or 0 for not parked.
-    #[cfg(test)]
-    pub(crate) fn raw(&self) -> i64 {
-        self.0.load(Ordering::Acquire)
-    }
 }
 
 /// What a client's conductor and its watch share.

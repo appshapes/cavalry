@@ -18,8 +18,8 @@ use cavalry_proto::client_protocol::{Command, Event};
 use cavalry_shm::broadcast::{BroadcastError, Receiver};
 use cavalry_shm::command_ring::layout::DRIVER_CLOSED;
 use cavalry_shm::command_ring::{CommandRing, CommandRingError, Producer};
-use cavalry_shm::counters::CountersWriter;
-use cavalry_shm::counters::generated::SUBSCRIPTION_POSITION;
+use cavalry_shm::counters::generated::{CLIENT_CONDUCTOR_PARKS_OVERDUE, SUBSCRIPTION_POSITION};
+use cavalry_shm::counters::{Counter, CountersWriter};
 use cavalry_shm::log::{LogBuffers, LogDirectory, LogError};
 use cavalry_shm::spsc;
 
@@ -28,6 +28,7 @@ use crate::recording::RecordingStop;
 use crate::replay::ReplayEnd;
 use crate::response::Response;
 use crate::subscription::{ImageEvent, Registration};
+use crate::watch::{Pair, WakeDue};
 
 /// How often a client sends `client keepalive` when it has sent nothing else
 /// (`spec/client-protocol.md`, "Liveness and timeouts").
@@ -210,7 +211,10 @@ impl Backoff {
         }
     }
 
-    fn idle(&mut self) {
+    /// `due` is where the conductor says when its park is to end, for the client's
+    /// watch (ADR 0177): two stores and a read of the clock around the park, and none
+    /// for a client that has no watch.
+    fn idle(&mut self, due: Option<&WakeDue>) {
         if self.spins < 10 {
             self.spins += 1;
             std::hint::spin_loop();
@@ -219,10 +223,25 @@ impl Backoff {
             std::thread::yield_now();
         } else {
             #[cfg(test)]
-            let park = PARK_FOR_TEST.get().unwrap_or(self.park);
+            let park = {
+                let held = PARK_FOR_TEST.get();
+                if PARK_FOR_TEST_ONCE.get() {
+                    PARK_FOR_TEST.set(None);
+                }
+                held.unwrap_or(self.park)
+            };
             #[cfg(not(test))]
             let park = self.park;
-            std::thread::park_timeout(park);
+            match due {
+                Some(due) => {
+                    // What was asked, not what a test makes of it: the watch ends a
+                    // park that outlived the timeout it was given.
+                    due.parking(nano_time(), self.park);
+                    std::thread::park_timeout(park);
+                    due.woke();
+                }
+                None => std::thread::park_timeout(park),
+            }
             self.park = (self.park * 2).min(Duration::from_millis(1));
         }
     }
@@ -242,6 +261,31 @@ thread_local! {
     /// passes only when something unparks the conductor.
     pub(crate) static PARK_FOR_TEST: std::cell::Cell<Option<Duration>> =
         const { std::cell::Cell::new(None) };
+    /// For a test: [`PARK_FOR_TEST`] is for the conductor's next park alone, so that it
+    /// parks as it should once that park has been ended.
+    pub(crate) static PARK_FOR_TEST_ONCE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    /// For a test: whether a client that this thread connects has a watch, in place of
+    /// what its system gives, and with it how long the watch's first park lasts in
+    /// place of a period. `Some(None)` is no watch; `Some(Some(None))` a watch;
+    /// `Some(Some(Some(hour)))` a watch whose first park is held.
+    pub(crate) static WATCH_FOR_TEST: std::cell::Cell<Option<Option<Option<Duration>>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The count of overdue parks as the conductor has published it (ADR 0177): nothing
+/// until the first one, then a counter of the client's own that the conductor adds
+/// with `add counter`, as any client adds one (ADR 0062), and stores the count in.
+enum OverduePublished {
+    /// No park was overdue yet: the client has no counter for it.
+    None,
+    /// `add counter` was sent with this correlation id, and its answer has not come.
+    Asked(i64),
+    /// The counter, and the count last stored in it.
+    Counter(Counter, u64),
+    /// The driver refused the counter, most likely for want of a record: the count
+    /// stays in the process.
+    Refused,
 }
 
 /// The conductor's state: its own producer on the ring, the one receiver on the
@@ -262,6 +306,46 @@ pub(crate) struct Conductor {
     recordings: RecordingRegistry,
     client_id: i64,
     scratch: Vec<u8>,
+    /// What this conductor shares with the client's watch, where the client has one.
+    pair: Option<Arc<Pair>>,
+    /// The count of overdue parks as published.
+    overdue: OverduePublished,
+}
+
+/// Takes the driver's answer to the conductor's own `add counter`, when the event is
+/// that answer: the counter, in which the count is stored at the next pass, or a
+/// refusal, after which the count stays in the process. Every other event is left as
+/// it is, and is decoded here only while that answer is awaited.
+fn own_answer(
+    overdue: &mut OverduePublished,
+    counters: &CountersWriter,
+    type_id: i32,
+    message: &[u8],
+) {
+    let OverduePublished::Asked(asked) = *overdue else {
+        return;
+    };
+    match Event::parse(type_id, message) {
+        Ok(Event::CounterReady {
+            correlation_id,
+            counter_id,
+        }) if correlation_id == asked => {
+            *overdue = match u32::try_from(counter_id)
+                .ok()
+                .and_then(|id| counters.counter(id).ok())
+            {
+                Some(counter) => OverduePublished::Counter(counter, 0),
+                None => OverduePublished::Refused,
+            };
+        }
+        Ok(Event::Error {
+            offending_correlation_id,
+            ..
+        }) if offending_correlation_id == asked => {
+            *overdue = OverduePublished::Refused;
+        }
+        _ => {}
+    }
 }
 
 impl Conductor {
@@ -295,30 +379,99 @@ impl Conductor {
             recordings: RecordingRegistry::with_capacity(RECORDING_REGISTRY),
             client_id,
             scratch: vec![0u8; COMMAND_SCRATCH],
+            pair: None,
+            overdue: OverduePublished::None,
         }
+    }
+
+    /// Gives the conductor the client's watch.
+    pub(crate) fn watched(mut self, pair: Option<Arc<Pair>>) -> Self {
+        self.pair = pair;
+        self
     }
 
     /// The loop: until the client is closed by either thread.
     pub(crate) fn run(mut self) {
         let mut backoff = Backoff::new();
+        let pair = self.pair.clone();
+        if let Some(pair) = &pair {
+            let _ = pair.conductor_thread.set(std::thread::current());
+        }
+        // The due time of the watch's park last counted (ADR 0177).
+        let mut counted = 0;
         while self.shared.closed().is_none() {
             let epoch = epoch_time();
             if let Some(reason) = self.liveness(epoch) {
                 self.shared.close(reason);
                 break;
             }
-            let work = match self.duty_cycle(epoch, nano_time()) {
+            let now = nano_time();
+            let work = match self.duty_cycle(epoch, now) {
                 Ok(work) => work,
                 Err(reason) => {
                     self.shared.close(reason);
                     break;
                 }
             };
+            if let Some(pair) = &pair {
+                self.publish_overdue(pair, epoch);
+            }
             if work == 0 {
-                backoff.idle();
+                if let Some(pair) = &pair {
+                    pair.conductor_looks(now, &mut counted);
+                }
+                backoff.idle(pair.as_deref().map(|pair| &pair.conductor));
             } else {
                 backoff.reset();
             }
+        }
+    }
+
+    /// Publishes the count of overdue parks when it has moved: one load and one
+    /// compare on a pass where it has not. The first time, the conductor adds the
+    /// client's counter for it, and stores the count once the driver has answered.
+    fn publish_overdue(&mut self, pair: &Pair, epoch: i64) {
+        let total = pair.parks_overdue.load(Ordering::Acquire);
+        match &mut self.overdue {
+            OverduePublished::None if total > 0 => {
+                let correlation_id = self.producer.next_correlation_id();
+                let key = self.client_id.to_le_bytes();
+                let mut label = [0u8; 64];
+                let label = {
+                    use std::io::Write;
+                    let mut rest = &mut label[..];
+                    let _ = write!(rest, "client.conductor_parks_overdue {}", self.client_id);
+                    let used = 64 - rest.len();
+                    &label[..used]
+                };
+                let command = Command::AddCounter {
+                    client_id: self.client_id,
+                    correlation_id,
+                    type_id: CLIENT_CONDUCTOR_PARKS_OVERDUE.0,
+                    key: &key,
+                    label,
+                };
+                let Ok(length) = command.write(&mut self.scratch) else {
+                    return;
+                };
+                // A full ring, or a claim that was unblocked, leaves it to a later pass.
+                if self
+                    .producer
+                    .write(
+                        command.command_type() as i32,
+                        &self.scratch[..length],
+                        epoch,
+                    )
+                    .is_ok()
+                {
+                    self.overdue = OverduePublished::Asked(correlation_id);
+                }
+            }
+            OverduePublished::Counter(counter, stored) if *stored != total => {
+                counter.store_release(i64::try_from(total).unwrap_or(i64::MAX));
+                *stored = total;
+            }
+            _ => {}
         }
     }
 
@@ -433,8 +586,13 @@ impl Conductor {
             let recordings = &self.recordings;
             let registrations = &mut self.registrations;
             let registry = &mut self.registry;
+            let overdue = &mut self.overdue;
+            let counters = &self.counters;
             let mut outcome = Ok(Outcome::Nothing);
             let got = self.receiver.receive(|type_id, message| {
+                // The answer to the conductor's own `add counter`, which is nobody's
+                // pending command and which `event` passes over (ADR 0177).
+                own_answer(overdue, counters, type_id, message);
                 outcome = event(
                     client_id,
                     shared.pending(),
@@ -1218,10 +1376,120 @@ mod tests {
     use crate::response::Response;
     use crate::subscription::{ImageEvent, Registration, Retired};
 
+    const HOUR: std::time::Duration = std::time::Duration::from_secs(3600);
+
+    /// A driver on a directory of its own for a test of the client's watch.
+    fn watch_test_driver(test: &str) -> (std::path::PathBuf, cavalry_driver::Driver) {
+        let dir = std::env::temp_dir().join(format!(
+            "cavalry-client-conductor-{test}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let driver = cavalry_driver::Driver::start(&dir, dir.join("log")).expect("the driver");
+        (dir, driver)
+    }
+
+    /// The value of the counter `client.conductor_parks_overdue` that client
+    /// `client_id` added in the driver's counters file, when it has added one.
+    fn conductor_parks_overdue(dir: &std::path::Path, client_id: i64) -> Option<i64> {
+        let counters = cavalry_shm::counters::CountersReader::open(dir).expect("the counters");
+        (0..counters.capacity()).find_map(|id| match counters.record(id) {
+            Ok(Some(fields))
+                if fields.type_id()
+                    == cavalry_shm::counters::generated::CLIENT_CONDUCTOR_PARKS_OVERDUE.0
+                    && fields.key()[..8] == client_id.to_le_bytes() =>
+            {
+                Some(counters.read(id).expect("its value"))
+            }
+            _ => None,
+        })
+    }
+
+    /// Waits for `what`, or panics with `failure` after 20 s.
+    fn wait_within<T>(failure: &str, mut what: impl FnMut() -> Option<T>) -> T {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            if let Some(found) = what() {
+                return found;
+            }
+            assert!(std::time::Instant::now() < deadline, "{failure}");
+            std::thread::park_timeout(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// A client's watch ends a park of its conductor that outlived its timeout, and
+    /// the client counts it where `doctor` reads it (ADR 0177). The conductor's first
+    /// park lasts an hour here, which stands for the park whose timeout never comes.
+    /// Until it is ended the client has no counter for it. The watch unparks the
+    /// conductor, which adds the client's counter and stores 1 in it: only a conductor
+    /// that went on can do either. The count stays 1, and the client takes a command
+    /// as before.
+    #[test]
+    fn the_watch_ends_the_conductors_park_and_the_conductor_counts_it_in_its_own_counter() {
+        let (dir, driver) = watch_test_driver("watch-ends-conductor");
+        super::WATCH_FOR_TEST.set(Some(Some(None)));
+        super::PARK_FOR_TEST.set(Some(HOUR));
+        super::PARK_FOR_TEST_ONCE.set(true);
+        let mut client = crate::Cavalry::connect_to(&dir).expect("connects");
+        super::WATCH_FOR_TEST.set(None);
+        super::PARK_FOR_TEST.set(None);
+        super::PARK_FOR_TEST_ONCE.set(false);
+        let client_id = client.client_id();
+        assert_eq!(
+            conductor_parks_overdue(&dir, client_id),
+            None,
+            "no counter before a park was overdue"
+        );
+        wait_within(
+            "the watch did not end the conductor's park, or the conductor did not count it",
+            || (conductor_parks_overdue(&dir, client_id) == Some(1)).then_some(()),
+        );
+        std::thread::park_timeout(std::time::Duration::from_millis(500));
+        assert_eq!(
+            conductor_parks_overdue(&dir, client_id),
+            Some(1),
+            "one park, counted once"
+        );
+        let publication = client
+            .add_publication("cavalry:ipc", 2413)
+            .expect("the client takes a command after its conductor was woken");
+        drop(publication);
+        client.close().expect("closes");
+        assert_eq!(
+            conductor_parks_overdue(&dir, client_id),
+            None,
+            "the driver freed the client's counter at its close"
+        );
+        driver.close().expect("the driver closes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A client's conductor ends the park of its watch when that outlived its timeout,
+    /// and counts it once (ADR 0177). The watch's first park lasts an hour here, and
+    /// the conductor is not held: a watch that is parked counts nothing, so the count
+    /// is the conductor's.
+    #[test]
+    fn the_conductor_ends_its_watchs_park_and_counts_it_once() {
+        let (dir, driver) = watch_test_driver("conductor-ends-watch");
+        super::WATCH_FOR_TEST.set(Some(Some(Some(HOUR))));
+        let client = crate::Cavalry::connect_to(&dir).expect("connects");
+        super::WATCH_FOR_TEST.set(None);
+        let client_id = client.client_id();
+        wait_within("the conductor did not end its watch's park", || {
+            (conductor_parks_overdue(&dir, client_id) == Some(1)).then_some(())
+        });
+        std::thread::park_timeout(std::time::Duration::from_millis(500));
+        assert_eq!(conductor_parks_overdue(&dir, client_id), Some(1));
+        client.close().expect("closes");
+        driver.close().expect("the driver closes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A close does not wait on the conductor's park to time out (ADR 0171). The
     /// conductor's backoff parks for an hour here, which stands for the park whose
-    /// timeout never comes, so `close` returns in time only if it unparks the
-    /// conductor's thread after it stores the closed state.
+    /// timeout never comes, and the client has no watch, so `close` returns in time
+    /// only if it unparks the conductor's thread after it stores the closed state.
+    /// A client with no watch adds no counter.
     #[test]
     fn close_ends_the_conductor_though_its_park_would_not_time_out() {
         let dir = std::env::temp_dir().join(format!(
@@ -1230,11 +1498,16 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         let driver = cavalry_driver::Driver::start(&dir, dir.join("log")).expect("the driver");
+        super::WATCH_FOR_TEST.set(Some(None));
         super::PARK_FOR_TEST.set(Some(std::time::Duration::from_secs(3600)));
         let client = crate::Cavalry::connect_to(&dir).expect("connects");
+        super::WATCH_FOR_TEST.set(None);
         super::PARK_FOR_TEST.set(None);
-        // Long enough for the conductor to spend its spins and yields and park.
-        std::thread::park_timeout(std::time::Duration::from_millis(200));
+        let client_id = client.client_id();
+        // Long enough for the conductor to spend its spins and yields and park, and for
+        // a watch, had there been one, to have ended that park.
+        std::thread::park_timeout(std::time::Duration::from_millis(600));
+        assert_eq!(conductor_parks_overdue(&dir, client_id), None);
         let (closed, close) = std::sync::mpsc::channel();
         let closer = std::thread::spawn(move || {
             let _ = closed.send(client.close());

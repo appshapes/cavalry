@@ -188,6 +188,8 @@ pub struct Cavalry {
     replay_registrations: spsc::Producer<ReplayRegistration>,
     recording_registrations: spsc::Producer<RecordingRegistration>,
     conductor: Option<JoinHandle<()>>,
+    /// The client's watch, where it has one (ADR 0177).
+    watch: Option<JoinHandle<()>>,
     scratch: Vec<u8>,
 }
 
@@ -315,13 +317,30 @@ impl Cavalry {
             recording_registration_consumer,
             client_id,
         );
+        // The client's watch, where it has one: a second thread that ends a park of
+        // the conductor that outlived its timeout, as the conductor ends the watch's
+        // (ADR 0177). On macOS, where a timed wait has been seen to outlive its timer
+        // (ADR 0171), and nowhere else; a test chooses for itself.
+        let watching = cfg!(target_os = "macos");
         #[cfg(test)]
-        let park_for_test = crate::conductor::PARK_FOR_TEST.get();
+        let watching = crate::conductor::WATCH_FOR_TEST
+            .get()
+            .map_or(watching, |watch| watch.is_some());
+        let pair = watching.then(|| Arc::new(crate::watch::Pair::new()));
+        let conductor = conductor.watched(pair.clone());
+        #[cfg(test)]
+        let park_for_test = (
+            crate::conductor::PARK_FOR_TEST.get(),
+            crate::conductor::PARK_FOR_TEST_ONCE.get(),
+        );
         let handle = std::thread::Builder::new()
             .name("cavalry-client-conductor".to_string())
             .spawn(move || {
                 #[cfg(test)]
-                crate::conductor::PARK_FOR_TEST.set(park_for_test);
+                {
+                    crate::conductor::PARK_FOR_TEST.set(park_for_test.0);
+                    crate::conductor::PARK_FOR_TEST_ONCE.set(park_for_test.1);
+                }
                 conductor.run()
             })
             .map_err(|source| ClientError::Io {
@@ -329,6 +348,38 @@ impl Cavalry {
                 path: dir.clone(),
                 source,
             })?;
+        // The watch after the conductor, which it looks at. A watch that cannot be
+        // started closes the client and ends the conductor: a client is not left
+        // without the thread its system needs.
+        let watch = match pair {
+            None => None,
+            Some(pair) => {
+                #[cfg(test)]
+                let first_park = crate::conductor::WATCH_FOR_TEST.get().flatten().flatten();
+                #[cfg(not(test))]
+                let first_park = None;
+                let watched = Arc::clone(&shared);
+                let for_watch = Arc::clone(&pair);
+                match std::thread::Builder::new()
+                    .name("cavalry-client-watch".to_string())
+                    .spawn(move || {
+                        let _ = for_watch.watch_thread.set(std::thread::current());
+                        for_watch.watch(nano_time, || watched.closed().is_some(), first_park);
+                    }) {
+                    Ok(watch) => Some(watch),
+                    Err(source) => {
+                        shared.close(Closed::ByUser);
+                        handle.thread().unpark();
+                        let _ = handle.join();
+                        return Err(ClientError::Io {
+                            what: "start the client watch thread",
+                            path: dir.clone(),
+                            source,
+                        });
+                    }
+                }
+            }
+        };
         Ok(Self {
             dir,
             client_id,
@@ -342,6 +393,7 @@ impl Cavalry {
             replay_registrations,
             recording_registrations,
             conductor: Some(handle),
+            watch,
             scratch,
         })
     }
@@ -1678,6 +1730,12 @@ impl Cavalry {
             // that park, so the join does not wait on the park's timeout: on one Mac a
             // wait of 1 ms in about 40 million did not return until its thread was
             // woken, and this join then waited for ever (ADR 0171).
+            handle.thread().unpark();
+            let _ = handle.join();
+        }
+        // The watch reads the closed state after each park, of a tenth of a second at
+        // most; the unpark ends that park.
+        if let Some(handle) = self.watch.take() {
             handle.thread().unpark();
             let _ = handle.join();
         }
