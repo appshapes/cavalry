@@ -316,14 +316,128 @@ fn magic_when_the_file_is_another_layout() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn version_when_the_file_is_from_another_cavalry() {
-    let dir = Dir::new("version");
-    file_with_header(&dir, |header| header[8] = 1);
+    // A file of version 0, which a driver before ADR 0179 wrote: a client of this build
+    // does not attach to it, and stores nothing there. The message says that the
+    // driver is the older side and what to do (`spec/client-protocol.md`, "Crossing to
+    // this version").
+    let dir = Dir::new("version-0");
+    file_with_header(&dir, |header| header[8] = 0);
+    for error in [
+        CountersReader::open(dir.path()).unwrap_err(),
+        CountersWriter::open(dir.path()).unwrap_err(),
+    ] {
+        assert!(
+            matches!(error, CountersError::Version { found: 0 }),
+            "{error}"
+        );
+        assert_eq!(error.reason(), "version");
+        let said = error.to_string();
+        for part in [
+            "version 0, this program reads version 1",
+            "the driver of this directory is of an older build of Cavalry than this program",
+            "Stop that driver and every client of it, and start them from this program's build, \
+             the driver first",
+            "docs/reference/counters-file.md#what-a-reader-rejects",
+        ] {
+            assert!(said.contains(part), "{part}: {said}");
+        }
+    }
+    // And a file of a later version: this program is the older side.
+    let dir = Dir::new("version-2");
+    file_with_header(&dir, |header| header[8] = 2);
     let error = CountersReader::open(dir.path()).unwrap_err();
     assert!(
-        matches!(error, CountersError::Version { found: 1 }),
+        matches!(error, CountersError::Version { found: 2 }),
         "{error}"
     );
-    assert_eq!(error.reason(), "version");
+    let said = error.to_string();
+    for part in [
+        "version 2, this program reads version 1",
+        "this program is of an older build of Cavalry than the driver of this directory",
+        "start them from the driver's build, the driver first",
+    ] {
+        assert!(said.contains(part), "{part}: {said}");
+    }
+}
+
+/// A record whose value a client writes is held when it is freed, and is given out
+/// again only when its writer has stored the release word, however much time has
+/// passed (`spec/counters-file.md`, "Metadata record" and "Value slot"; ADR 0179).
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_held_record_is_given_out_only_when_its_writer_has_let_it_go() {
+    let dir = Dir::new("held");
+    let mut file = CountersFile::create(dir.path(), CAPACITY).unwrap();
+    let reader = CountersReader::open(dir.path()).unwrap();
+    let writer = CountersWriter::open(dir.path()).unwrap();
+    let free = free_records(64);
+    let (a, b, c) = (free[0], free[1], free[2]);
+    assert_eq!(
+        file.allocate(INSTANCE, &[1], "image.gaps 1").unwrap().id(),
+        a
+    );
+    // The client's handle, taken while the record is allocated, as it takes it.
+    let handle = writer.counter(a).unwrap();
+    handle.store_release(64_000);
+    assert!(!file.released(a).unwrap(), "allocated with the word at 0");
+
+    file.hold(a).unwrap();
+    assert!(
+        reader.record(a).unwrap().is_none(),
+        "a held record is no counter to a reader, at once"
+    );
+    assert!(matches!(reader.read(a).unwrap_err(), CountersError::Unallocated { id } if id == a));
+    assert_eq!(
+        file.allocate(INSTANCE, &[2], "image.gaps 2").unwrap().id(),
+        b,
+        "a held record is not given out, whatever the clock reads"
+    );
+    // The writer stores on, as a thread that was not told yet does: into its own record.
+    handle.store_release(64_032);
+    assert!(!file.released(a).unwrap());
+    assert!(
+        matches!(file.let_go(b, 0).unwrap_err(), CountersError::NotHeld { id } if id == b),
+        "an allocated record is not held"
+    );
+    assert_eq!(
+        file.let_go(b, 0).unwrap_err().reason(),
+        "not-held",
+        "and the refusal has its name"
+    );
+
+    // Its last store is the word. Then, and only then, the driver gives the record a
+    // deadline, and the next allocation past it takes the record.
+    handle.release();
+    assert!(file.released(a).unwrap());
+    file.let_go(a, i64::MAX - 1).unwrap();
+    assert_eq!(
+        file.allocate(INSTANCE, &[3], "image.gaps 3").unwrap().id(),
+        c,
+        "let go, and its deadline is ahead"
+    );
+    assert!(
+        matches!(file.let_go(a, 0).unwrap_err(), CountersError::NotHeld { id } if id == a),
+        "a record is let go once"
+    );
+    file.free(c, 0).unwrap();
+    file.hold(b).unwrap();
+    assert!(matches!(file.hold(b).unwrap_err(), CountersError::Unallocated { id } if id == b));
+    // A record the client holds no handle on is released by its id.
+    assert!(!file.released(b).unwrap());
+    writer.release(b).unwrap();
+    assert!(file.released(b).unwrap());
+    assert!(matches!(
+        writer.release(CAPACITY).unwrap_err(),
+        CountersError::Id { .. }
+    ));
+    file.let_go(b, 0).unwrap();
+    let again = file.allocate(INSTANCE, &[4], "image.gaps 4").unwrap();
+    assert_eq!(again.id(), b, "the first record that is free again");
+    assert!(
+        !file.released(b).unwrap(),
+        "an allocation sets the release word to 0 with the value"
+    );
+    assert_eq!(reader.read(b).unwrap(), 0);
 }
 
 #[test]

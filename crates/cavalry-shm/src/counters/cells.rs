@@ -144,6 +144,13 @@ impl RecordCells {
         self.state.store(State::Reclaimed as i32, Ordering::Release);
     }
 
+    /// The driver's protocol for a held record whose writer has let it go: the deadline
+    /// alone, which only the driver reads. The state is -1 already.
+    pub(crate) fn set_reclaim_deadline(&self, reusable_after: i64) {
+        self.reclaim_deadline
+            .store(reusable_after, Ordering::Relaxed);
+    }
+
     /// The state, with an acquire load, or [`CountersError::State`] for a value the spec
     /// does not name.
     pub(crate) fn state(&self) -> Result<State, CountersError> {
@@ -180,17 +187,21 @@ impl RecordCells {
     }
 }
 
-/// A 128-byte value slot: the value, then bytes nobody reads. The alignment is the
-/// slot's own, so two counters never share the 128 bytes a core moves at once
-/// (ADR 0011, applied by ADR 0012).
+/// A 128-byte value slot: the value, the release word, then bytes nobody reads. The
+/// alignment is the slot's own, so two counters never share the 128 bytes a core moves
+/// at once (ADR 0011, applied by ADR 0012). The release word shares the value's line:
+/// its one store is the last store its writer makes to the slot, so nothing contends
+/// with it (version 1; ADR 0179).
 #[repr(C, align(128))]
 pub(crate) struct SlotCells {
     value: AtomicI64,
-    reserved: UnsafeCell<[u8; SLOT_LENGTH - 8]>,
+    released: AtomicI64,
+    reserved: UnsafeCell<[u8; SLOT_LENGTH - 16]>,
 }
 
-// SAFETY: `value` is an atomic; `reserved` is written by the driver, the sole writer,
-// only while the slot's record is not allocated, and read by nobody (spec, "Value slot").
+// SAFETY: `value` and `released` are atomics; `reserved` is written by the driver, the
+// sole writer, only while the slot's record is not allocated, and read by nobody (spec,
+// "Value slot").
 unsafe impl Sync for SlotCells {}
 
 impl SlotCells {
@@ -199,18 +210,34 @@ impl SlotCells {
     pub(crate) fn zeroed() -> Self {
         Self {
             value: AtomicI64::new(0),
-            reserved: UnsafeCell::new([0; SLOT_LENGTH - 8]),
+            released: AtomicI64::new(0),
+            reserved: UnsafeCell::new([0; SLOT_LENGTH - 16]),
         }
     }
 
-    /// Allocation: the value 0 and the reserved bytes 0, before the record is published.
+    /// Allocation: the value 0, the release word 0 and the reserved bytes 0, before the
+    /// record is published.
     pub(crate) fn reset(&self) {
         // SAFETY: nobody reads `reserved` (spec, "Value slot": written as 0 at
         // allocation, never read), and the driver, the sole writer, resets a slot only
         // while its record's state is not 1, so no reader reads the slot at all.
         self.reserved
-            .with_mut(|p| unsafe { p.write([0; SLOT_LENGTH - 8]) });
+            .with_mut(|p| unsafe { p.write([0; SLOT_LENGTH - 16]) });
+        self.released.store(0, Ordering::Relaxed);
         self.value.store(0, Ordering::Relaxed);
+    }
+
+    /// The writer's last store to the slot: the release word, 1, with a release store,
+    /// so that every store this thread made to the value happens before a driver's
+    /// acquire load of the word (spec, "Value slot"; ADR 0179).
+    pub(crate) fn release(&self) {
+        self.released.store(1, Ordering::Release);
+    }
+
+    /// Whether the slot's writer has let it go: the release word is 1, with an acquire
+    /// load. Any other value reads as not released, which keeps the record held.
+    pub(crate) fn released(&self) -> bool {
+        self.released.load(Ordering::Acquire) == 1
     }
 
     /// Adds `n`, relaxed: the one operation on the data plane.
@@ -254,6 +281,7 @@ const _: () = {
     assert!(core::mem::offset_of!(RecordCells, reclaim_deadline) == 8);
     assert!(core::mem::offset_of!(RecordCells, tail) == TAIL_OFFSET);
     assert!(size_of::<SlotCells>() == SLOT_LENGTH);
+    assert!(core::mem::offset_of!(SlotCells, released) == 8);
     assert!(align_of::<SlotCells>() == SLOT_LENGTH);
 };
 
@@ -314,6 +342,23 @@ mod tests {
         cells.reset();
         assert_eq!(cells.get(), 0);
     }
+
+    #[test]
+    fn a_slots_release_word_is_stored_once_by_its_writer_and_cleared_by_an_allocation() {
+        let cells = SlotCells::zeroed();
+        cells.set_release(64);
+        assert!(!cells.released());
+        cells.release();
+        assert!(cells.released());
+        assert_eq!(
+            cells.get(),
+            64,
+            "the word is beside the value, and moves nothing"
+        );
+        cells.reset();
+        assert!(!cells.released());
+        assert_eq!(cells.get(), 0);
+    }
 }
 
 #[cfg(loom)]
@@ -360,6 +405,31 @@ mod loom_tests {
                 }
             }
             creator.join().unwrap();
+        });
+    }
+
+    /// A writer in a client stores its last value and then the release word, with a
+    /// release store; a driver that acquires the word sees that last value, and may
+    /// then give the slot to another owner: nothing of the writer's comes after the
+    /// word (ADR 0179). loom fails this if the word's store or its load is relaxed.
+    #[test]
+    fn a_driver_that_acquires_the_release_word_sees_the_writers_last_store() {
+        loom::model(|| {
+            let cells = Arc::new(SlotCells::zeroed());
+            let writer = {
+                let cells = Arc::clone(&cells);
+                thread::spawn(move || {
+                    cells.set_release(64);
+                    cells.release();
+                })
+            };
+            if cells.released() {
+                assert_eq!(cells.get_acquire(), 64);
+                cells.reset();
+                assert_eq!(cells.get(), 0);
+                assert!(!cells.released());
+            }
+            writer.join().unwrap();
         });
     }
 

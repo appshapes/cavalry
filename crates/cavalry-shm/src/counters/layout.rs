@@ -17,8 +17,13 @@ pub const RECORD_LENGTH: usize = 256;
 pub const SLOT_LENGTH: usize = 128;
 /// The first eight bytes of a counters file, `CVLYCNTR`, written last by the creator.
 pub const MAGIC: [u8; 8] = *b"CVLYCNTR";
-/// The version of `spec/counters-file.md` this crate reads and writes.
-pub const VERSION: i32 = 0;
+/// The version of `spec/counters-file.md` this crate reads and writes. Version 1 gave
+/// the value slot its release word (ADR 0179).
+pub const VERSION: i32 = 1;
+/// The reclaim deadline of a record that is held: freed, and not to be allocated again
+/// until its writer has let it go. No reading of a clock reaches it
+/// (`spec/counters-file.md`, "Metadata record").
+pub const HELD: i64 = i64::MAX;
 /// The smallest capacity a counters file may have.
 pub const MIN_CAPACITY: u32 = 64;
 /// The largest capacity a counters file may have.

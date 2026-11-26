@@ -316,6 +316,38 @@ impl CountersFile {
         Ok(())
     }
 
+    /// Frees counter `id` as [`free`](Self::free) does, and holds its record: a reader
+    /// sees no counter from now on, and the record is not allocated again until
+    /// [`let_go`](Self::let_go) gives it a deadline. For a record whose value a client
+    /// writes, an image's position or a counter the client added: a thread of that
+    /// client may store into the slot later than any time the driver could wait
+    /// (`spec/counters-file.md`, "Metadata record"; ADR 0179).
+    pub fn hold(&mut self, id: u32) -> Result<(), CountersError> {
+        self.free(id, super::layout::HELD)
+    }
+
+    /// Whether the writer of held record `id` has let it go: its release word reads 1,
+    /// with an acquire load (`spec/counters-file.md`, "Value slot").
+    /// [`CountersError::Id`] when `id` is not below the capacity.
+    pub fn released(&self, id: u32) -> Result<bool, CountersError> {
+        Ok(self.mapped.slot(id)?.released())
+    }
+
+    /// Lets held record `id` go: it may be allocated again after `reusable_after`, a
+    /// reading of this process's nano clock as [`free`](Self::free) takes. The driver
+    /// calls it when [`released`](Self::released) is true or when it holds the lock of
+    /// the client the record was allocated for. [`CountersError::Id`] when `id` is not
+    /// below the capacity, and [`CountersError::NotHeld`] when the record is not held,
+    /// which changes nothing.
+    pub fn let_go(&mut self, id: u32, reusable_after: i64) -> Result<(), CountersError> {
+        let record = self.mapped.record(id)?;
+        if record.state()? != State::Reclaimed || record.reclaim_deadline() != super::layout::HELD {
+            return Err(CountersError::NotHeld { id });
+        }
+        record.set_reclaim_deadline(reusable_after);
+        Ok(())
+    }
+
     /// A handle on the allocated counter in record `id`, static counters included: a
     /// static counter's record is its id. [`CountersError::Id`] when `id` is not below
     /// the capacity, and [`CountersError::Unallocated`] when the record holds no counter.
@@ -390,6 +422,17 @@ impl Counter {
     pub fn load_acquire(&self) -> i64 {
         self.mapped.slot_at(self.offset).get_acquire()
     }
+
+    /// Stores the release word: the last store the thread that owns this counter in a
+    /// client makes to its slot, by which it says that it will not store again. The
+    /// driver gives the record to no other owner before it reads the word, or holds
+    /// the client's lock (`spec/counters-file.md`, "Value slot";
+    /// `spec/client-protocol.md`, "The records a client writes"; ADR 0179). The caller
+    /// stores nothing through this handle or a clone of it afterwards; nothing here
+    /// can stop it, so a client keeps one handle on a record and does not clone it.
+    pub fn release(&self) {
+        self.mapped.slot_at(self.offset).release();
+    }
 }
 
 impl fmt::Debug for Counter {
@@ -435,6 +478,17 @@ impl CountersWriter {
     pub fn counter(&self, id: u32) -> Result<Counter, CountersError> {
         self.mapped.allocated(id)?;
         Counter::new(Arc::clone(&self.mapped), id)
+    }
+
+    /// Stores the release word of record `id`, by its id, for a record this client was
+    /// told of in an `available image` and holds no handle on: an image it does not
+    /// add, or one announced for a subscription it has removed. The record is this
+    /// client's from the event on, whatever its state reads, and the driver gives it
+    /// to nobody until the word is stored (`spec/client-protocol.md`, "The records a
+    /// client writes"). [`CountersError::Id`] when `id` is not below the capacity.
+    pub fn release(&self, id: u32) -> Result<(), CountersError> {
+        self.mapped.slot(id)?.release();
+        Ok(())
     }
 
     /// The metadata of counter `id`, as [`CountersReader::record`], with its refusals:
