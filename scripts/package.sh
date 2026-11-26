@@ -12,6 +12,10 @@
 # client README's example there against this driver, and shows that the same wheel
 # without its library fails. A client's package joins here with a script of its own.
 #
+# On Linux all of this runs at the floor, glibc 2.28, in the container that
+# scripts/floor.sh starts, which needs Docker (ADR 0178;
+# docs/how-to/build-a-native-artefact-at-the-floor.md).
+#
 # Nothing is published and nothing comes from a package index.
 set -euo pipefail
 cd "$(dirname "$0")/.."

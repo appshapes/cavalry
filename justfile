@@ -40,7 +40,9 @@ test *ARGS: test-scripts
 # libraries, the wheel it writes and the client's search for its library in a made-up
 # tree (work item 469), and the rule that a commit and a pull request body carry no
 # attribution lines: the project's settings, the skills' words and the check `/pr`
-# gives (work item 475). Standard library only, no network.
+# gives (work item 475), and the check of the glibc a native artefact needs, on what
+# objdump prints, with the one floor that three files name (work item 481). Standard
+# library only, no network.
 test-scripts:
     python3 scripts/release-notes-email-test.py
     python3 scripts/release-notes-test.py
@@ -168,6 +170,11 @@ quickstart:
 # the library the package holds; then the control, the same wheel without its library,
 # which must fail. Nothing comes from a package index and nothing is published. What CI
 # runs on Linux and macOS. clients/python/README.md, "The package", is the page.
+# On Linux all of it runs at the floor, in a container of glibc 2.28 that
+# scripts/floor.sh starts, so it needs Docker there: the driver and the library are
+# linked against that glibc, scripts/glibc-floor.py fails either that needs a newer
+# one, and the package is installed and run on it (ADR 0178;
+# docs/how-to/build-a-native-artefact-at-the-floor.md).
 package:
     bash scripts/package.sh
 
