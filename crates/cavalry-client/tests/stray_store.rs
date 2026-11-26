@@ -769,6 +769,9 @@ fn what_a_client_without_its_lock_leaves_unreleased_is_out_of_use() {
     let closed_record = closed.id();
     let leaked = add(&mut client, 2);
     let leaked_record = leaked.id();
+    // A third, kept past the client's close and dropped then.
+    let late = add(&mut client, 3);
+    let late_record = late.id();
     // The driver has answered the client, so it read the client's first command and
     // found its lock held. Now another hand removes the file.
     std::fs::remove_file(cavalry_shm::client_lock::path(
@@ -793,7 +796,7 @@ fn what_a_client_without_its_lock_leaves_unreleased_is_out_of_use() {
         "the driver sorts what the client left",
         Duration::from_secs(10),
         || {
-            (read(&watcher, COUNTERS_RETIRED) == 1 && read(&watcher, COUNTERS_HELD) == 0)
+            (read(&watcher, COUNTERS_RETIRED) == 2 && read(&watcher, COUNTERS_HELD) == 0)
                 .then_some(())
         },
     );
@@ -808,6 +811,7 @@ fn what_a_client_without_its_lock_leaves_unreleased_is_out_of_use() {
     );
     drop(publication);
     drop(subscription);
+    drop(late);
     // After the counter reuse timeout the released record is given out again, and the
     // other never is.
     std::thread::sleep(Duration::from_millis(1_200));
@@ -823,6 +827,9 @@ fn what_a_client_without_its_lock_leaves_unreleased_is_out_of_use() {
     let ids: Vec<u32> = given.iter().map(cavalry_client::Counter::id).collect();
     assert!(ids.contains(&closed_record), "{closed_record} in {ids:?}");
     assert!(!ids.contains(&leaked_record), "{leaked_record} in {ids:?}");
+    // Its word came after the driver had put it out of use, and it stays so.
+    assert!(!ids.contains(&late_record), "{late_record} in {ids:?}");
+    assert_eq!(read(&watcher, COUNTERS_RETIRED), 2);
 
     drop(given);
     watcher.close().expect("the watcher closes");
