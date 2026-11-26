@@ -51,9 +51,9 @@ pub fn member_given_up(dir: &Path) -> Result<(), CountersError> {
 /// Adds one to `run.member_refused` in the counters file of the driver in `dir`:
 /// `cavalry run` started that driver for a cluster member whose start failed, refused
 /// by the consensus module or with no thread to run it on, and is about to close the
-/// driver (work item 472). The member never ran, so none of its own counters were
-/// added, and the driver's file would otherwise say nothing of it. Errors as
-/// [`member_given_up`]'s.
+/// driver (work item 472). The member never ran a duty cycle, and any counter of its
+/// own was freed with its client, so the driver's file would otherwise say nothing of
+/// it. Errors as [`member_given_up`]'s.
 ///
 /// ```
 /// use cavalry_control::run::member_refused;
