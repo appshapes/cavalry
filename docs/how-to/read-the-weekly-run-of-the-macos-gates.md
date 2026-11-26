@@ -10,8 +10,10 @@ UTC each Monday at the head of `master`, and whenever a person starts it. It has
 job, `macos / gates (macos)`, which runs every step that `gates (linux)` runs for
 each commit, on a macOS runner: `just lint`, `just test`, `just conformance`, `just
 loom`, `just miri`, `just docs`, `just lint-docs`, `just quickstart`, `just package`,
-`just replay-check` and a report of the bench. It takes about 17 minutes. It is no
-check of a pull request and no run of `ci`, so a red week is not a red `master`.
+`just replay-check` and a report of the bench. It took 12 to 18 minutes when it ran
+for every commit; a week apart it may find no cache and take longer, within the
+job's bound of 30 minutes. It is no check of a pull request and no run of `ci`, so a
+red week is not a red `master`.
 
 ## Prerequisites
 
@@ -51,7 +53,7 @@ check of a pull request and no run of `ci`, so a red week is not a red `master`.
 
    - **The runner was lost.** The annotations hold `The self-hosted runner lost
      communication with the server`, no step has a log, and the second command prints
-     nothing. No change caused it: about one macOS job in twenty ends this way (work
+     `log not found: <job id>`. No change caused it: about one macOS job in twenty ends this way (work
      item 456;
      [ADR 0160](../decisions/0160-keep-the-log-directorys-gate-on-one-tree-on-cis-macos-runner-and-track-the-lost-runner-as-a-fault-of-its-own.md)).
      Go to step 4.
@@ -112,10 +114,16 @@ check of a pull request and no run of `ci`, so a red week is not a red `master`.
    When the command passes on the Mac at the bad commit, the failure needs the
    runner: a machine with nothing installed, six virtual processors and a slower
    clock. Search on the runner then. Make a branch at a chosen commit, push it, and
-   start the gates there with `gh workflow run macos.yml --ref <branch>`, or one test
-   twenty times with `gh workflow run test-times.yml --ref <branch> -f
-   arguments='...'`. A branch made at a commit before `macos.yml` landed does not hold
-   the workflow: merge `master`'s `.github/workflows/` into it first.
+   run the failing test twenty times there with `gh workflow run test-times.yml
+   --ref <branch> -f arguments='...'`
+   ([Run a test many times in a row](run-a-test-many-times.md)). For a gate that is
+   no test, start the gates there with `gh workflow run macos.yml --ref <branch>`. A
+   branch at a commit from before `macos.yml` landed does not hold that workflow.
+   Give it `master`'s copy of the two files in a commit of the branch's own, which
+   leaves the rest of the tree as the chosen commit has it: `git checkout
+   origin/master -- .github/workflows/ci.yml .github/workflows/macos.yml`, then `git
+   commit`. The job then runs `master`'s steps on the older tree, so a step whose
+   recipe that tree lacks fails for that reason alone.
 
 6. Act on it, and record it. Whoever reads the red week first acts: a session that
    `/next-task` gave the task to, or a person whom GitHub notified of the failed run.
@@ -126,7 +134,9 @@ check of a pull request and no run of `ci`, so a red week is not a red `master`.
    brigade work-item add --tag cavalry <<'EOF'
    macOS gates on master: <the step, and the test when there is one>
 
-   What failed, the run's id, the first bad commit and its work item.
+   What failed, the run's id, the first bad commit and its work item. Whether the
+   laptop's gates pass at the first bad commit: ADR 0170 counts the weeks where they
+   did.
 
    ## Done when
 

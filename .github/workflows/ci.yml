@@ -17,11 +17,11 @@
 # required check, so no pull request merges without them, and a gates job that has
 # failed is a blocker in the reviewer's brief (`.claude/agents/reviewer.md`).
 # `gates (macos)` runs the same steps, and no event of this file's own starts it: not a
-# pull request (ADR 0073), and since ADR 0170 not a push to master either. In the week
-# of 2026-11-22 it took 17 minutes of a macOS runner for each of about 16 commits a
-# day, about one job in twenty lost its runner for no fault of a change (work item
-# 456), and every session had already run the same gates on a Mac before its pull
-# request. It runs when `macos.yml` calls this file with `macos: true`, and then it is
+# pull request (ADR 0073), and since ADR 0170 not a push to master either. In the four
+# days from 2026-11-22 it took about 15 minutes of a macOS runner for each of about 16
+# commits a day, about one job in twenty lost its runner for no fault of a change
+# (work item 456), and every session had already run the same gates on a Mac before
+# its pull request. It runs when `macos.yml` calls this file with `macos: true`, and then it is
 # the only job. A red week is `/next-task`'s to hand out, and
 # docs/how-to/read-the-weekly-run-of-the-macos-gates.md says how it is read.
 # The latency gate takes no host for a change (ADR 0139): it runs each night and on

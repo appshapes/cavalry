@@ -74,10 +74,29 @@ class Ci(unittest.TestCase):
     def test_the_job_keeps_the_names_branch_protection_and_the_pages_use(self):
         self.assertIn("    name: gates (${{ matrix.name }})\n", self.code)
 
+    def test_gates_is_the_one_job_and_runs_where_the_matrix_says_for_every_event(self):
+        """A second job could name the macOS runner itself, and an `if` on the job
+        could leave a push to `master` with no gates at all."""
+        jobs = block(self.code, "jobs")
+        self.assertEqual(re.findall(r"^  ([\w-]+):\n", jobs, re.M), ["gates"])
+        self.assertEqual(re.findall(r"^ *runs-on: (.+)$", jobs, re.M), ["${{ matrix.runner }}"])
+        self.assertEqual(re.findall(r"^    if:.*$", jobs, re.M), [], "the gates job runs for every event")
+        self.assertEqual(re.findall(r"blacksmith-[\w-]+", jobs),
+                         ["blacksmith-6vcpu-macos-latest", "blacksmith-4vcpu-ubuntu-2404"],
+                         "the two runners are named in the matrix and nowhere else in the job")
+
+    def test_a_run_by_hand_takes_no_input_so_it_cannot_ask_for_macos(self):
+        """`inputs` holds a run by hand's inputs too: one named `macos` there would
+        send a run of `ci` by hand to the macOS runner."""
+        self.assertIn("  workflow_dispatch:\n  workflow_call:\n", block(self.code, "on"))
+
     def test_a_called_run_is_in_a_group_of_its_own(self):
         """`github` in a called workflow is the caller's, so the ref alone would put a
         week's run at `master`'s head in the group of `master`'s own runs."""
-        self.assertIn("concurrency:\n  group: ${{ inputs.macos && 'macos' || 'ci' }}-${{ github.ref }}\n", self.code)
+        self.assertEqual(block(self.code, "concurrency"),
+                         "concurrency:\n  group: ${{ inputs.macos && 'macos' || 'ci' }}-${{ github.ref }}\n"
+                         "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n",
+                         "a newer push ends a pull request's run, and no other run is ever cancelled for a newer one")
 
 
 class Macos(unittest.TestCase):

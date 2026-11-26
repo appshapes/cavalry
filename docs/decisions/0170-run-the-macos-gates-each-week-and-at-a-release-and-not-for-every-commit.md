@@ -28,10 +28,9 @@ same day, the owner confirmed the cadence in one word: "weekly".
 Three facts bear on it, each counted under Evidence. Every session works on a Mac and
 runs the four gates there before each pull request, so CI's macOS job is a second
 net: a machine with nothing installed, the quickstart, and a slower clock. In the
-four days from 2026-11-22, the job ran 63 times and took 16.2 hours of a macOS
-runner, 4.0 hours a day. And three of those 63 jobs lost their runner for no fault
-of a change, about one in twenty, each turning `master` red until someone ran it
-again.
+four days from 2026-11-22, the job ran 62 times and took 15.9 hours of a macOS
+runner, 4.0 hours a day. And three of those 62 jobs lost their runner for no fault
+of a change, about one in twenty, each turning `master`'s run red.
 
 ## Decision
 
@@ -122,14 +121,19 @@ too.
 Counted on 2026-11-26 from GitHub's record of `ci.yml`'s runs for pushes to `master`
 created from 2026-11-22 to 2026-11-25 UTC, four days, and each run's jobs:
 
-- 62 commits had a run, 15.5 a day, and `gates (macos)` ran 63 times.
-- The 59 jobs that passed took 12.3 to 17.8 minutes, median 15.1. All 63 took 16.2
+- 62 commits had a run, 15.5 a day. Two of the runs were cancelled before any job
+  began, when a later landing took their place. In the other 60, `gates (macos)` ran
+  62 times: twice a failed job was run again. A job that a second attempt of a run
+  kept from the first is counted once.
+- The 58 jobs that passed took 12.3 to 17.8 minutes, median 15.0. All 62 took 15.9
   hours of a macOS runner, 4.0 hours a day. The owner's brief on work item 479
   reckoned about 4.5 hours, at 17 minutes a job; the count is the measured one. One
-  job a week is about a quarter of an hour.
-- Three jobs lost their runner, with no failed step and no log: runs 44989472096
-  (654037c6), 45091169007 (dddd87a9) and 45549149085 (2387b4be). That is 3 of 63,
-  about one in twenty-one, and agrees with ADR 0160's 2 of 39 for the one-tree form.
+  job a week is about a quarter of an hour, when the runner's cache is warm.
+- Three jobs lost their runner, with no failed step and no log: the first attempts
+  of runs 44989472096 (654037c6), 45091169007 (dddd87a9) and 45549149085 (2387b4be).
+  That is 3 of 62, about one in twenty-one. The first two ran the upgrade gate's
+  one-tree form and are the two of ADR 0160's 2 of 39; the third ran its seven-write
+  form, before pull request 352 took that form off this runner.
 - One job failed for a cause of ours: run 45598311008 (f4785a97) failed `just test`
   at a test of `cavalry-raft` that work item 282 had added in the commit before,
   b0c7407a, whose own macOS job passed. A helper of the test raced the follower's
@@ -138,7 +142,7 @@ created from 2026-11-22 to 2026-11-25 UTC, four days, and each run's jobs:
   same commit. That is the window's one
   finding of the macOS job's own, and it is of the kind that twenty runs on the macOS
   runner before a pull request are kept for.
-- In the same window `gates (linux)` failed once in 63 jobs, at `just test` (run
+- In the same window `gates (linux)` failed once in 61 jobs, at `just test` (run
   45487811627, 0c68d788).
 
 The changed workflows were tried from a throwaway branch, `trial-479-macos`, which
@@ -161,6 +165,13 @@ was lost. A macOS runner works a quarter of an hour a week where it worked four
 hours a day. A run of `ci` by hand is Linux alone, which is what a trial of a
 workflow most often wants.
 
+Not measured: the job with a cold cache. Under GitHub's rule a cache entry that
+nothing has read for seven days is dropped, and the run is seven days apart, so a
+week's run may build from nothing. Whether the cache of the runners' own provider
+keeps an entry longer is not known here. The job's bound is 30 minutes, set when
+both runners ran warm; the first weeks' runs say whether it holds, and the bound is
+`ci.yml`'s to raise.
+
 Harder: a change that breaks macOS alone is seen up to a week after it lands, among
 about a hundred commits, and only if the laptops' gates let it through. The search
 is a bisect on a Mac, and on the runner when the laptop passes. The laptop is now
@@ -174,8 +185,9 @@ schedules of a public repository with no activity for 60 days, and the how-to sa
 how to start one again.
 
 Revisit when two weeks in one quarter are red for a failure of ours that the
-laptops' gates passed: then the laptop is not the net this decision takes it for,
-and the run moves to each night. Revisit when work item 456 finds why the runner is
+laptop's gates passed at the first bad commit, which each red week's work item
+records: then the laptop is not the net this decision takes it for, and the run
+moves to each night. Revisit when work item 456 finds why the runner is
 lost: a run that is never red for nothing can be read each night at no cost in
 attention. Revisit if the release ADR ships packages for macOS to users who host
 with them: then macOS is a platform that hosts Cavalry, which the owner's ruling

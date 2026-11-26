@@ -156,9 +156,9 @@ Highest first. Within one rule, the slice ADR's order, then the work item's list
    title begins `macOS gates on master:` and that name that run's failure. The first
    of these that holds says what the task is:
    - One is in Wanting or Doing: it is the task under this rule until it is in Done.
-   - One is in Done, and the run began before it moved there: the fix landed after
-     the run. The task is one command, `gh workflow run macos.yml`, whose run is the
-     newest once it ends.
+   - One is in Done, and the run began before it moved there (`brigade work-item show
+     <number>` has the history): the fix landed after the run. The task is one
+     command, `gh workflow run macos.yml`, whose run is the newest once it ends.
    - One is in Done, and the run began after it moved there: the fix did not hold.
      The task is that work item again, and its first move is `brigade work-item move
      <number> doing`.
@@ -166,10 +166,12 @@ Highest first. Within one rule, the slice ADR's order, then the work item's list
    - None: nobody has read the week. The task is to read it as
      `docs/how-to/read-the-weekly-run-of-the-macos-gates.md` says. Its first move is
      to run the failed job again, `gh run rerun <run id> --failed`: about one macOS
-     job in twenty loses its runner for no fault of a change (work item 456), and a
-     second attempt that passes ends the task. A failure that is there again is
-     found on a Mac by bisecting the week's commits, and reading it ends in such a
-     work item.
+     job in twenty loses its runner for no fault of a change (work item 456), and
+     after a lost runner a second attempt that passes ends the task. After a failed
+     step, a second attempt that passes does not: the failure comes and goes, and
+     the task ends in such a work item for it (the how-to, step 4). A failure that
+     is there again is found on a Mac by bisecting the week's commits, and reading
+     it ends in such a work item.
 
    One red week is a task, since the next run is a week away (ADR 0170).
 6. **The first feature of the slice that is not done.** With a work item: the work

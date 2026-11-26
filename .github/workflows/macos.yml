@@ -9,9 +9,14 @@
 #
 # Why a week and not a commit: every session works on a Mac and runs the gates there
 # before each pull request, so this run is a second net, a clean machine with a slower
-# clock. For each commit it cost about 4.5 hours of a macOS runner a day in the week of
-# 2026-11-22, and about one of its jobs in twenty loses its runner for no fault of a
-# change (work item 456), which each night would be a red run every three weeks.
+# clock. For each commit it cost 4.0 hours of a macOS runner a day in the four days
+# from 2026-11-22, and about one of its jobs in twenty loses its runner for no fault of
+# a change (work item 456), which each night would be a red run every three weeks.
+#
+# The job took 12 to 18 minutes when it ran for every commit. A week apart it may find
+# no cache and build from nothing: under GitHub's rule an entry that nothing read for
+# seven days is dropped. That was not measured when this landed, and ci.yml's bound of
+# 30 minutes is the one to raise if a cold week does not fit it.
 #
 # It is no run of `ci` for a commit and no required check, as the latency gate's and
 # Brigade's server's nights are not (ADRs 0139 and 0142), so a red week is not a red
