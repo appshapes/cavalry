@@ -823,6 +823,12 @@ fn run(config: &Config) -> ExitCode {
     // The member first: it is a client of the driver, and closes its client while the
     // driver is there to hear it.
     member_stop.store(true, Ordering::Release);
+    if let Some(thread) = &member_thread {
+        // The member's loop idles in a park of at most a millisecond: the unpark, after
+        // the flag, ends it, so the join below does not wait on that park's timeout
+        // (ADR 0171).
+        thread.thread().unpark();
+    }
     if let Some(thread) = member_thread
         && thread.join().is_err()
     {

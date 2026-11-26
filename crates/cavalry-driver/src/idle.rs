@@ -181,7 +181,7 @@ pub(crate) mod tests {
     use super::*;
     use std::cell::Cell;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{mpsc, Arc};
+    use std::sync::{Arc, mpsc};
 
     thread_local! {
         /// For a test: how long this thread's backoff parks, in place of at most 1 ms.
@@ -224,7 +224,11 @@ pub(crate) mod tests {
         let idled = end
             .recv_timeout(Duration::from_secs(20))
             .expect("the idler's loop ended when its thread was unparked, not an hour later");
-        assert_eq!(idled, MAX_SPINS + MAX_YIELDS + 1, "one park, ended by the unpark");
+        assert_eq!(
+            idled,
+            MAX_SPINS + MAX_YIELDS + 1,
+            "one park, ended by the unpark"
+        );
         handle.join().expect("the thread ended");
     }
 

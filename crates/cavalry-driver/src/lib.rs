@@ -326,6 +326,7 @@ impl Driver {
                 replayer_handle.thread().unpark();
                 sender_handle.thread().unpark();
                 receiver_handle.thread().unpark();
+                conductor_handle.thread().unpark();
                 let _ = conductor_handle.join();
                 let _ = replayer_handle.join();
                 let _ = sender_handle.join();
@@ -472,9 +473,8 @@ mod tests {
                 started.fetch_add(1, Ordering::AcqRel);
             })
         };
-        let driver =
-            Driver::start_with_threads(&dir, dir.join("log"), IdleStrategy::Backoff, hook)
-                .expect("starts");
+        let driver = Driver::start_with_threads(&dir, dir.join("log"), IdleStrategy::Backoff, hook)
+            .expect("starts");
         // Each thread has run its hook, and then long enough for the conductor and the
         // recorder to spend their spins and yields and park.
         while started.load(Ordering::Acquire) < 5 {
@@ -485,9 +485,9 @@ mod tests {
         let closer = std::thread::spawn(move || {
             let _ = closed.send(driver.close());
         });
-        let result = close.recv_timeout(Duration::from_secs(20)).expect(
-            "close returned: a thread that stays parked was not unparked by the stop",
-        );
+        let result = close
+            .recv_timeout(Duration::from_secs(20))
+            .expect("close returned: a thread that stays parked was not unparked by the stop");
         result.expect("closes");
         closer.join().expect("the closing thread ended");
         let _ = std::fs::remove_dir_all(&dir);

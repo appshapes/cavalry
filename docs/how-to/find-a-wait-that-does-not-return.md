@@ -61,16 +61,17 @@ waits each.
    ```
 
    The probe starts 128 threads that each repeat the backoff of Cavalry's idle
-   loops, a wait of 1 µs doubling to 1 ms, in `std::thread::sleep`, in `nanosleep`
-   and in `std::thread::park_timeout`. Its main thread prints `STUCK` for a thread
+   loops, a wait of 1 µs doubling to 1 ms. They are dealt out over the kinds of
+   timed wait: `std::thread::sleep`, `nanosleep`, `std::thread::park_timeout`, a
+   condition variable's, and on macOS `mach_wait_until` and `kevent`'s. Its main thread prints `STUCK` for a thread
    whose one wait has lasted three seconds, wakes it after thirty, and prints
-   `RETURNED` when it comes back. Each minute it prints the count of waits so far.
+   `RETURNED` when it comes back. Each minute it prints each kind's count of waits.
    The last line is `stuck sleeps seen: N; still stuck at the end: M`, and the
    probe ends with 0 when N is 0.
 
 6. Record what you found where the team keeps it: the machine, the system's version
    (`sw_vers` and `uname -v` on macOS, `uname -a` on Linux), and the probe's last
-   four lines. The machines read so far are in ADR 0171, "Evidence".
+   lines from `end` on. The machines read so far are in ADR 0171, "Evidence".
 
 ## How to verify it worked
 
