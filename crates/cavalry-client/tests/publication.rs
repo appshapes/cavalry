@@ -13,6 +13,13 @@ use cavalry_driver::{Driver, spec};
 use cavalry_proto::client_protocol::{Command, ErrorCode, Event, IPC_CHANNEL};
 use cavalry_shm::broadcast::BroadcastBuffer;
 use cavalry_shm::command_ring::CommandRing;
+use cavalry_shm::counters::generated::DRIVER_LOG_CREATE_FAILED;
+
+// The one port these tests choose, for `a_driver_runs_where_files_are_limited`'s
+// publication over UDP, from the one file that says how ports are taken and why, which
+// is `cavalry-raft`'s: `crates/cavalry-raft/tests/ports/mod.rs`.
+#[path = "../../cavalry-raft/tests/ports/mod.rs"]
+mod ports;
 
 /// A directory of its own per test, removed when the guard drops.
 struct TestDir(PathBuf);
@@ -368,5 +375,188 @@ fn a_claim_or_an_offer_after_the_clients_close_is_closed_while_the_limit_has_roo
         "nothing was reserved after the close"
     );
     drop(held);
+    driver.close().expect("the driver closes");
+}
+
+/// Where the child of
+/// [`a_driver_that_cannot_create_a_log_refuses_it_and_leaves_no_file`] runs its driver.
+const LIMITED_DIR: &str = "CAVALRY_CLIENT_TEST_LIMITED_DIR";
+
+/// The log files under a driver's directory: its publications' and its images'.
+fn log_files(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for kind in ["publications", "images"] {
+        let Ok(entries) = std::fs::read_dir(dir.join(kind)) else {
+            continue;
+        };
+        for entry in entries {
+            found.push(entry.expect("an entry").path());
+        }
+    }
+    found.sort();
+    found
+}
+
+/// A driver that cannot create a publication's log refuses the add with error code
+/// 12, counts it, and leaves no file in its directory, however often it is asked
+/// (invariant 3; `spec/log-buffer.md`, "File"; ADR 0172; work item 492; GitHub
+/// issue 238). Each ask has a correlation id of its own, and so a file name of its
+/// own: before the removal each left a file as long as the log, and the first kept
+/// what room a full directory had left. The creation is made to fail for real, after
+/// its file exists, in a child process whose files the operating system limits to
+/// less than a `cavalry:ipc` log: the driver starts, and sizing a log of 192 MiB
+/// fails, as it does where the directory has no room.
+#[test]
+fn a_driver_that_cannot_create_a_log_refuses_it_and_leaves_no_file() {
+    let dir = TestDir::new("log-not-created");
+    // The limit is in blocks of 512 or 1,024 bytes, by the shell: 32 or 64 MiB, more
+    // than any file the driver makes for itself and less than the log's 192 MiB. The
+    // signal a write past the limit sends is ignored, so that the sizing returns its
+    // error.
+    let child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(
+            "trap '' XFSZ; ulimit -f 65536 && exec \"$0\" a_driver_runs_where_files_are_limited \
+             --exact --ignored --nocapture --test-threads=1",
+        )
+        .arg(std::env::current_exe().expect("this program's path"))
+        .env(LIMITED_DIR, dir.path())
+        .output()
+        .expect("the child runs");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert!(child.status.success(), "{said}");
+    assert!(said.contains("refused five times"), "{said}");
+}
+
+/// The child of [`a_driver_that_cannot_create_a_log_refuses_it_and_leaves_no_file`],
+/// which runs it in a process whose files are limited: on its own it has nothing to
+/// do.
+#[test]
+#[ignore = "the child of a_driver_that_cannot_create_a_log_refuses_it_and_leaves_no_file"]
+fn a_driver_runs_where_files_are_limited() {
+    let Some(dir) = std::env::var_os(LIMITED_DIR) else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    let driver = Driver::start(&dir, dir.join("log")).expect("the driver starts under the limit");
+    let mut client = Cavalry::connect_to(&dir).expect("the client connects");
+    let failed = |client: &Cavalry| {
+        let counters = client.counters();
+        (0..counters.capacity())
+            .find(|id| {
+                counters
+                    .record(*id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|record| record.type_id() == DRIVER_LOG_CREATE_FAILED.0)
+            })
+            .map(|id| counters.read(id).expect("the counter reads"))
+            .expect("the driver's counter")
+    };
+    assert_eq!(failed(&client), 0);
+    for ask in 1..=5 {
+        match client.add_exclusive_publication("cavalry:ipc", 10 + ask) {
+            Err(ClientError::Refused {
+                code: Some(ErrorCode::StorageSpace),
+                ..
+            }) => {}
+            Err(other) => panic!("ask {ask}: {other}"),
+            Ok(_) => panic!("ask {ask}: the log was created under the limit"),
+        }
+        assert_eq!(failed(&client), i64::from(ask), "one for each ask");
+        assert_eq!(log_files(&dir), Vec::<PathBuf>::new(), "after ask {ask}");
+    }
+    // The driver goes on: a log under the limit is created, and is the one file.
+    let channel = format!(
+        "cavalry:udp?endpoint=127.0.0.1:{}|term-length=64k",
+        ports::free_port()
+    );
+    let publication = client
+        .add_exclusive_publication(&channel, 10)
+        .expect("a publication whose log fits");
+    assert_eq!(log_files(&dir).len(), 1, "{:?}", log_files(&dir));
+    assert_eq!(failed(&client), 5);
+    drop(publication);
+    client.close().expect("the client closes");
+    driver.close().expect("the driver closes");
+    println!("refused five times");
+}
+
+/// The directory of [`a_driver_whose_directory_has_no_room_leaves_no_log_file`]'s
+/// driver: one on a filesystem with less room than a `cavalry:ipc` log.
+const FULL_DIR: &str = "CAVALRY_CLIENT_TEST_FULL_DIR";
+
+/// The kibibytes that `df` reads as available on the filesystem that holds `dir`.
+fn available_kib(dir: &Path) -> u64 {
+    let said = std::process::Command::new("df")
+        .arg("-Pk")
+        .arg(dir)
+        .output()
+        .expect("df runs");
+    let said = String::from_utf8_lossy(&said.stdout).into_owned();
+    said.lines()
+        .nth(1)
+        .and_then(|line| line.split_whitespace().nth(3))
+        .and_then(|available| available.parse().ok())
+        .unwrap_or_else(|| panic!("df's fourth column of its second line: {said}"))
+}
+
+/// The case GitHub issue 238 measured, and the one that matters: a driver whose
+/// directory is on a filesystem with no room for a log, where making the log's pages
+/// resident is what fails (ADR 0027), after the file exists and holds whatever room
+/// was left. The driver refuses each ask with error code 12, leaves no file, and the
+/// filesystem has afterwards the room it had before (ADR 0172; work item 492).
+///
+/// It needs such a directory, which a test cannot make for itself without the right
+/// to mount, so `just test` passes it over and `just shm-exhaustion <directory>` runs
+/// it: in CI's Linux job on a filesystem of 64 MiB that the job mounts, and by hand
+/// in a container whose `/dev/shm` is Docker's default, 64 MiB, less than the 192 MiB
+/// of a `cavalry:ipc` log:
+///
+/// ```sh
+/// docker run --rm -v "$PWD":/src:ro -e CARGO_TARGET_DIR=/target -w /src \
+///   -e CAVALRY_CLIENT_TEST_FULL_DIR=/dev/shm/cavalry rust:1 \
+///   cargo test -p cavalry-client --test publication \
+///   a_driver_whose_directory_has_no_room -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "needs a driver directory on a filesystem with no room for a log; see its comment"]
+fn a_driver_whose_directory_has_no_room_leaves_no_log_file() {
+    let Some(dir) = std::env::var_os(FULL_DIR) else {
+        panic!("set {FULL_DIR} to a directory on a filesystem with less room than 192 MiB");
+    };
+    let dir = PathBuf::from(dir);
+    let log_dir = TestDir::new("no-room-log");
+    let driver = Driver::start(&dir, log_dir.path()).expect("the driver starts");
+    let mut client = Cavalry::connect_to(&dir).expect("the client connects");
+    let before = available_kib(&dir);
+    assert!(
+        before < 192 * 1024,
+        "{} has {before} KiB available, room for a cavalry:ipc log",
+        dir.display()
+    );
+    for ask in 1..=5 {
+        match client.add_exclusive_publication("cavalry:ipc", 10 + ask) {
+            Err(ClientError::Refused {
+                code: Some(ErrorCode::StorageSpace),
+                message,
+                ..
+            }) => println!("ask {ask}: refused: {message}"),
+            Err(other) => panic!("ask {ask}: {other}"),
+            Ok(_) => panic!("ask {ask}: the log was created"),
+        }
+        let (files, available) = (log_files(&dir), available_kib(&dir));
+        println!(
+            "after ask {ask}: {} log files, {available} KiB available where {before} were",
+            files.len()
+        );
+        assert_eq!(files, Vec::<PathBuf>::new(), "after ask {ask}");
+        assert_eq!(available, before, "after ask {ask}");
+    }
+    client.close().expect("the client closes");
     driver.close().expect("the driver closes");
 }

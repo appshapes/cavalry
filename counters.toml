@@ -150,7 +150,7 @@ name = "driver.log_create_failed"
 kind = "counter"
 scope = "static"
 doc = "Log buffers the driver could not create or size, refused with error code 12: the filesystem under the driver directory is full or not writable (spec/client-protocol.md, Commands)."
-doctor = "Free space on the filesystem under the driver directory (/dev/shm on Linux): each cavalry:ipc publication needs 3 × 64 MiB + 4 KiB there while it is live or lingers, and each cavalry:udp publication and each image 3 × its term length + 4 KiB, 48 MiB unless the publication's channel names a shorter term-length. Close publications that are not used, name a shorter term-length on the channels of low-rate streams, or move the driver directory to a filesystem with room; a container's default /dev/shm is 64 MiB."
+doctor = "Free space on the filesystem under the driver directory (/dev/shm on Linux): each cavalry:ipc publication needs 3 × 64 MiB + 4 KiB there while it is live or lingers, and each cavalry:udp publication and each image 3 × its term length + 4 KiB, 48 MiB unless the publication's channel names a shorter term-length. Close publications that are not used, name a shorter term-length on the channels of low-rate streams, or move the driver directory to a filesystem with room; a container's default /dev/shm is 64 MiB. A replay's log is 3 × its recording's term length + 4 KiB. A log that was not created leaves no file: every file under publications/ and images/ there is a live or lingering publication's, an image's or a replay's (spec/log-buffer.md, File; ADR 0172)."
 
 [[counter]]
 id = 17
