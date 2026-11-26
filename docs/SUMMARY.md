@@ -226,3 +226,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0167. Have doctor name a leader beside which no service runs](decisions/0167-have-doctor-name-a-leader-beside-which-no-service-runs.md)
 - [0166. Carry the native library inside a client's package, and look for it there first](decisions/0166-carry-the-native-library-inside-a-clients-package-and-look-for-it-there-first.md)
 - [0169. Count a cluster member's failed start, and say what no check holds](decisions/0169-count-a-cluster-members-failed-start-and-say-what-no-check-holds.md)
+- [0171. Remove the file of a log that could not be created](decisions/0171-remove-the-file-of-a-log-that-could-not-be-created.md)

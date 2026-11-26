@@ -398,7 +398,7 @@ fn log_files(dir: &Path) -> Vec<PathBuf> {
 
 /// A driver that cannot create a publication's log refuses the add with error code
 /// 12, counts it, and leaves no file in its directory, however often it is asked
-/// (invariant 3; `spec/log-buffer.md`, "The file"; ADR 0171; work item 492; GitHub
+/// (invariant 3; `spec/log-buffer.md`, "File"; ADR 0171; work item 492; GitHub
 /// issue 238). Each ask has a correlation id of its own, and so a file name of its
 /// own: before the removal each left a file as long as the log, and the first kept
 /// what room a full directory had left. The creation is made to fail for real, after

@@ -406,7 +406,7 @@ impl LogBuffers {
             .create_new(true)
             .open(&path)?;
         // From here the file is this call's. A log that is not created leaves no
-        // file (`spec/log-buffer.md`, "The file"; ADR 0171): whatever fails below,
+        // file (`spec/log-buffer.md`, "File"; ADR 0171): whatever fails below,
         // the sizing, the mapping, the touch of every page or the header, the file
         // is removed before the error is returned, and with it the pages the
         // filesystem had given it. The file's name holds the command's correlation

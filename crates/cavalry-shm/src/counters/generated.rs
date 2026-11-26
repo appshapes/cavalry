@@ -753,7 +753,7 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Counter,
         scope: Scope::Static,
         doc: "Log buffers the driver could not create or size, refused with error code 12: the filesystem under the driver directory is full or not writable (spec/client-protocol.md, Commands).",
-        doctor: "Free space on the filesystem under the driver directory (/dev/shm on Linux): each cavalry:ipc publication needs 3 × 64 MiB + 4 KiB there while it is live or lingers, and each cavalry:udp publication and each image 3 × its term length + 4 KiB, 48 MiB unless the publication's channel names a shorter term-length. Close publications that are not used, name a shorter term-length on the channels of low-rate streams, or move the driver directory to a filesystem with room; a container's default /dev/shm is 64 MiB.",
+        doctor: "Free space on the filesystem under the driver directory (/dev/shm on Linux): each cavalry:ipc publication needs 3 × 64 MiB + 4 KiB there while it is live or lingers, and each cavalry:udp publication and each image 3 × its term length + 4 KiB, 48 MiB unless the publication's channel names a shorter term-length. Close publications that are not used, name a shorter term-length on the channels of low-rate streams, or move the driver directory to a filesystem with room; a container's default /dev/shm is 64 MiB. A log that was not created leaves no file there, so what the directory holds is what the driver's publications, images and replays hold (spec/log-buffer.md, File; ADR 0171).",
     },
     CounterDef {
         id: CONDUCTOR_IDLE_STRATEGY,

@@ -34,6 +34,17 @@ length and a reader finds the metadata page from the file's size. Integers are
 little-endian (`spec/README.md`). Offsets in the metadata tables are from the start of
 the metadata page.
 
+A log that the driver cannot create leaves no file. The driver creates the file,
+sizes it, maps it and makes every page of it resident (ADR 0027) before it publishes
+the header. Where one of those fails after the file exists, as where the directory's
+filesystem has no room for the log, the driver removes the file before it answers:
+with error code 12 for a publication or a replay (`spec/client-protocol.md`,
+"Commands"), or with the refusal of an image (`spec/udp.md`, "The receiver"), and one
+more in `driver.log_create_failed` either way. So the room the file had taken is the
+filesystem's again, and a caller that asks again, under a new correlation id and so
+a new file name, leaves nothing behind however often it asks (ADR 0171). A file that
+is already at the path is not the driver's to remove, and stays.
+
 ## Header
 
 The first 128 bytes of the metadata page. The creator writes every field, then the
