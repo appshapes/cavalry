@@ -110,7 +110,8 @@ consistent pair of counters reads each twice and retries when they moved.
 
 The release word is how a writer in a client says that it will not store into the slot
 again. It stores 1 there when it gives up its hold on the counter, and stores nothing
-in the slot after that. The driver stores 0 with the value at allocation and never
+in the slot after that, the word itself included: one store of the word for one
+hold. The driver stores 0 with the value at allocation and never
 stores 1. The driver's own counters have no release word to read: the driver frees
 them when its own threads have stopped writing them. A release word that is neither 0
 nor 1 reads as 0: the record stays held, which is the safe side.
