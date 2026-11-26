@@ -1873,6 +1873,61 @@ fn a_program_is_refused_a_timer_beyond_the_bound_and_schedules_one_again_in_its_
     member.close();
 }
 
+/// The six adds come before the entries of the poll that opens the log: a program
+/// is handed its first entry, by the poll that opened the log, with the service's
+/// five counters in the driver's counters already (ADR 0168).
+#[test]
+fn a_service_adds_for_its_member_before_the_entries_of_the_poll_that_opens_the_log() {
+    const FIVE: [i32; 5] = [
+        CLUSTER_SERVICE_SNAPSHOTS_TAKEN.0,
+        CLUSTER_SERVICE_SNAPSHOTS_FAILED.0,
+        CLUSTER_SERVICE_TIMERS.0,
+        CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER.0,
+        CLUSTER_SERVICE_TIMER_CANCELS_DROPPED.0,
+    ];
+    let mut member = Member::start("timers-before-entries");
+    member.term(0, MEMBER);
+    member.name();
+    member.commit();
+    let mut client = Cavalry::connect_to(&member.dir).expect("the service's client connects");
+    let mut service = client.cluster_service();
+    let counters = CountersReader::open(&member.dir).expect("the counters file opens");
+    // How many of the five each handled entry saw, and the polls made before the
+    // first of them: polls that opened no log, which add nothing.
+    let mut seen: Vec<usize> = Vec::new();
+    wait("the service is handed the term's first entry", || {
+        if seen.is_empty() {
+            for counter in FIVE {
+                assert_eq!(
+                    counter_in(&counters, counter),
+                    None,
+                    "before the log is open"
+                );
+            }
+        }
+        service
+            .poll(
+                &mut client,
+                |_: &Committed<'_>, _| {
+                    seen.push(
+                        FIVE.iter()
+                            .filter(|counter| counter_in(&counters, **counter).is_some())
+                            .count(),
+                    );
+                    Action::Continue
+                },
+                16,
+            )
+            .expect("the service polls");
+        !seen.is_empty()
+    });
+    assert_eq!(seen, [5], "the first entry, with the five counters there");
+
+    service.close(&mut client).expect("the service closes");
+    client.close().expect("the client closes");
+    member.close();
+}
+
 /// A driver that refuses one of the six adds is the error of the poll that asked,
 /// returned once that poll's entries are taken, and the service asks again at its
 /// first poll a timer refresh interval later and at none between (`spec/cluster.md`,

@@ -82,19 +82,66 @@ has to tell.
 
 ## Evidence
 
-All from one laptop, an Apple M5 Pro with macOS; nothing was run on the bench
-hosts, and no run's number is a bound.
+All from one laptop, an Apple M5 Pro with macOS 26.6.1, in release builds.
+Nothing was run on the bench hosts, other sessions' gates ran on the laptop
+during some of it, and no run's number is a bound.
 
-@@EVIDENCE@@
-
+- **What the publication costs.** The independent read of this change measured
+  it with a driver in the measuring process: the driver's creation of a 192 MiB
+  log took 9.8 to 11.5 ms, the client's writable open of it 6.5 to 7.4 ms, and a
+  read-only open 6.3 to 7.1 ms. `add_exclusive_publication("cavalry:ipc")` took
+  17.6 to 41.0 ms in 16 calls, where a `cavalry:udp` publication of 64 KiB terms
+  took 0.5 to 10.1 ms and an `add counter` 0.2 to 6.0 ms. My own first
+  measurement was inside a service's first telling of a timer, in four test
+  runs: the five counters took 1.5 to 2.6 ms together, and the publication 27,
+  28, 168 and 363 ms. The read did not reproduce the two larger, and nothing
+  here explains them.
+- **A first timer, before and after.** Before, the event of a timer that a
+  program scheduled as due at once at its first schedule was stamped 38 to 68 ms
+  after its message, in the five clients' rounds as they were run for work item
+  419. After, in ten runs of each client's runner: 16 to 25 ms in the Python
+  round, 16 to 27 ms in the Node round, 15 to 22 ms in the Go round, 15 to 24 ms
+  in the JVM round and 18 to 24 ms in the .NET round. That is 50 first timers
+  and a maximum of 27 ms. A service has one first timer in its life, so there
+  is no p99.99 of it to give.
+- **A later timer.** `conformance/python/cluster.py` now sends 200 messages at
+  the end of its round, one at a time, at each of which every program schedules
+  one more timer, due at once. In one run with 10,000 of them the leader stamped
+  the event, after the message's own time, nearest rank: p50 20 ms, p99 28 ms,
+  p99.99 38 ms, max 38 ms. The histogram, milliseconds and counts: 9: 1, 11: 3,
+  12: 3, 13: 6, 14: 49, 15: 209, 16: 511, 17: 857, 18: 1,164, 19: 1,456, 20:
+  1,617, 21: 1,356, 22: 1,028, 23: 731, 24: 492, 25: 238, 26: 112, 27: 55, 28:
+  32, 29: 24, 30: 8, 31: 11, 32: 10, 33: 8, 34: 5, 35: 4, 36: 3, 37: 5, 38: 2.
+  The service beside the leader was handed each timer, after it scheduled it,
+  p50 19,352 µs, p99 26,246 µs, p99.99 31,677 µs, max 38,186 µs, by its
+  process's clock. In the ten runs of the gate's 200, 2,000 timers, the stamps
+  were 11 to 42 ms. Both measures hold the round's own cycle, one thread that
+  polls three services and a session and sleeps 200 µs between cycles.
+- **So a first timer costs what a later one costs**, and what is left is one
+  commit of an entry, its replay to a service and one telling of the member:
+  work item 493.
+- **The longest poll of a run.** In 49 of the 50 runs it was the poll in which a
+  service first opened its member's log, 27.5 to 47.5 ms. In one run of the
+  Python round it was a later poll that took one entry, 134.2 ms, which the
+  round's report does not explain. Before, it was the poll in which a program
+  first scheduled a timer, 22.7 to 37.8 ms. Each client's README has its own
+  round's numbers.
 - `a_service_adds_its_counters_and_its_publication_when_it_first_opens_its_members_log`
-  in `crates/cavalry-client/tests/cluster_service.rs` holds the rule from inside
-  the handler: at every entry a program is handed, the first included, the five
-  counters are in the driver's counters file, and the member's subscription has
-  the publication's image; the driver's counters hold as many records after the
-  member is told of the program's first timer as at the first entry, so neither
-  a counter nor a publication, whose position and limit are records, was added on
-  the way; and a service that reads history tells its member nothing meanwhile.
+  in `crates/cavalry-client/tests/cluster_service.rs` opens the log before
+  anything is committed: the five counters and the publication's image are there
+  with no entry handed over. At every entry the program is handed after that,
+  and after its member is told of its first timer, the driver's counters hold as
+  many records as at the open, so no counter and no publication, whose position
+  and limit are records, was added on the way. A service that reads history
+  tells its member nothing meanwhile.
+- `a_refused_add_is_the_polls_error_once_an_interval_and_is_made_good`, in the
+  same file, fills the driver's counters so that the first of the five is
+  refused. The poll that opens the log returns error code 10 with its entry
+  taken, and the driver counts one refused command. No poll in the next 600 ms
+  asks again or reports anything. The first poll a second after the refusal asks
+  once more and is refused once more. With room again, the service adds what is
+  missing and its member is told of the timer it kept. No test holds a refused
+  publication with the counters taken, which runs the same lines.
 
 ## Consequences
 
@@ -144,16 +191,19 @@ hosts, and no run's number is a bound.
   over, at the session's opening: a `cavalry:udp` log of 48 MiB, touched the same
   way. This decision is of the timers' publication alone.
 - What is left of the time between a message and the event of a timer it
-  scheduled as due at once is the same for every entry: the entry's commit, its
-  replay to the service, the telling and the leader's duty cycle. Work item
-  @@COMMIT@@ asks where that goes.
+  scheduled as due at once is the same for a first timer and a later one: the
+  entry's commit, its replay to the service, the telling and the leader's duty
+  cycle, about 20 ms at the median on a laptop. Work item 493 asks where that
+  goes.
 - Revisit when work item 478 is decided: with a small log for this stream the
   cost of the first open falls, and nothing of this decision changes.
 
 ## References
 
 - Work item 462, which this decision was made in; work item 419, whose rounds
-  showed it; work item 478, the term length of a `cavalry:ipc` channel.
+  showed it; work item 478, the term length of a `cavalry:ipc` channel; work item
+  492, a log left as a file where the driver could not create it; work item 493,
+  the time an entry takes to reach its service.
 - `spec/cluster.md`, "Members and streams", "Snapshots", "A service's snapshot",
   and "The service", "Timers", "What a service tells its member"; `spec/c-abi.md`,
   "Handles".

@@ -34,7 +34,7 @@
  * how long after the message's entry it is due, in the cluster's time. A second, and
  * not the 50 ms this round had first: the event of a timer that is due at once is
  * stamped tens of milliseconds after its message, the time an entry takes to be
- * committed and read by a service on a laptop, 11 to 42 ms in the Python round's runs
+ * committed and read by a service on a laptop, 9 to 42 ms in the Python round's runs
  * there, and more on a busy host, so a deadline of 50 ms is a thin margin for telling a
  * timer that was wrongly due at once from one that waited. Before ADR 0168 a service's
  * first timer waited for its publication to its member too, 49 ms in a run of the
