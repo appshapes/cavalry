@@ -45,6 +45,19 @@ echo "conformance/go: build the driver and the library"
 cargo build --release -p cavalry --bin cavalry
 cargo build --release -p cavalry-ffi --lib
 
+# Go's build cache does not see a C library that cgo links by its path (`go help cache`,
+# "does not detect changes to C libraries imported with cgo"): with no Go source changed,
+# `go run` and `go test` reuse the executable they linked with the library of an earlier
+# build, and this runner would test that library and not the one built above. So the
+# contents of the library and of the header are named in the build's own flags, which
+# the cache does account for: a define that the client's C never reads, so that the
+# package is compiled against this header, and a linker value that no program declares,
+# so that every program is linked again, with this library (work item 503).
+library=$(git hash-object target/release/libcavalry_ffi.a)
+header=$(git hash-object crates/cavalry-ffi/include/cavalry.h)
+export CGO_CFLAGS="${CGO_CFLAGS:--g -O2} -DCAVALRY_FFI_HEADER_IS=$header"
+export GOFLAGS="${GOFLAGS:+$GOFLAGS }-ldflags=-X=main.cavalryFFILibraryIs=$library"
+
 echo "conformance/go: vet, build and test the client with $(go version)"
 unformatted=$(gofmt -l clients/go conformance/go)
 if [ -n "$unformatted" ]; then

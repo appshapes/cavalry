@@ -498,6 +498,14 @@ target/release/cavalry run &                     # one driver per host
 kill -TERM %1
 ```
 
+After the library is built again, build the Go program with `-a` once, as
+`go run -a ./example`, or run `go clean -cache` first. cgo links `libcavalry_ffi.a` by
+its path, and Go's build cache does not see that file change (`go help cache`: it
+"does not detect changes to C libraries imported with cgo"). With no Go source
+changed, `go run` and `go test` can run the program they linked with the library of
+the build before. `conformance/go/run.sh` names the contents of the library and of the
+header in its build's flags, so that the runner tests the library it has just built.
+
 ```go
 package main
 
