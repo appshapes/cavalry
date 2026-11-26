@@ -2008,7 +2008,7 @@ name = "counters.retired"
 kind = "counter"
 scope = "static"
 doc = "Records of the counters file that are out of use until the driver starts again: what a client that held no lock left held, with no release word, when it closed or was timed out. Nothing tells the driver that such a client can no longer store, so it gives the records to nobody."
-doctor = "A client that held no lock on its file in the driver's directory closed or was timed out, and left this many records that the driver cannot give out again before it restarts. The client could not create or lock clients/<client id>.lock: check that the driver's directory is on a filesystem that keeps advisory locks and that the client's user may write in clients/. The records count against the counters file's capacity until the driver starts again; see docs/reference/client-protocol.md#the-records-a-client-writes."
+doctor = "A client that held no lock on its file in the driver's directory closed or was timed out, and left this many records that the driver cannot give out again before it restarts. The client could not create or lock its file under clients/ in the driver's directory: check that the driver's directory is on a filesystem that keeps advisory locks and that the client's user may write in clients/. The records count against the counters file's capacity until the driver starts again; see docs/reference/client-protocol.md#the-records-a-client-writes."
 
 [[state_machine]]
 name = "cluster_role"

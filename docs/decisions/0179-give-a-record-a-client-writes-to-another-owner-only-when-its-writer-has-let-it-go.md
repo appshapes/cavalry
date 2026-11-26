@@ -185,7 +185,10 @@ it for 2 s.
 - **`doctor`**: `a_client_that_has_gone_and_holds_its_lock_is_named_by_its_file`.
 - **The upgrade gate** runs a program and the driver it is a client of from one build
   in every round (`conformance/upgrade/run.sh`, "The schedule"), so no round crosses
-  this version with a client on one side and its driver on the other.
+  this version with a client on one side and its driver on the other. It does run
+  the newer build's `doctor` on members of the older build, and passes with the
+  read-only open of Consequences: its older build here is 031817e9, whose counters
+  file is version 0.
 - Twenty runs of the tests that wait on a clock, on both of CI's runners, are in the
   pull request's body with their run's id.
 
@@ -200,8 +203,12 @@ side refuses the other's counters file when it attaches, with a message that say
 which side is the older, and what to do: stop the driver and every client of it, and
 start them from the newer build, the driver first. Between hosts nothing changes: no
 frame and no message moves, so a cluster is still upgraded one member at a time, each
-member with the driver and the service beside it. A newer `doctor` reads nothing of a
-directory an older driver left, and says `version`.
+member with the driver and the service beside it. `cavalry doctor` of the newer build
+still reads a driver of the older one, which that upgrade's steps need: a reader that
+only reads, and is no client, also reads a counters file of version 0, since it
+stores nothing. The upgrade gate found that this was needed: its first run with this
+decision failed at its first step, where the newer build's `doctor` could not read a
+member of the older build.
 
 Easier: no thread of a client stores into a record another owner holds, whatever the
 client's threads were doing and for however long. A reviewer of a new store in the
@@ -239,7 +246,10 @@ above 0 is the sign.
 
 ## References
 
-- Work item 506, with both reproductions' figures. Issue 274, which is not this: its
+- Work item 506, with both reproductions' figures, and with the owner's ruling of
+  2026-11-26 on the counters file's version, Brigade decision d-20261126-b8a6ee: the
+  header goes to version 1, and across this change a host's driver and all its
+  clients stop and are upgraded together. Issue 274, which is not this: its
   `Overrun` is a client's queue of image events found full.
 - ADR 0012 and ADR 0013 (the counters file and a value's one writer), ADR 0062 (a
   client's counters, and the hazard it named), ADR 0078 (what an `available image`

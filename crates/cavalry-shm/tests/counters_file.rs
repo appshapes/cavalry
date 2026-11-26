@@ -342,6 +342,10 @@ fn version_when_the_file_is_from_another_cavalry() {
             assert!(said.contains(part), "{part}: {said}");
         }
     }
+    // A reader that only reads, `cavalry doctor`, opens the older file: it stores
+    // nothing, and the newer build's doctor reads an older driver during an upgrade.
+    let reader = CountersReader::open_to_read(dir.path()).expect("version 0, to read");
+    assert_eq!(reader.capacity(), CAPACITY);
     // And a file of a later version: this program is the older side.
     let dir = Dir::new("version-2");
     file_with_header(&dir, |header| header[8] = 2);
@@ -349,6 +353,13 @@ fn version_when_the_file_is_from_another_cavalry() {
     assert!(
         matches!(error, CountersError::Version { found: 2 }),
         "{error}"
+    );
+    assert!(
+        matches!(
+            CountersReader::open_to_read(dir.path()).unwrap_err(),
+            CountersError::Version { found: 2 }
+        ),
+        "no reader reads a version later than its own"
     );
     let said = error.to_string();
     for part in [

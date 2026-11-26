@@ -12,8 +12,10 @@ Version 1 adds the release word to the value slot, in bytes that version 0 reser
 by which the thread that writes a counter in a client says that it has stopped, and
 keeps a freed record of a client's out of use until that word is stored or the client
 is gone (ADR 0179). No other field moves. A reader of version 0 rejects a version 1
-file with `version`, so a client or a `doctor` of an earlier build does not attach to
-a driver of this one, and stores nothing there.
+file with `version`, so a client of an earlier build does not attach to a driver of
+this one, and stores nothing there; nor does a client of this build attach to a
+driver of an earlier one. A reader that only reads, and is no client, `cavalry
+doctor`, also reads a file of version 0 ("What a reader rejects").
 
 ## File
 
@@ -148,6 +150,16 @@ the file, so it returns the error, and `cavalry doctor` reports it.
 | `capacity` | Capacity is not a power of two from 64 to 65536. |
 | `length` | The file is shorter than 128 + capacity × 384 bytes. |
 | `changed` | The header read through the final mapping differs from the first read. |
+
+`version` is for whoever stores into the file, and for a client, which stores into
+the records the driver allocates for it: each reads version 1 alone. A reader that
+only reads and is no client of the driver, `cavalry doctor`, reads version 0 as well,
+and rejects a version above 1 or below 0. Version 0 differs from version 1 in nothing
+such a reader reads: the release word is the driver's to load, and the counters a
+later driver added are records an earlier one does not have, which read as
+unallocated. That is what lets the newer build's `doctor` read a driver of the older
+build while a cluster is upgraded one member at a time
+(`docs/how-to/upgrade-a-cluster.md`).
 
 For a record: `id` when a counter id is not below capacity; `state` when state is not
 −1, 0 or 1; `label` when label length is not 0 to 124. The checks are integer compares;

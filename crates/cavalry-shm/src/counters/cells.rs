@@ -70,14 +70,26 @@ impl HeaderCells {
 
     /// A reader's protocol: the magic with an acquire load, then the rest, then the
     /// spec's checks for a file of `file_length` bytes, in order.
+    #[cfg(any(test, loom))]
     pub(crate) fn read(&self, file_length: u64) -> Result<HeaderFields, CountersError> {
+        self.read_from(file_length, layout::VERSION)
+    }
+
+    /// As [`read`](Self::read), for a reader that may read a file back to version
+    /// `oldest`: one that only reads, and stores nothing (`spec/counters-file.md`,
+    /// "What a reader rejects").
+    pub(crate) fn read_from(
+        &self,
+        file_length: u64,
+        oldest: i32,
+    ) -> Result<HeaderFields, CountersError> {
         let magic = self.magic.load(Ordering::Acquire).to_ne_bytes();
         layout::check_magic(magic)?;
         // SAFETY: the acquire load above saw the magic the creator stored with release
         // after writing `rest`, and the header never changes after that (spec,
         // "Header"), so the bytes are complete and nobody writes them.
         let rest = self.rest.with(|p| unsafe { p.read() });
-        layout::parse_header_rest(&rest, file_length)
+        layout::parse_header_rest(&rest, file_length, oldest)
     }
 }
 

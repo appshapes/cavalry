@@ -456,7 +456,7 @@ impl CountersWriter {
     /// Opens `dir/counters` writable and runs the checks of [`CountersReader::open`].
     pub fn open(dir: &Path) -> Result<Self, CountersError> {
         Ok(Self {
-            mapped: open_mapped(dir, true)?,
+            mapped: open_mapped(dir, true, super::layout::VERSION)?,
         })
     }
 
@@ -564,7 +564,7 @@ impl fmt::Debug for CounterValue {
 /// (`not-ready`, `magic`, `version`, `capacity`, `length`), then the header again through
 /// the final mapping, which must equal the first read (`changed`). What
 /// [`CountersReader::open`] and [`CountersWriter::open`] share.
-fn open_mapped(dir: &Path, writable: bool) -> Result<Arc<Mapped>, CountersError> {
+fn open_mapped(dir: &Path, writable: bool, oldest: i32) -> Result<Arc<Mapped>, CountersError> {
     let file = OpenOptions::new()
         .read(true)
         .write(writable)
@@ -582,7 +582,7 @@ fn open_mapped(dir: &Path, writable: bool) -> Result<Arc<Mapped>, CountersError>
         // file's size covers (checked above); `HeaderCells` is atomics and bytes; the
         // reference lives no longer than `probe`.
         let header = unsafe { &*probe.as_ptr().cast::<HeaderCells>() };
-        header.read(file_length)?
+        header.read_from(file_length, oldest)?
     };
     drop(probe);
     let length = first.file_length() as usize;
@@ -601,7 +601,7 @@ fn open_mapped(dir: &Path, writable: bool) -> Result<Arc<Mapped>, CountersError>
         Map::Reader(map)
     };
     let mapped = Mapped::new(map, first)?;
-    let second = mapped.header_cells().read(file_length)?;
+    let second = mapped.header_cells().read_from(file_length, oldest)?;
     if second != first {
         return Err(CountersError::Changed);
     }
@@ -624,7 +624,21 @@ impl CountersReader {
     /// that gets [`CountersError::NotReady`] waits and opens again.
     pub fn open(dir: &Path) -> Result<Self, CountersError> {
         Ok(Self {
-            mapped: open_mapped(dir, false)?,
+            mapped: open_mapped(dir, false, super::layout::VERSION)?,
+        })
+    }
+
+    /// As [`open`](Self::open), for a reader that only reads and is no client of the
+    /// driver: `cavalry doctor`. It also opens a file of an earlier version, back to
+    /// [`super::layout::OLDEST_READABLE`], so that the newer build's `doctor` reads a
+    /// driver of the older build while a cluster is upgraded one member at a time. An
+    /// earlier version differs in nothing a reader reads, and a reader stores nothing,
+    /// so the reason a client refuses such a file, that it would store into a record
+    /// that driver could give away, does not hold for it (ADR 0179). A counter the
+    /// older driver does not have reads as unallocated, as it always did.
+    pub fn open_to_read(dir: &Path) -> Result<Self, CountersError> {
+        Ok(Self {
+            mapped: open_mapped(dir, false, super::layout::OLDEST_READABLE)?,
         })
     }
 

@@ -940,7 +940,7 @@ fn counters_checks(
     cluster: Option<&Cluster>,
     findings: &mut Vec<Finding>,
 ) -> usize {
-    let reader = match CountersReader::open(dir) {
+    let reader = match CountersReader::open_to_read(dir) {
         Ok(reader) => reader,
         Err(CountersError::NotReady) => {
             findings.push(Finding {

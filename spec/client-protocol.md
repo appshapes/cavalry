@@ -1120,7 +1120,9 @@ works across this version, where every version before it let a newer client run
 beside an older driver for the length of an upgrade. Between hosts nothing changes:
 no frame and no message of `spec/udp.md` or `spec/cluster.md` moves, so a cluster is
 still upgraded one member at a time, each member with the driver and the service
-beside it (`docs/how-to/upgrade-a-cluster.md`).
+beside it (`docs/how-to/upgrade-a-cluster.md`). `cavalry doctor` of the newer build
+reads a driver of the older one, as that upgrade needs: it only reads, and is no
+client (`spec/counters-file.md`, "What a reader rejects").
 
 ## Sizes
 
