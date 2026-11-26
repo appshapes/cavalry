@@ -211,17 +211,21 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   stops the recording, checks that it stopped at the end of what was written, and
   tells the member, which lists the snapshot. The call waits for the driver: 31 ms
   at the median on a laptop and 74.2 ms at the most, a service's first snapshot,
-  which adds its counters and its publications; for a state of 64 MiB, 51 ms at
-  the median and 60.1 ms at the most. `Ok(false)` says that
+  which then added its counters and its two publications; for a state of 64 MiB,
+  51 ms at the median and 60.1 ms at the most. Since ADR 0168 a first snapshot
+  adds one publication, the one its snapshots are recordings of, and that
+  longest call has not been measured again. `Ok(false)` says that
   the member already lists a snapshot of that position, and nothing was written. A
   step of the snapshot's own that makes no progress for a second ends the snapshot
   with `ClusterError::SnapshotFailed`, which names the step and what to check,
   counted in `cluster.service_snapshots_failed`; nothing committed is lost, and the
   service reads on. An add or a command that the driver does not answer waits the
   response timeout, 10 s, and not that second. A command the driver refuses or
-  does not answer, the service's two publications at its first snapshot among them,
-  is `ClusterError::Client` and is counted there too; the two counters are added
-  first, and a failed add of one of them is the one failure that is not counted. A
+  does not answer, the publication of its snapshots at its first snapshot among
+  them, is `ClusterError::Client` and is counted there too. The service's counters
+  were added when it first opened its member's log; a snapshot adds first any that
+  the driver refused then, and a failed add of one is the one failure that is not
+  counted. A
   program that takes no snapshots reads on at an `Entry::Snapshot` as
   it does at an `Entry::Other`, and one that matches every entry by name gives
   `Entry::Snapshot` an arm that does nothing, as
@@ -248,9 +252,11 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   second, so that a member that started again, or one that leads next, holds
   them: 2,048 messages in a poll at the most, the poll after a refresh of a full
   table. The service adds that publication, after its five counters, in the poll
-  that first opens its member's log, so the poll that tells of a program's first
-  timer sends the driver no command (ADR 0168). A driver that refuses the
-  publication is the poll's error (ADR 0159). The pending
+  that first opens its member's log, before that poll's entries, so telling the
+  member of a timer sends the driver no command, a program's first timer included
+  (ADR 0168). A driver that refuses the publication is that poll's error, and the
+  service asks again at its first poll a second later (ADR 0159, ADR 0168). The
+  pending
   timers are in the service's snapshot and come back with `restore`. A program
   that schedules none pays a few compares for each entry and for each poll, and
   no copy, no clock's reading and no message. `cluster.service_timers`,

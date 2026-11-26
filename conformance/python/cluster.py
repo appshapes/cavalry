@@ -39,13 +39,16 @@ that is no int64 refused before the ABI is called; the
 session's close as an entry every service is handed; a session and a service closed
 twice, and a service closed after its client.
 
-Then a measurement, printed and gated only for what must hold: 200 messages, one at a
-time, at each of which every service's program schedules one more timer, due at once.
-Each is handed to every service once, at one position and no earlier than its message.
-The round prints how long after its message each was stamped by the leader, in the
-milliseconds of the cluster's time, as a histogram, and how long the leader's service
-waited from the schedule to the timer, by this process's clock, beside what the run's
-first timers took (work item 462; ADR 0168).
+Then a measurement, printed and gated only for what must hold: 200 messages, or as many
+as CAVALRY_LATER_TIMERS names, one at a time, at each of which every service's program
+schedules one more timer, due at once. Each is handed to every service once, at one
+position and no earlier than its message. The round prints how long after its message
+each was stamped by the leader, in the milliseconds of the cluster's time, as a
+histogram with its p50, p99, p99.99 and max, and how long the leader's service waited
+from the schedule to the timer, by this process's clock, beside what the run's first
+timers took (work item 462; ADR 0168). Both measures hold this round's own cycle, which
+polls three services and a session on one thread and sleeps 200 microseconds between
+cycles: they are what this round saw, and no bound on a cluster.
 
 Then a report, printed and never gated: how many polls the three services made, how many
 took over a millisecond, and the longest, which is how long a poll held the GIL
@@ -87,7 +90,15 @@ HOUR_MS = 3_600_000        # the deadline its first schedule gives it, which the
 LATER_MESSAGE = b"later"   # the prefix of a message at which each program schedules one more timer, due at once
 # How many of them the round sends, one at a time: 200, some four seconds of the gate.
 # CAVALRY_LATER_TIMERS names another count for a measurement, 10,000 for a p99.99.
-LATER = int(os.environ.get("CAVALRY_LATER_TIMERS", "200"))
+try:
+    LATER = int(os.environ.get("CAVALRY_LATER_TIMERS", "200"))
+except ValueError:
+    LATER = 0
+if LATER < 1:
+    print(f"conformance/python: cluster round: CAVALRY_LATER_TIMERS is "
+          f"{os.environ.get('CAVALRY_LATER_TIMERS')!r}; give a count of 1 or more, or leave it unset for 200",
+          file=sys.stderr)
+    sys.exit(2)
 LATER_ID = 1000            # the id of the first of their timers; the others count on from it
 INT64_MIN, INT64_MAX = -(2 ** 63), 2 ** 63 - 1
 REFRESH_SECONDS = 1.2      # a timer refresh interval of spec/cluster.md, "Values", 1 s, and more
@@ -645,7 +656,8 @@ def main():
           f"{rank(stamped, 0.5)} ms, p99 {rank(stamped, 0.99)} ms, p99.99 {rank(stamped, 0.9999)} ms, max "
           f"{stamped[-1]} ms, as {counts}; the service beside the leader was handed each, after it scheduled it, "
           f"p50 {rank(waited, 0.5):,} us, p99 {rank(waited, 0.99):,} us, p99.99 {rank(waited, 0.9999):,} us, max "
-          f"{waited[-1]:,} us; its first timers of this run took {leader.first_took // 1000:,} us and were stamped "
+          f"{waited[-1]:,} us; of its first timers of this run, two due at once, it was handed the first "
+          f"{leader.first_took // 1000:,} us after it scheduled them, and the later of the two was stamped "
           f"{at_once} ms after their message (not gated; a p99.99 of fewer than 10,000 is the max)")
 
     # 10. The session before its client. Its close is an entry every service is handed,

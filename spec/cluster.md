@@ -725,7 +725,9 @@ written; and an ack that the consensus module stream does not take within that
 timeout, which is a member that is not running. The service asks the stop of a
 recording that has not stopped, reports the failure to its program, counts it in
 `cluster.service_snapshots_failed`, and reads on when its program next reads. A
-service adds its counters ("Counters", the ones a service adds) before its
+service adds the two counters of its snapshots and the three of its timers
+("Counters", the five a service adds that are neither its dropped replies nor
+the two of a start from a snapshot) before its
 publications, when it first opens its member's log ("The service", "Timers",
 "What a service tells its member"; ADR 0168), so that a
 publication the driver refuses at a snapshot is counted, as that snapshot's
@@ -733,7 +735,8 @@ failure. Two failures are counted in no counter of the service's: a counter that
 the driver refuses, for which there is no counter yet, and the publication on the
 consensus module stream when the driver refuses it at a read, where no snapshot
 fails. The service reports each to its program, as the error of that snapshot or
-that read, and its next snapshot, or its next read, adds what is missing. The
+that read, and its next snapshot adds what is missing, or a later read ("What a
+service tells its member"). The
 driver counts every command it refuses (`client_protocol.errors`; ADR 0159). A
 snapshot whose ack the stream took is counted in `cluster.service_snapshots_taken`.
 
@@ -2362,19 +2365,24 @@ handed the same event again, which is the same handing.
 **What a service tells its member.** The service holds one publication on
 `cavalry:ipc` and the consensus module stream, the one its service acks are on
 ("Snapshots"), from its first open of its member's log to its close. It adds its
-counters and then that publication in the read that first opens the log, before
-that read hands its program an entry, whatever the program does: adding a
-publication is the one command of a service's that takes long, since the driver
-makes the whole of a new log resident, and no read that has a timer to tell
-waits for it (ADR 0168). What it has to tell is a timer that an entry it took left pending, a
+five counters and then that publication in the read that first opens the log,
+before that read hands its program an entry, whatever the program does, so that
+telling its member of a timer sends its driver no command and waits for none: a
+new `cavalry:ipc` log is 192 MiB, every page of which the driver touches as it
+creates it and the service's client touches again as it maps it (ADR 0027), tens
+of milliseconds (ADR 0168). A read that opens no log adds nothing. What it has to
+tell is a timer that an entry it took left pending, a
 cancel, or the timers of the snapshot it started from, which it has to tell when
 it has read its history, though it reads no entry. A driver that refuses that
 publication, or the counters the service adds before it ("Snapshots", "A
 service's snapshot"), fails no call that the program makes in a handler and
 changes no timer: the service reports the refusal to its program as the error of
-that read, once the read's entries are taken, and adds what is missing at each
-read after it, before the read's entries (ADR 0159, ADR 0168). Until it has the
-publication it tells its member nothing, and keeps what it has to tell.
+that read, once the read's entries are taken, where the read has no error of its
+own, which comes first. It asks the driver again for what is missing before the
+entries of its first read a timer refresh interval of "Values" after the
+refusal, and of no read between, each of which reports nothing of it (ADR 0159,
+ADR 0168). Until it has the publication it tells its member nothing, and keeps
+what it has to tell.
 
 On that publication the service tells the member on its driver what its timers
 are. What it tells follows from the entries its program has taken, and from

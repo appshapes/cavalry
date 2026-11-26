@@ -124,11 +124,11 @@ the only implementation and the C ABI is a thin layer over it
   thread-local error is a fixed buffer, and `tests/allocations.rs` counts across
   all eighteen. A service's poll sends a command to the driver at a session's
   opening, where its answering changes and at a recording's end, and none for a
-  session message. Once in a service's life it sends six more, in the poll that
-  first opens its member's log, before that poll's entries: its five counters and
-  its publication to its member (`spec/cluster.md`, "What a service tells its
-  member"; ADR 0168). So the poll that tells the member of a program's first
-  timer sends none.
+  session message. It sends six more in the poll that first opens its member's
+  log, before that poll's entries: its five counters and its publication to its
+  member (`spec/cluster.md`, "What a service tells its member"; ADR 0168).
+  Telling the member of a timer then sends none, a program's first timer
+  included.
 - Hand a function a header's values that the header does not carry. A header is of
   four kinds, by the poll that made it, and a function asked for what a kind lacks
   sets `CAVALRY_ERR_WRONG_HEADER` or `CAVALRY_ERR_NO_POSITION` and fills nothing

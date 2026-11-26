@@ -1184,9 +1184,9 @@ pub struct ClusterService {
     /// The snapshot the last poll's last entry asked for, until the next poll.
     due: Option<Due>,
     /// The two counters of the service's snapshots, added with the three of its
-    /// timers at the first of its first snapshot that writes one, the first thing
-    /// it has to tell its member of a timer and the first timer event it passes
-    /// over ([`ClusterService::add_counters`]).
+    /// timers when the service first opens its member's log, and by a snapshot
+    /// where the driver refused them then ([`ClusterService::add_counters`]; ADR
+    /// 0168).
     snapshot_counters: Option<SnapshotCounters>,
     /// The service's publication on the service snapshot stream, from its first
     /// snapshot whose add the driver took: each snapshot is a recording of a span
@@ -1251,8 +1251,8 @@ struct Due {
     timestamp: i64,
 }
 
-/// The two counters of a service's snapshots, kept from the first snapshot it writes
-/// to its close: `cluster.service_snapshots_taken` and
+/// The two counters of a service's snapshots, kept from the service's first open of
+/// its member's log to its close: `cluster.service_snapshots_taken` and
 /// `cluster.service_snapshots_failed`.
 struct SnapshotCounters {
     taken: Counter,
@@ -1507,12 +1507,13 @@ impl ClusterService {
     ///
     /// The poll that first opens the member's log adds the service's five counters
     /// and its publication on the consensus module stream, before it reads an
-    /// entry: six commands to the driver, once in a service's life, the last of
-    /// which has the driver make a log of 192 MiB resident, tens of milliseconds
-    /// and more. So no later poll sends a command for a timer, and a program's
-    /// first timer costs what a later one costs (ADR 0168). A refusal of one of the
-    /// six is this poll's error, returned after the entries the handler took are
-    /// taken, and each poll after it adds what is missing before it reads.
+    /// entry: six commands to the driver, the last of which is for a log of 192
+    /// MiB, every page of which the driver touches and this client touches again,
+    /// tens of milliseconds. Telling the member of a timer then sends no command,
+    /// so a program's first timer costs what a later one costs (ADR 0168). A
+    /// refusal of one of the six is this poll's error, returned after the entries
+    /// the handler took are taken, and the service asks again before the entries
+    /// of its first poll a second later.
     ///
     /// After its entries the poll tells the member of the program's timers
     /// (`spec/cluster.md`, "What a service tells its member"). It offers the stream
@@ -2069,11 +2070,12 @@ impl ClusterService {
     /// A snapshot written is counted in `cluster.service_snapshots_taken`, and one
     /// given up in `cluster.service_snapshots_failed`, the driver's refusal of a
     /// command among them. At the first snapshot that refusal can be of the
-    /// service's two publications, which the call returns as
-    /// [`ClusterError::Client`]. The service's two counters are added before
-    /// anything else, at the first call that writes a snapshot, and a refusal of
-    /// either is the one failure that is not counted: there is no counter yet to
-    /// count it in. The call returns it as [`ClusterError::Client`], and the next
+    /// publication its snapshots are recordings of, which the call returns as
+    /// [`ClusterError::Client`]. The service's counters and its publication to its
+    /// member were added when it first opened its member's log (ADR 0168); where
+    /// the driver refused one then, the call adds it before anything else, the
+    /// counters first, and a refusal of a counter is the one failure that is not
+    /// counted: there is no counter yet to count it in. The call returns it as [`ClusterError::Client`], and the next
     /// call adds them again.
     ///
     /// ```

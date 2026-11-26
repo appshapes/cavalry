@@ -2252,12 +2252,12 @@ class ClusterService {
    * while the service answers. Those are commands sent with the service's client, at a
    * session's opening, where a term's leader changes and at a recording's end, and the poll
    * waits for the driver's answer to each on the calling thread; none is sent for a session
-   * message. Six more are sent once in a service's life: its five counters and its
-   * publication to its member, in the poll that first opens the member's log, before
-   * that poll's entries, so that the poll which tells the member of the program's first
-   * timer sends none; that poll returns -1 with the driver's refusal of one of them,
-   * after the entries its handler took are taken, and each poll after it adds what is
-   * missing. After its entries a poll tells the member
+   * message. Six more are sent in the poll that first opens the member's log, before
+   * that poll's entries: its five counters and its publication to its member. Telling
+   * the member of a timer then sends no command, the program's first timer included.
+   * That poll returns -1 with the driver's refusal of one of the six, after the entries
+   * its handler took are taken, and the service asks again at its first poll a second
+   * later. After its entries a poll tells the member
    * what each taken entry changed, and every pending timer again each second, by
    * offers that wait for nothing. When the handler threw, or returned what is no action, or the
    * runtime kept the entry from it, the addon's trampoline aborted the entry and this throws
