@@ -63,7 +63,8 @@ use cavalry_shm::counters::generated::{
     CLUSTER_SERVICE_TIMERS, CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_PASSED_OVER,
     CLUSTER_STANDBY, CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TIMERS, CLUSTER_TIMERS_CLEARED,
     CLUSTER_TRUNCATION_OWED, CLUSTER_TRUNCATIONS_FAULTED, CLUSTER_TRUNCATIONS_REFUSED,
-    CLUSTER_VOTE_FLOOR, CLUSTER_VOTE_FLOORS_CLEARED, CLUSTER_VOTERS, CLUSTER_VOTES_WITHHELD,
+    CLUSTER_VOTE_FLOOR, CLUSTER_VOTE_FLOORS_CLEARED, CLUSTER_VOTERS, CLUSTER_VOTERS_UNHEARD,
+    CLUSTER_VOTES_WITHHELD,
 };
 use cavalry_shm::counters::generated::{
     DRIVER_REGISTRY_FULL, PUBLICATION_ADD_DEFERRED_WAITING, SUBSCRIPTION_ADD_DEFERRED_WAITING,
@@ -1274,6 +1275,10 @@ struct MemberCounters {
     /// counters file holds no such record, as for a member of a build older than the
     /// counter.
     vote_floor: Option<i64>,
+    /// `cluster.voters_unheard`: the voters the member has not heard report in its
+    /// present election (work item 476); `None` while the counters file holds no such
+    /// record, as for a member of a build older than the counter.
+    voters_unheard: Option<i64>,
     /// `cluster.truncation_owed`: the position of the truncation the member owes, −1
     /// for none (ADR 0148); `None` while the counters file holds no such record, as
     /// for a member of a build older than the counter.
@@ -1711,6 +1716,8 @@ fn cluster_checks(
             member.protocol_version = Some(value);
         } else if type_id == CLUSTER_VOTE_FLOOR.0 {
             member.vote_floor = Some(value);
+        } else if type_id == CLUSTER_VOTERS_UNHEARD.0 {
+            member.voters_unheard = Some(value);
         } else if type_id == CLUSTER_TRUNCATION_OWED.0 {
             member.truncation_owed = Some(value);
         } else if type_id == CLUSTER_VOTE_FLOORS_CLEARED.0 {
@@ -1956,6 +1963,19 @@ fn no_leader_message(member: &MemberCounters, state: i64, cluster: Option<&Clust
     } else {
         ""
     };
+    // A member whose log is empty in a cluster of empty logs, as a new cluster's
+    // members are, neither stands nor votes until it has heard every voter (work item
+    // 476): the voter it has not heard is the one to start.
+    let unheard = match (member.voters_unheard, member.append_position) {
+        (Some(unheard), Some(0)) if unheard > 0 => format!(
+            " Its log is empty and it has not heard {unheard} of the other {who}s in this \
+             election: a member whose log is empty, as every member's is in a new \
+             cluster, neither stands nor votes until it has heard every {who}, so a new \
+             cluster elects no leader until each of its members has started. Start the \
+             {who} that has not started."
+        ),
+        _ => String::new(),
+    };
     let replicated = if state == 1 {
         " A member that has replicated a term it missed from a leader's recordings also \
          canvasses again, with no leader, in the same election: it waits there for that \
@@ -1969,11 +1989,12 @@ fn no_leader_message(member: &MemberCounters, state: i64, cluster: Option<&Clust
         "member {id} follows no leader: its election is in {}{began}. The members elect \
          their leader: each canvasses, one that no member which reported is ahead of \
          nominates itself after a delay of up to half a second, and it leads once {of} has \
-         voted for it. At its start a member waits in canvass up to {startup} s for every \
-         {who} to report, and moves to nominate at once when all have. If this member stays \
+         voted for it. At its start a member whose log holds entries waits in canvass up \
+         to {startup} s for every {who} to report, and moves to nominate at once when all \
+         have; one whose log is empty waits for every {who}, with no bound. If this member stays \
          without a leader, fewer than a quorum of the {who}s run or reach each other: run \
          doctor on each member's host, and check that each reaches the consensus endpoint \
-         of every other, the third field of its entry in {members}.{standby}{replicated}{}",
+         of every other, the third field of its entry in {members}.{unheard}{standby}{replicated}{}",
         election_state_name(state),
         failed_elections_text(member)
     )
@@ -6867,6 +6888,53 @@ mod tests {
     /// what a canvass after a replication waits for. The elections it has failed are
     /// counted against the three counters that each name a rule, and those the three
     /// do not hold are counted out, with what else fails an election.
+    /// A member of a new cluster whose log is empty and that has not heard every voter
+    /// is told it neither stands nor votes until it has, and to start the voter that has
+    /// not started (work item 476). A member whose log holds entries is told nothing of
+    /// it, since it stands at the startup canvass timeout with a quorum.
+    #[test]
+    fn a_new_clusters_member_that_has_not_heard_every_voter_is_told_to_start_it() {
+        let cluster = Cluster::of(Some(THREE_MEMBERS)).expect("the members string parses");
+        let waiting = |append: i64| {
+            [
+                (CLUSTER_ROLE, 0),
+                (CLUSTER_ELECTION_STATE, 1),
+                (CLUSTER_LEADERSHIP_TERM_ID, -1),
+                (CLUSTER_LEADER_MEMBER_ID, -1),
+                (CLUSTER_ELECTION_CAUSE, 0),
+                (CLUSTER_PROTOCOL_VERSION, 768),
+                (CLUSTER_APPEND_POSITION, append),
+                (CLUSTER_VOTERS_UNHEARD, 1),
+            ]
+        };
+        let no_leader = |findings: Vec<Finding>| {
+            findings
+                .into_iter()
+                .find(|found| found.check == "cluster-no-leader")
+                .expect("a cluster-no-leader finding")
+                .message
+        };
+        let (_, findings) =
+            cluster_findings_in("new-cluster-waits", 0, Some(&cluster), &waiting(0));
+        let message = &no_leader(findings);
+        assert!(
+            message.contains(
+                "Its log is empty and it has not heard 1 of the other members in this \
+                 election: a member whose log is empty, as every member's is in a new \
+                 cluster, neither stands nor votes until it has heard every member"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains("Start the member that has not started."),
+            "{message}"
+        );
+        let (_, findings) =
+            cluster_findings_in("holds-a-log-waits", 0, Some(&cluster), &waiting(4096));
+        let message = &no_leader(findings);
+        assert!(!message.contains("Its log is empty"), "{message}");
+    }
+
     #[test]
     fn a_member_that_elects_and_has_no_leader_is_told_why_its_election_began() {
         let cluster = Cluster::of(Some(THREE_MEMBERS)).expect("the members string parses");

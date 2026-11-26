@@ -2889,7 +2889,12 @@ pub fn candidate(
 /// have voted there, and a candidate it voted for names the term only in a report
 /// (work item 476). Once every voter has reported, it votes by the one case in which a
 /// member that withholds votes ([`withheld_vote`], [`votes_in_term`]).
-pub const fn withholds(own: LogReport, vote_floor: i64, log_heard: bool, all_reported: bool) -> bool {
+pub const fn withholds(
+    own: LogReport,
+    vote_floor: i64,
+    log_heard: bool,
+    all_reported: bool,
+) -> bool {
     let empty = own.term < 0 && own.position == 0;
     (empty && (log_heard || !all_reported)) || vote_floor >= 0
 }

@@ -655,10 +655,11 @@ pub struct Counts {
     /// vote, and the member's own does not (ADR 0134).
     pub standby_vote_requests: u64,
     /// `cluster.votes_withheld`: a request vote the member answered with nothing
-    /// because it withholds its vote, its log empty beside a member that holds one or a
-    /// vote floor held, and not every voter had reported a log the candidate's is at
-    /// least, or a voter other than the candidate had named the request's term or a
-    /// later one (ADR 0145, ADR 0161).
+    /// because it withholds its vote, its log empty beside a member that holds one or
+    /// while a voter has not reported in its election (work item 476), or with no log
+    /// heard, or a vote floor held, and not every voter had reported a log the
+    /// candidate's is at least, or a voter other than the candidate had named the
+    /// request's term or a later one (ADR 0145, ADR 0161).
     pub votes_withheld: u64,
     /// `cluster.leaders_withheld`: a new leadership term the member, a voter with its
     /// log empty, ignored where it would otherwise have taken the sender as its leader:
@@ -2679,10 +2680,12 @@ impl Consensus {
 
     /// Whether this member withholds its vote and its candidacy (`spec/cluster.md`,
     /// "A member that lost its log"; ADR 0145): its log empty while a member's report
-    /// in this election, or `candidate`, the log of a request it answers, holds a log;
-    /// or a vote floor held, which it clears once it has joined a leader's live log in
-    /// this run with its append position at or past the floor and at or past a floor
-    /// answer (ADR 0161, ADR 0163).
+    /// in this election, or `candidate`, the log of a request it answers, holds a log,
+    /// or while a voter has not reported in this election (work item 476); or a vote
+    /// floor held, which it clears once it has joined a leader's live log in this run
+    /// with its append position at or past the floor and at or past a floor answer
+    /// (ADR 0161, ADR 0163). A member whose log is empty votes by the one guarded case
+    /// whether it withholds or not.
     fn withholds(&self, candidate: Option<LogReport>) -> bool {
         let holds = |log: &LogReport| log.term >= 0 || log.position > 0;
         let reported = self
@@ -2702,14 +2705,12 @@ impl Consensus {
         // then a member whose log is empty in a cluster of empty logs withholds too,
         // since a candidate it voted for before it lost its log names that term only in
         // a report (work item 476).
-        let all_reported = self
-            .peers
-            .iter()
-            .take(self.count)
-            .enumerate()
-            .filter(|&(index, _)| index != self.own)
-            .all(|(_, peer)| peer.reported);
-        withholds(self.own_report(), self.vote_floor, log_heard, all_reported)
+        withholds(
+            self.own_report(),
+            self.vote_floor,
+            log_heard,
+            self.voters_unheard() == 0,
+        )
     }
 
     /// The lowest log position of the floor answers this member took since it last
@@ -2790,6 +2791,21 @@ impl Consensus {
             self.answered.min(answer.log_position)
         };
         self.answered_term = answer.leadership_term_id;
+    }
+
+    /// The voters of this member's members string, other than itself, that it has not
+    /// heard report in its present election: 0 once each has. A member whose log is
+    /// empty, beside members whose logs are empty too, stands and votes only once this
+    /// is 0 (`spec/cluster.md`, "A member that lost its log"; work item 476).
+    pub fn voters_unheard(&self) -> i64 {
+        let unheard = self
+            .peers
+            .iter()
+            .take(self.count)
+            .enumerate()
+            .filter(|&(index, peer)| index != self.own && !peer.reported)
+            .count();
+        i64::try_from(unheard).unwrap_or(i64::MAX)
     }
 
     /// The vote floor this member holds, −1 for none: the end of the log of the leader
