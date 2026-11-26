@@ -1199,13 +1199,15 @@ const MEMBER_COUNTS: [CounterId; 18] = [
 
 /// The counters that a service adds, as a client of its member's driver, each keyed
 /// by the member's id (`spec/cluster.md`, "Counters", "Snapshots", "Timers"): its
-/// dropped replies when it first opens its member's log, two for a start from a
-/// snapshot before it reads one, two with its first snapshot, and three with the first
-/// thing it has to tell its member of a timer. It holds each from then to its close,
-/// and the driver frees them when its client closes or times out. So a member with
-/// none of them in its driver's counters has no service beside it that has opened
-/// its log or begun a start from a snapshot (ADR 0167). A new counter that a service
-/// adds is added here.
+/// dropped replies when it first opens its member's log; two for a start from a
+/// snapshot, before it reads one; and five together, two of its snapshots and three of
+/// its timers, at the first of its first snapshot, the first thing it has to tell its
+/// member of a timer and the first timer event it passes over. It holds each from
+/// then to its close, and the driver frees them when its client closes or times out.
+/// So a member with none of them in its driver's counters has no service beside it
+/// that has opened its log or begun a start from a snapshot (ADR 0167). A program
+/// that reads the committed log and is no service adds none. A new counter that a
+/// service adds is added here, and to the list in the test that names these.
 const SERVICE_COUNTERS: [CounterId; 8] = [
     CLUSTER_REPLIES_DROPPED,
     CLUSTER_SERVICE_SNAPSHOT_START_POSITION,
@@ -2366,7 +2368,7 @@ fn member_findings(
     // started has not added them yet, which both lines say.
     if leads && closed && !member.serves {
         let none = "this driver's counters hold none of the counters a service adds for \
-                    the member, cluster.replies_dropped the first of them";
+                    the member, cluster.replies_dropped among them";
         let started = "A program that started a moment ago has not added them yet: run \
                        doctor again";
         let (level, message) = match member.timers.filter(|held| *held > 0) {
@@ -2381,8 +2383,8 @@ fn member_findings(
                      event at the most for each it holds, and nothing answers what is \
                      appended in its term: where the program runs beside the other \
                      members, its timers wait while this member leads. Start the program \
-                     beside this member; a client whose message was appended meanwhile \
-                     gets no reply to it and sends it again. {started}.",
+                     beside this member; a client whose message got no reply sends it \
+                     again. {started}.",
                     if held == 1 {
                         "1 timer".to_string()
                     } else {
@@ -8076,7 +8078,7 @@ mod tests {
                 .collect()
         };
         let none = "this driver's counters hold none of the counters a service adds for the \
-                    member, cluster.replies_dropped the first of them";
+                    member, cluster.replies_dropped among them";
         let started = "A program that started a moment ago has not added them yet: run doctor \
                        again.";
         let warning = |timers: &str| {
@@ -8092,7 +8094,7 @@ mod tests {
                      it holds, and nothing answers what is appended in its term: where the \
                      program runs beside the other members, its timers wait while this \
                      member leads. Start the program beside this member; a client whose \
-                     message was appended meanwhile gets no reply to it and sends it again. \
+                     message got no reply sends it again. \
                      {started}"
                 ),
             )
@@ -8152,9 +8154,43 @@ mod tests {
             let findings = cluster_findings_beside(name, 1, &member(2, 17, more), &[]);
             assert_eq!(of(&findings), std::slice::from_ref(&note), "{name}");
         }
-        // Each of a service's counters, alone, is a service that runs: nothing.
-        assert_eq!(SERVICE_COUNTERS.len(), 8);
-        for counter in SERVICE_COUNTERS {
+        // Each of a service's counters, alone, is a service that runs: nothing. The
+        // eight are named here and not taken from the list under test: those that
+        // `crates/cavalry-client/src/service.rs` adds.
+        let adds = [
+            CLUSTER_REPLIES_DROPPED,
+            CLUSTER_SERVICE_SNAPSHOT_START_POSITION,
+            CLUSTER_SERVICE_SNAPSHOTS_PASSED_OVER,
+            CLUSTER_SERVICE_SNAPSHOTS_TAKEN,
+            CLUSTER_SERVICE_SNAPSHOTS_FAILED,
+            CLUSTER_SERVICE_TIMERS,
+            CLUSTER_SERVICE_TIMER_EVENTS_PASSED_OVER,
+            CLUSTER_SERVICE_TIMER_CANCELS_DROPPED,
+        ];
+        // And every other counter of the cluster that is keyed by a member, the
+        // member's own, is no service's: a leader that holds them all, as a real
+        // member does, and none of the eight, has the warning. A list that named one
+        // of the member's own would find a service beside every member.
+        let mut whole = member(2, 17, &[(CLUSTER_TIMERS, 2)]);
+        for def in COUNTERS.iter() {
+            let named = whole.iter().any(|(counter, _)| *counter == def.id);
+            if def.name.starts_with("cluster.")
+                && !named
+                && !adds.contains(&def.id)
+                && !SESSION_COUNTS.contains(&def.id)
+                && def.id != CLUSTER_CONTROL_TOGGLE
+            {
+                whole.push((def.id, 0));
+            }
+        }
+        assert!(whole.len() > 60, "{}", whole.len());
+        let findings = cluster_findings_beside("service-whole-member", 1, &whole, &[]);
+        let own: Vec<Finding> = findings
+            .into_iter()
+            .filter(|finding| finding.check == "cluster-no-service")
+            .collect();
+        assert_eq!(of(&own), [warning("2 timers")]);
+        for counter in adds {
             let findings = cluster_findings_beside(
                 "service-runs",
                 1,
@@ -8180,9 +8216,9 @@ mod tests {
                 "{name}: {findings:?}"
             );
         }
-        // A leader that holds none, beside which a service has timers pending and
-        // then stopped uncleanly so that only its gauge is left, cannot be: the gauge
-        // is a service's counter. The older warning stands alone there.
+        // The gauge of a service's timers is one of the eight, so a leader that holds
+        // no timer beside a service that has some gets the older warning, and nothing
+        // of a missing service.
         let findings = cluster_findings_beside(
             "service-gauge",
             1,

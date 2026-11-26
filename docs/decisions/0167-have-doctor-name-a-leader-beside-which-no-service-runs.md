@@ -25,11 +25,13 @@ These facts bound what doctor can read on the leader's host.
   started again holds none, whatever the programs beside the other members hold.
 - A service is a client of its member's driver, and it adds counters there, each
   keyed by the member's id: `cluster.replies_dropped` when it first opens the
-  member's log; two for a start from a snapshot, before it reads the snapshot; two
-  with its first snapshot; and three with the first thing it has to tell its member
-  of a timer (`spec/cluster.md`, "Counters", "Snapshots", "What a service tells its
-  member"; ADR 0118, ADR 0159). It holds each to its close. The driver frees a
-  client's counters when the client closes, and when it times out.
+  member's log; two for a start from a snapshot, before it reads the snapshot; and
+  five together, two of its snapshots and three of its timers, at the first of its
+  first snapshot, the first thing it has to tell its member of a timer and the
+  first timer event it passes over (`spec/cluster.md`, "Counters", "Snapshots",
+  "What a service tells its member"; ADR 0118, ADR 0159). It holds each to its
+  close. The driver frees a client's counters when the client closes, and when it
+  times out.
 - So the first of them is in the file from a service's first open of the log to
   its end, whatever its program schedules or snapshots.
 - The gauge `cluster.service_timers` alone does not say that a service runs: a
@@ -102,19 +104,28 @@ All from one laptop, macOS on Apple silicon.
   nothing of it. Once the program runs again it prints neither line. The runner
   also fails when the how-to's page does not quote the warning's words.
 - A program that is killed outright, with no close, is seen when its client has
-  timed out. The driver times a client out 10 s after its last keepalive, and a
-  client sends one every 500 ms (`spec/client-protocol.md`, "Liveness and
-  timeouts"), so that is 9.5 s to 10 s after the kill. In three runs of a copy of
+  timed out. The driver times a client out 10 s after its last command, and a
+  client that sends nothing else sends a keepalive every 500 ms
+  (`spec/client-protocol.md`, "Liveness and timeouts"), so that is about 10 s
+  after the kill. In three runs of a copy of
   the runner that sent SIGKILL where the runner sends Ctrl-C, the warning came
   9.6 s, 10.0 s and 9.7 s after the kill, by a clock that doctor's own run of
   about 0.1 s is part of. That copy is in no file of this change, and no test
   holds the kill.
 - `a_leader_beside_which_no_service_runs_is_named` in
-  `crates/cavalry-control/src/doctor.rs` holds both lines word for word. It holds
-  that each of the eight counters alone is a service that runs; that another
-  member's service's counter, a client's session's counter and the member's own
-  counters of its service's snapshots and acks are none; and that a follower and
-  a leader whose election is open get neither line.
+  `crates/cavalry-control/src/doctor.rs` holds both lines word for word. It names
+  the eight counters in a list of its own and holds that each alone is a service
+  that runs; that a leader which holds every other counter of the cluster that is
+  keyed by a member, and none of the eight, has the warning; that another
+  member's service's counter and a client's session's counter are none; and that a
+  follower and a leader whose election is open get neither line.
+- That a service adds its first counter whatever its program does is held by
+  `crates/cavalry-client/tests/cluster_service.rs`, in
+  `the_service_beside_a_terms_leader_answers_its_entries_and_no_other_terms` and
+  the test after it: the service's `cluster.replies_dropped` is absent before the
+  service's first open of the log and 0 after it, for a program that takes no
+  snapshot and schedules no timer. The how-to's program schedules timers, so the
+  runner does not show this.
 - Neither line holds the words "cluster member", by which
   `docs/tutorials/run-a-cluster.md` picks each member's own note out of doctor's
   output; the test holds that too.
@@ -130,15 +141,24 @@ All from one laptop, macOS on Apple silicon.
 - A program that every host's operator stopped on purpose leaves the warning
   beside the leader until its member starts again or a program does. The line
   says "where the program runs beside the other members".
-- A killed program is seen 9.5 s to 10 s after the kill, and not before.
-- Doctor says nothing of a service that runs and does not read: one whose
-  handler does not return, one that loads a large snapshot, one whose open of
-  the log the driver keeps refusing. Its client is alive and its counters are in
-  the file. Doctor's older finding, a leader that holds no timer beside a service
-  that has some, names a part of these.
+- A killed program is seen about 10 s after the kill, and not before.
+- Doctor says nothing of a service that has opened its log once and reads no
+  more: one whose handler does not return, one that loads a large snapshot, one
+  whose later open of the log the driver keeps refusing. Its client is alive and
+  its counters are in the file. Doctor's older finding, a leader that holds no
+  timer beside a service that has some, names a part of these.
 - A service that has just started has no counter until it has opened its
   member's log once, or begun a start from a snapshot. Both lines say to run
-  doctor again.
+  doctor again. A service whose first open never succeeds, with no start from a
+  snapshot before it, stays in that state: the driver's replays are all in use,
+  the driver refuses the counter, or the position it starts from is purged. Doctor
+  then says at every run that the program has stopped, where it runs and reads
+  nothing. The program's own poll reports each of those refusals to it.
+- With two services beside one member, both lines come only when both have
+  stopped.
+- A service of a build before ADR 0118 adds none of the eight, and this doctor
+  gives its leader the note or the warning. A member, its driver and its service
+  are of one build (`spec/cluster.md`, "Versions and the upgrade").
 - A program that reads the committed log and is no service adds none of the
   eight counters, so doctor does not take it for one.
 - A counter that a later version has a service add is added to doctor's list, or
