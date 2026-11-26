@@ -283,6 +283,12 @@ impl Publication {
             return;
         }
         self.removed = true;
+        // A client that is closed has nothing registered with the driver, which
+        // removed this publication's registration with the client: a command from it
+        // now would read to the driver as a new client's first (ADR 0179).
+        if self.shared.closed().is_some() {
+            return;
+        }
         let command = Command::RemovePublication {
             client_id: self.client_id,
             correlation_id: self.producer.next_correlation_id(),

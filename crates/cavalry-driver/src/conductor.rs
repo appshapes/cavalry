@@ -31,6 +31,7 @@ use std::time::Duration;
 use cavalry_log::dir::Recovery;
 
 use cavalry_proto::channel::{Channel, ChannelError, FlowControl, PublicationPosition, UdpChannel};
+use cavalry_proto::client_protocol::CLIENT_LOCK_DIRECTORY;
 use cavalry_proto::client_protocol::{
     Command, ErrorCode, Event, IPC_CHANNEL, MAX_STRING_LENGTH, NO_CHANNEL_STATUS, NULL_LENGTH,
     ProtocolError, ReplayStopReason,
@@ -1032,6 +1033,19 @@ impl Conductor {
         receiver: ReceiverLink,
     ) -> Result<Self, DriverError> {
         let counters = CountersFile::create(dir, spec::COUNTERS_CAPACITY)?;
+        // Where each client keeps its lock file (`spec/client-protocol.md`, "The records
+        // a client writes"), created before the command ring: a client attaches when
+        // it finds the ring, opens a handle on this directory first, and makes its
+        // lock file through that handle. `prepare_dir` removed the directory of the
+        // driver before this one, with everything else it left, before anything here
+        // was created: a client of that driver holds a handle on a directory that is
+        // gone, and can make no file in this one.
+        let clients = dir.join(CLIENT_LOCK_DIRECTORY);
+        std::fs::create_dir(&clients).map_err(|source| DriverError::Io {
+            what: "create the directory of the clients' locks",
+            path: clients.clone(),
+            source,
+        })?;
         let statics = Statics::new(&counters)?;
         counters
             .counter(CONDUCTOR_IDLE_STRATEGY.record())?
