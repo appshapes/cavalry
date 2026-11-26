@@ -130,7 +130,11 @@ sleeps on a caller's own thread. Each is a later change of work item 338.
   from 9 ms to 20 ms in the first nine minutes and to 52.6 ms in the four after,
   in a `nanosleep` that no signal had reached. A wait that stuck in those runs is
   not in these figures: it did not return until it was woken at 30 s.
-- **A driver with the watch, left idle on the laptop**: IDLERUN
+- **A driver with the watch, left idle on the laptop** for an hour, its counter read
+  each minute: 0. Its conductor and its recorder parked about 6.8 million times
+  between them, at which one lost wake-up in 38 million gives 0.18. The gates ran
+  beside it for about half of the hour. That driver was built with the grace first
+  tried, 50 ms, and counted at every look: no park of it was even 50 ms late.
 - **The cost of a held thread without it**: the process of 31 hours, in Context,
   whose samples are with work item 338.
 - Twenty runs of the tests that wait on a clock, on both of CI's runners, are in the
