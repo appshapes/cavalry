@@ -145,8 +145,8 @@ created from 2026-11-22 to 2026-11-25 UTC, four days, and each run's jobs:
 - In the same window `gates (linux)` failed once in 61 jobs, at `just test` (run
   45487811627, 0c68d788).
 
-The changed workflows were tried twice from a throwaway branch, `trial-479-macos`,
-which is never merged:
+The changed workflows were tried three times from a throwaway branch,
+`trial-479-macos`, which is never merged:
 
 - At 7676e590, which is this change's first commit, 9a49fcf3, with a temporary push
   trigger added to each workflow file: a push started `ci` run 45759398269 with one job,
@@ -158,6 +158,11 @@ which is never merged:
   head when it was reviewed. By hand, `macos` run 45761444480 had the one job
   `macos / gates (macos)`, and `ci` run 45761448035 had the one job `gates (linux)`.
   Both passed, in 17 and 15 minutes.
+- At a4a94287, after the first review, with the tree of f97a0a8a: by hand, `macos`
+  run 45766204188 passed in 17 minutes. Its last commit edits this ADR, which the
+  branch adds. `just lint-docs` read the branch's change from where it left
+  `master`, 45 files, and passed; before this change it read the last commit alone
+  in such a run, and refused it as a change to an accepted decision.
 
 The first run of `macos.yml` at `master`'s head cannot come before this change lands,
 since the file must be on `master` first. It is started by hand after the landing,
