@@ -606,6 +606,23 @@ func edges(client *cavalry.Client) {
 		fail("%s: the close after the poll returned %v, IsClosed is %v and the table holds %d, was %d", name, err,
 			subscription.IsClosed(), cavalry.Registered(), registered)
 	}
+	// After its own Close the wrapper hands the ABI a null handle, the other place where
+	// the ABI refuses a subscription's images: the count is -1, and Images and ImageAt each
+	// return that refusal, ErrNull, with no slice, no image and no nil error (work item
+	// 468; a runner asks since work item 477).
+	closedCount := subscription.ImageCount()
+	closedImages, closedListErr := subscription.Images()
+	closedImage, closedImageErr := subscription.ImageAt(0)
+	var closedList, closedAt *cavalry.Error
+	if closedCount != -1 || closedImages != nil || closedImage != nil ||
+		!errors.As(closedListErr, &closedList) || closedList.Fn != "cavalry_subscription_image_count" ||
+		closedList.Code != cavalry.ErrNull ||
+		!errors.As(closedImageErr, &closedAt) || closedAt.Fn != "cavalry_subscription_image_count" ||
+		closedAt.Code != cavalry.ErrNull {
+		fail("%s: after the subscription's Close its ImageCount was %d, Images returned %v with %v and ImageAt %v with "+
+			"%v; expected -1, and no slice and no image with *Error of cavalry_subscription_image_count and ErrNull (%d)",
+			name, closedCount, closedImages, closedListErr, closedImage, closedImageErr, cavalry.ErrNull)
+	}
 	mustOK(publication.Close())
 
 	// A call that is not a message reads its error on the thread of the call that failed:
@@ -624,7 +641,8 @@ func edges(client *cavalry.Client) {
 		"returned ERROR with ErrClaimOutstanding in Err, Claim stayed the first slice and its commit set it to nil; a "+
 		"second commit left ErrNoClaim in Err; a close with a claim outstanding set Claim to nil; a close from inside the "+
 		"handler returned *Error with ErrPolling, kept the subscription open for message 18, and the close after the poll "+
-		"freed its slot; an add whose channel is not UTF-8 returned *Error with ErrNotUTF8", name)
+		"freed its slot; after that Close ImageCount was -1 and Images and ImageAt each returned the ABI's refusal with "+
+		"ErrNull; an add whose channel is not UTF-8 returned *Error with ErrNotUTF8", name)
 }
 
 func rangeOf(from, to int) []int {
