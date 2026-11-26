@@ -1676,7 +1676,7 @@ impl Cavalry {
             // The conductor reads the closed state every pass and is parked for at most
             // a millisecond between passes. The unpark, after the state is stored, ends
             // that park, so the join does not wait on the park's timeout: on one Mac a
-            // wait of 1 ms in about 20 million did not return until its thread was
+            // wait of 1 ms in about 40 million did not return until its thread was
             // woken, and this join then waited for ever (ADR 0171).
             handle.thread().unpark();
             let _ = handle.join();

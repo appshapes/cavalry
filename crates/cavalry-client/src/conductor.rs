@@ -193,7 +193,7 @@ pub(crate) const fn nanos(duration: Duration) -> i64 {
 /// The park is [`std::thread::park_timeout`], not a sleep, so that the client's close
 /// can end it: an unpark of the conductor's thread makes the park return at once. The
 /// close stores its reason and then unparks, and does not depend on the park's own
-/// timeout, which is not sure on every machine: on one Mac a wait of 1 ms in about 20
+/// timeout, which is not sure on every machine: on one Mac a wait of 1 ms in about 40
 /// million did not return until its thread was woken (ADR 0171).
 struct Backoff {
     spins: u32,

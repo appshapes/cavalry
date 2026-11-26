@@ -374,7 +374,7 @@ impl Driver {
         // wakes. A replayer with no replay and a sender or a receiver with nothing to do
         // are parked until a request or this. Each of the five, when its duty cycle found
         // no work, is parked for at most a millisecond by its idle strategy, and this
-        // stop does not wait on that timeout: on one Mac a wait of 1 ms in about 20
+        // stop does not wait on that timeout: on one Mac a wait of 1 ms in about 40
         // million did not return until its thread was woken, and the join below then
         // waited for ever (ADR 0171).
         for handle in [

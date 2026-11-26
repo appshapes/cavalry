@@ -142,7 +142,7 @@ impl Idler {
     /// at once. A loop that calls this reads its stop flag every pass, so a stop is the
     /// flag stored and then the unpark, and it does not depend on the park's own
     /// timeout. That timeout is not sure on every machine: on one Mac a wait of 1 ms in
-    /// about 20 million did not return until its thread was woken (ADR 0171;
+    /// about 40 million did not return until its thread was woken (ADR 0171;
     /// `docs/how-to/find-a-wait-that-does-not-return.md`). A park may also return
     /// early for no reason, which costs one duty cycle. And it takes the thread's
     /// unpark token: a loop that parks for a purpose of its own as well does not count

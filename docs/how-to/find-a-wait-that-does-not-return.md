@@ -8,7 +8,7 @@ Why Cavalry's threads park where a stop can wake them is
 The fault: a thread asks the system to wake it after at most a millisecond, with
 `nanosleep` or a park with a timeout, and the wake-up of the timer never comes. The
 thread is sound, and returns at once when anything else wakes it. It was found on
-one machine, a Mac on macOS 26.6.1, where one such wait in 20 to 34 million was
+one machine, a Mac on macOS 26.6.1, where one such wait in about 40 million was
 lost. It was not seen on Linux, or on macOS 26.3 in a virtual machine, in more than
 300 million waits each.
 
@@ -91,7 +91,7 @@ lost. It was not seen on Linux, or on macOS 26.3 in a virtual machine, in more t
   sample cannot tell a wait that never returns from a loop that waits again.
 - Step 5 ended with the line `stuck sleeps seen:`. With N at 0 after twenty minutes,
   about 130 million waits, the machine has not shown the fault; that is not proof
-  that it has none.
+  that it has none. The machine that has it showed about three in such a run.
 
 ## When it does not work
 

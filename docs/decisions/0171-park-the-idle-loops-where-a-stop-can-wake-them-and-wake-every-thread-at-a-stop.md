@@ -26,7 +26,8 @@ driver's conductor, its recorder, or a client's conductor.
 
 A probe with no Cavalry code in it, `scripts/sleep-probe.rs`, found the cause on
 2026-11-26. On that laptop, macOS 26.6.1 on Apple silicon, one timed wait of 1 ms in
-20 to 34 million is not ended by its timer. The thread is sound: it returns at once
+some tens of millions is not ended by its timer: between one in 22 million and one
+in 94 million over three runs, one in 38 million over the three together. The thread is sound: it returns at once
 when a signal or an unpark wakes it. Every kind of timed wait tried shares the
 fault, so no other call is a remedy. The same probe found nothing on CI's Linux
 runner or on CI's macOS runner, macOS 26.3 in a virtual machine. Evidence has the
@@ -54,11 +55,12 @@ stores no heartbeat, and its clients close with `driver-timeout` after 10 s. A
 client whose conductor is held sends no keepalive, and the driver times it out after
 10 s and counts it in `client.timed_out`. A recorder that is held writes nothing,
 and nothing bounds that. On the laptop measured, a thread that idles by backoff
-waits about 940 times a second, which at one wait in 20 to 34 million is one lost
-wake-up for each such thread in six to ten hours. In a driver with nothing to send,
-to receive or to replay, two threads idle that way, the conductor and the recorder,
-and the other three park for a second at a time: one lost wake-up in three to five
-hours. With all five at work and idling between, it is one in one to two hours. Work item 338's second
+waits about 940 times a second, which at one wait in 38 million is one lost
+wake-up for each such thread in about eleven hours, and at the three runs' own
+rates between six hours and a day. In a driver with nothing to send, to receive or
+to replay, two threads idle that way, the conductor and the recorder, and the other
+three park for a second at a time: one lost wake-up in about six hours. With all
+five at work and idling between, it is one in about two hours. Work item 338's second
 change decides the rescue and its counter, and the bound of a stop's join for a
 thread that does not end for any other reason.
 
@@ -120,7 +122,7 @@ whose one wait has lasted 3 s, and after 30 s wakes it. Each run is one process.
 | --- | --- | --- | --- | --- |
 | The laptop: an Apple M5 Pro, macOS 26.6.1, kernel xnu-12377.161.13 | 20 minutes, 128 threads | 135 million | 4 | 3 in `std::thread::sleep`; 1 in one call of `nanosleep`, with no signal |
 | The same, a `just test` beside it for part of the run | 40 minutes, 192 threads | 412 million | 19 | 8 in `std::thread::sleep`, 4 in `nanosleep`, 7 in `std::thread::park_timeout` |
-| The same | RUN3 |
+| The same | 40 minutes, 256 threads | 564 million | 6 | 2 in `mach_wait_until`, 1 in a condition variable's timed wait, 3 in `kevent` with a timeout; none of 137 million in `nanosleep` |
 | CI's Linux runner: 4 virtual processors, Ubuntu 24.04, kernel 6.6 | 30 minutes, 192 threads | 381 million | 0 | |
 | CI's macOS runner: a virtual machine of 6 processors, macOS 26.3, kernel xnu-12377.81.4 | 30 minutes, 192 threads | 305 million | 0 | |
 
@@ -129,7 +131,8 @@ whose one wait has lasted 3 s, and after 30 s wakes it. Each run is one process.
 - In the second run no stuck wait returned by itself within 30 s, and all 18 that the
   probe then woke returned within the watcher's next look, 200 ms: the sleepers by a
   signal, the parked ones by `unpark`. The nineteenth stuck in the run's last
-  seconds.
+  seconds. In the third run all six were woken by a signal and returned the same
+  way.
 - A sample of the process at a stuck wait shows a sleeper in `nanosleep`,
   `__semwait_signal`, the stack of every sighting, and a parked one in
   `semaphore_timedwait_trap`.
@@ -138,7 +141,8 @@ whose one wait has lasted 3 s, and after 30 s wakes it. Each run is one process.
   `nanosleep` wrote was right.
 - The two runners ran in `sleep probe (trial)` run 45768708805, from a throwaway
   branch, each posting a line off the runner every minute. At the laptop's rate the
-  macOS runner would have shown 9 to 15. The run does not say which difference
+  macOS runner would have shown 8 at the rate of the three runs together, and
+  between 3 and 14 at the rate of any one of them. The run does not say which difference
   matters: the newer system, or the metal against a virtual machine.
 
 The tests: `cavalry-driver`'s
