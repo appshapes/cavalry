@@ -4,14 +4,15 @@
 //! leader cut off from both others for 11 s to 19 s, a leader halted within 300 ms of
 //! its election, members halted and resumed, parted one way or both, started again on
 //! the log directory they kept, their recordings ended, and their modules stalled
-//! while their drivers run on, the leader's half the time (`Cluster::stall`; work item
-//! 467), each at a moment the seed draws; and truncations made to fault, at a member
-//! the seed draws, at a step it draws, the second, the file or the record of terms,
-//! for a number of attempts in a row it draws. A leader cut off appends a tail that the leader the others elect
-//! lacks, and truncates it when it comes back, so the seeds truncate, and fault,
-//! often. A leader halted just after its election can leave the member it named a
-//! truncation to the most up to date of those left, which is when a member whose
-//! truncation faulted could lead or join on the end it no longer holds.
+//! while their drivers run on, the leader's two times in three while one leads
+//! (`Cluster::stall`; work item 467), each at a moment the seed draws; and truncations
+//! made to fault, at a member the seed draws, at a step it draws, the second, the file
+//! or the record of terms, for a number of attempts in a row it draws. A leader cut
+//! off appends a tail that the leader the others elect lacks, and truncates it when it
+//! comes back, so the seeds truncate, and fault, often. A leader halted just after its
+//! election can leave the member it named a truncation to the most up to date of those
+//! left, which is when a member whose truncation faulted could lead or join on the end
+//! it no longer holds.
 //!
 //! The check of every step is `elected_cluster`'s, and three more of every member: it
 //! never added a log, joined one or subscribed for a replay while its log was cut
@@ -250,7 +251,8 @@ fn search(seed: u64, length_ms: u64) -> Seen {
                 cluster.fault_truncation(member, at, times);
             }
             // A module that stands still while its driver runs on (work item 467): the
-            // leader's half the time, so that it stalls with entries appended after its
+            // leader's two times in three while one leads (the leader on half the draws,
+            // and a third of the rest), so that it stalls with entries appended after its
             // duty cycle read its append position. Its recording syncs, its replays and
             // its sender go on, and what is sent to it waits, for 1 ms to 20 s: within a
             // heartbeat interval, or long enough that the others elect without it.

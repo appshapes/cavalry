@@ -14,9 +14,9 @@
 //! its leader appends events for timers that are cancelled or scheduled again
 //! already; a handler that does not take its entry; a consensus module stream that
 //! takes no message for a while; a member's consensus module that stands still while
-//! its driver and its services run on, the leader's half the time (`Cluster::stall`;
-//! work item 467); a service that stops, and starts again from the
-//! snapshot it took or from position 0, beside a member that kept what the service
+//! its driver and its services run on, the leader's two times in three while one
+//! leads (`Cluster::stall`; work item 467); a service that stops, and starts again
+//! from the snapshot it took or from position 0, beside a member that kept what the service
 //! before it had told it, and reads its history before it tells that member
 //! anything, in half of the seeds, and in the other half no service that stops, so
 //! that nothing but the rule puts right what a member lost; a member that starts
@@ -723,8 +723,9 @@ fn search(seed: u64, length_ms: u64) -> Drawn {
                     }
                 }
                 // A module that stands still while its driver runs on (work item 467):
-                // the leader's half the time, so that it stalls with entries appended
-                // after its duty cycle read its append position. Its recording syncs, its
+                // the leader's two times in three while one leads (the leader on half
+                // the draws, and a third of the rest), so that it stalls with entries
+                // appended after its duty cycle read its append position. Its recording syncs, its
                 // replays and its sender go on, its services run, and what is sent to it
                 // and what its services tell it wait, for 1 ms to 20 s: within a
                 // heartbeat interval, or long enough that the others elect without it.

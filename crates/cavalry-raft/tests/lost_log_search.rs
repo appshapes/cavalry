@@ -6,9 +6,9 @@
 //! check of `elected_cluster` after every step.
 //!
 //! A stall is a member's consensus module that stands still for up to 20 s while its
-//! driver runs on (`Cluster::stall`; work item 467): the leader's half the time, so
-//! that the append position its last duty cycle read falls behind what its recording
-//! syncs and a replay reads (ADR 0163, Context).
+//! driver runs on (`Cluster::stall`; work item 467): the leader's two times in three
+//! while one leads, so that the append position its last duty cycle read falls behind
+//! what its recording syncs and a replay reads (ADR 0163, Context).
 //!
 //! A wipe is drawn only while no other member is still short of its vote floor, and
 //! while the two other members run and hold what was committed, so that no case ADR
@@ -16,7 +16,8 @@
 //! of the wipes made under another member's lead also hold what `spec/udp.md` lets
 //! the transport hold for a receiver that went away: the leader's live sender, for up
 //! to 5 s, and its next new leadership term to the wiped member, which reaches the
-//! member up to 20 s later, once it has left init (work items 411 and 458).
+//! member up to 20 s later, once it has left init (work items 411 and 458). Each is
+//! held only while no sender, or no frame, is held already.
 //!
 //! Each run of `just test` searches the seeds of [`SEEDS`]. A wider search names
 //! its own:
@@ -232,8 +233,9 @@ fn search(seed: u64, length_ms: u64) -> Drawn {
                     }
                 }
             }
-            // A module that stands still while its driver runs on: the leader's half
-            // the time, so that it stalls with entries appended after its duty cycle
+            // A module that stands still while its driver runs on: the leader's two
+            // times in three while one leads (the leader on half the draws, and a third
+            // of the rest), so that it stalls with entries appended after its duty cycle
             // read its append position, as an offer above can leave them. Its driver's
             // recording syncs, its replays and its sender go on, and what is sent to it
             // waits, for 1 ms to 20 s: within a heartbeat interval, or long enough that
