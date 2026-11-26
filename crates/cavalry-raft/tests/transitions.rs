@@ -254,6 +254,17 @@ fn to_nominate(watch: &mut Watch, member: &mut Consensus, io: &mut Stub, ms: u64
     ms + 3
 }
 
+/// Member 0 of `[0, 1, 2]`, in canvass, reads at `ms` the canvass positions of the
+/// other two members, each with no log, and moves nothing: what a member whose log is
+/// empty has heard before it votes in a cluster of empty logs (work item 476). Its
+/// next duty cycle would take it to nominate.
+fn hear_both(watch: &mut Watch, member: &mut Consensus, io: &mut Stub, ms: u64) {
+    for other in [1, 2] {
+        watch.read(member, io, ms, &canvass_position(other, -1, 0));
+    }
+    assert_eq!(member.election_state(), ElectionState::Canvass);
+}
+
 /// The same member taken on to candidate ballot: nominate's delay is below half the
 /// election timeout, 500 ms. Returns the millisecond its ballot began at.
 fn to_candidate_ballot(watch: &mut Watch, member: &mut Consensus, io: &mut Stub, ms: u64) -> u64 {
@@ -599,10 +610,13 @@ fn every_transition_of_the_election_and_the_role_adds_one_to_a_counter_registere
     assert_eq!(ahead.counts().log_truncations, 1);
 
     // A member in canvass votes for a candidate and waits for it; with no new
-    // leadership term for the election timeout it canvasses again.
+    // leadership term for the election timeout it canvasses again. It has heard both
+    // other members, each with no log, as a member that holds nothing, its log empty
+    // and no candidate term stored, must before it votes (work item 476).
     let mut io = Stub::new();
     let mut voter = elector(6);
     watch.work(&mut voter, &mut io, 1);
+    hear_both(&mut watch, &mut voter, &mut io, 2);
     watch.read(&mut voter, &mut io, 2, &request_vote(0));
     assert_eq!(voter.election_state(), ElectionState::FollowerBallot);
     watch.work(&mut voter, &mut io, 2 + 1_000);
@@ -628,11 +642,23 @@ fn every_transition_of_the_election_and_the_role_adds_one_to_a_counter_registere
     watch.read(&mut nominee, &mut io, ms, &term_out_of_reach());
     assert_eq!(nominee.election_state(), ElectionState::Init);
 
+    // A member in nominate that holds nothing reads a report that holds a log during
+    // its delay, and goes back to canvass when the delay ends, storing nothing (ADR
+    // 0174).
+    let mut io = Stub::new();
+    let mut nominee = elector(11);
+    let ms = to_nominate(&mut watch, &mut nominee, &mut io, 1);
+    watch.read(&mut nominee, &mut io, ms, &canvass_position(1, 0, 64));
+    watch.work(&mut nominee, &mut io, ms + 500);
+    assert_eq!(nominee.election_state(), ElectionState::Canvass);
+    assert_eq!(nominee.counts().candidacies, 0);
+
     // A member in follower ballot below its candidate's term base, told no term to
     // replicate, fails.
     let mut io = Stub::new();
     let mut voter = elector(10);
     watch.work(&mut voter, &mut io, 1);
+    hear_both(&mut watch, &mut voter, &mut io, 2);
     watch.read(&mut voter, &mut io, 2, &request_vote(0));
     assert_eq!(voter.election_state(), ElectionState::FollowerBallot);
     watch.read(&mut voter, &mut io, 3, &term_out_of_reach());

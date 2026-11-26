@@ -56,7 +56,8 @@ use cavalry_shm::counters::generated::{
     CLUSTER_LOG_RECORDINGS_LISTED, CLUSTER_LOG_RECORDINGS_UNSYNCED,
     CLUSTER_LOG_RECORDINGS_UNWRITTEN, CLUSTER_MESSAGES_REJECTED, CLUSTER_PROTOCOL_VERSION,
     CLUSTER_ROLE, CLUSTER_SESSIONS, CLUSTER_STANDBY, CLUSTER_TRUNCATION_OWED,
-    CLUSTER_TRUNCATIONS_FINISHED, CLUSTER_VOTE_FLOOR, CLUSTER_VOTERS, COUNTERS,
+    CLUSTER_TRUNCATIONS_FINISHED, CLUSTER_VOTE_FLOOR, CLUSTER_VOTERS, CLUSTER_VOTERS_UNHEARD,
+    COUNTERS,
 };
 
 use crate::consensus::{
@@ -2811,6 +2812,11 @@ struct Counters {
     /// leader's live log with its log at or past the floor (ADR 0145, ADR 0161), and
     /// past an answer of its leader's to its present run (ADR 0163).
     vote_floor: Stored,
+    /// `cluster.voters_unheard`: while the member holds nothing, its log empty and no
+    /// candidate term stored, the voters it has not heard report in its present
+    /// election, and 0 for any other member, stored each cycle; such a member stands and
+    /// votes only once it is 0 (work item 476).
+    voters_unheard: Stored,
     /// `cluster.floor_answer`: the lowest log position of the floor answers the member
     /// took since it stored its vote floor, in this run, −1 for none, stored each cycle
     /// (ADR 0163).
@@ -2888,6 +2894,11 @@ impl Counters {
                 i64::from(PROTOCOL_VERSION),
             )?,
             vote_floor: add(CLUSTER_VOTE_FLOOR, "cluster.vote_floor", core.vote_floor())?,
+            voters_unheard: add(
+                CLUSTER_VOTERS_UNHEARD,
+                "cluster.voters_unheard",
+                core.voters_unheard(),
+            )?,
             floor_answer: add(
                 CLUSTER_FLOOR_ANSWER,
                 "cluster.floor_answer",
@@ -3004,6 +3015,7 @@ impl Counters {
         self.election_cause
             .store(i64::from(core.election_cause().code()));
         self.vote_floor.store(core.vote_floor());
+        self.voters_unheard.store(core.voters_unheard());
         self.floor_answer.store(core.floor_answer());
         self.truncation_owed.store(core.truncation_owed());
         self.append_position.store(core.append_position());

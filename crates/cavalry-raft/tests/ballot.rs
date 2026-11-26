@@ -51,8 +51,9 @@ fn sends(io: &Stub, template: Template) -> usize {
 
 /// Takes `member` from init to candidate ballot at `ms`, hearing the members of
 /// `heard` in canvass, none ahead of it. With both heard it is a candidate at once;
-/// with one, at the startup canvass timeout, 60 s. Returns the millisecond its ballot
-/// began at.
+/// with one, at the startup canvass timeout, 60 s, which only a member that holds a
+/// log or a candidate term reaches: one that holds nothing stands only once it has
+/// heard every other voter (work item 476). Returns the millisecond its ballot began at.
 fn to_candidate_ballot(member: &mut Consensus, io: &mut Stub, heard: &[i32]) -> u64 {
     member.do_work(at(1), io).expect("no fault");
     assert_eq!(member.election_state(), ElectionState::Canvass);
@@ -125,14 +126,18 @@ fn a_candidate_stores_its_term_before_it_asks_for_a_vote() {
     assert_eq!((counts.candidacies, counts.terms_led), (1, 0));
 }
 
-/// A ballot closes at once on the members heard (ADR 0077). The candidate heard member
-/// 1 alone: member 2 has said nothing since the candidate's election began, as a leader
-/// that was killed says nothing. Member 1's vote makes a quorum with the candidate's
-/// own, every member heard has voted for it, and it leads on the next cycle, long
-/// before the election timeout.
+/// A ballot closes at once on the members heard (ADR 0077). The candidate's log holds
+/// 64 bytes, and it heard member 1 alone, whose log is behind its own: member 2 has
+/// said nothing since the candidate's election began, as a leader that was killed says
+/// nothing. Member 1's vote makes a quorum with the candidate's own, every member heard
+/// has voted for it, and it leads on the next cycle, long before the election timeout.
+/// The candidate holds a log because a member that holds nothing, its log empty and no
+/// candidate term stored, does not stand before it has heard every other voter (work
+/// item 476).
 #[test]
 fn a_ballot_closes_at_once_when_every_member_heard_has_voted_for_the_candidate() {
     let mut io = Stub::new();
+    io.append_position = 64;
     let mut member = elector(2);
     let ms = to_candidate_ballot(&mut member, &mut io, &[1]);
     member.do_work(at(ms + 1), &mut io).expect("no fault");
@@ -147,7 +152,7 @@ fn a_ballot_closes_at_once_when_every_member_heard_has_voted_for_the_candidate()
     assert_eq!(member.leader_member_id(), 0);
     // The term is recorded at the member's append position before it leads it.
     assert!(
-        io.first(|call| matches!(call, Call::RecordTerm(0, 0)))
+        io.first(|call| matches!(call, Call::RecordTerm(0, 64)))
             .is_some()
     );
 }
@@ -328,15 +333,18 @@ fn a_member_votes_once_in_a_term_and_stores_the_term_before_the_vote() {
 
 /// A vote that cannot be sent is no vote: the term it would have raised is stored, so
 /// the member votes for nobody else in it, and the member stays where it was and
-/// counts nothing.
+/// counts nothing. The member's log and the candidate's each hold 64 bytes, so the
+/// member votes on the logs compared: one that holds nothing votes only once it has
+/// heard every other voter (work item 476).
 #[test]
 fn a_vote_that_is_not_sent_moves_the_term_and_nothing_else() {
     let mut io = Stub::new();
+    io.append_position = 64;
     let mut member = elector(6);
     member.do_work(at(1), &mut io).expect("no fault");
     io.refuse_send = true;
     member
-        .on_message(at(2), &request_vote(1, 3, 0), &mut io)
+        .on_message(at(2), &request_vote(1, 3, 64), &mut io)
         .expect("no fault");
     assert_eq!(
         io.count(|call| matches!(call, Call::StoreCandidateTerm(3))),
@@ -348,7 +356,7 @@ fn a_vote_that_is_not_sent_moves_the_term_and_nothing_else() {
     // The term is taken: the same request again is one for a term it has voted in.
     io.refuse_send = false;
     member
-        .on_message(at(3), &request_vote(1, 3, 0), &mut io)
+        .on_message(at(3), &request_vote(1, 3, 64), &mut io)
         .expect("no fault");
     assert_eq!(member.counts().votes_against, 1);
     assert_eq!(member.election_state(), ElectionState::Canvass);

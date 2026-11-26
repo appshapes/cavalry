@@ -160,12 +160,19 @@ fn a_candidate_names_no_leader_until_it_leads_and_then_names_itself() {
 }
 
 /// A member that votes names no leader in follower ballot, and names the candidate
-/// once it takes that candidate's new leadership term.
+/// once it takes that candidate's new leadership term. The member has heard both other
+/// members, each with no log, as a member that holds nothing, its log empty and no
+/// candidate term stored, must before it votes (work item 476).
 #[test]
 fn a_voter_names_no_leader_in_its_ballot() {
     let mut io = Stub::new();
     let mut member = Consensus::with_election(&[0, 1, 2], 1, 7).expect("a member");
     member.do_work(at(1), &mut io).expect("no fault");
+    for other in [0, 2] {
+        member
+            .on_message(at(2), &canvass_position(other, -1, 0), &mut io)
+            .expect("no fault");
+    }
     let request = Message::RequestVote {
         log_leadership_term_id: -1,
         log_position: 0,
