@@ -119,6 +119,15 @@ compute another state from the same log (`spec/cluster.md`, "Versions and the up
 
 ## When it does not work
 
+- A service or a client refuses to start with `counters file rejected (version)`. It
+  is of another build than the driver it attaches to, across version 11 of the
+  client protocol, where a program and its driver do not attach to each other at all
+  (`spec/client-protocol.md`, "Crossing to this version"). The message says which of
+  the two is the older. Steps 2 and 3 keep them together: the member, which holds
+  the driver, and the service beside it are stopped together, and started from the
+  newer build, the member first. A client of the cluster on another host is not
+  concerned: nothing between hosts changed.
+
 - A member does not start after its step, and prints `cavalry run: member refused`
   or `cavalry run: member stopped` with a reason. The reasons are those of any
   start: [Run a cluster of three members](run-a-cluster.md#when-it-does-not-work)

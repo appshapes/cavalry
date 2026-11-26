@@ -5,9 +5,9 @@
 use std::fmt;
 use std::sync::Arc;
 
+use crate::owned::Owned as Cell;
 use cavalry_proto::client_protocol::Command;
 use cavalry_shm::command_ring::Producer;
-use cavalry_shm::counters::Counter as Cell;
 
 use crate::conductor::{Shared, epoch_time};
 use crate::error::ClientError;
@@ -18,11 +18,19 @@ use crate::error::ClientError;
 /// that maps the counters file, reads it.
 ///
 /// The driver frees the counter when the handle is closed or dropped, and when the
-/// client closes or is timed out; the record may then be allocated to another counter.
-/// So every store first checks that the client is open, one acquire load, and stores
-/// nothing once it is closed. Nothing here allocates or locks.
+/// client closes or is timed out. It gives the record to another counter only when
+/// this handle has stored the record's release word, which it does when it is closed
+/// or dropped, or when nothing of the client is left, which the client's lock says
+/// (`spec/client-protocol.md`, "The records a client writes"; ADR 0179). So a store
+/// that passed the check below just before the client closed lands in a record that
+/// is still this handle's. Every store first checks that the client is open, one
+/// acquire load, and stores nothing once it is closed. Nothing here allocates or
+/// locks.
 pub struct Counter {
-    cell: Cell,
+    /// The handle on the record, until `remove` gives it up.
+    cell: Option<Cell>,
+    /// The record's id, which outlives the handle for a caller that asks.
+    id: u32,
     shared: Arc<Shared>,
     producer: Producer,
     client_id: i64,
@@ -43,7 +51,8 @@ impl Counter {
         type_id: i32,
     ) -> Self {
         Self {
-            cell,
+            id: cell.id(),
+            cell: Some(cell),
             shared,
             producer,
             client_id,
@@ -64,7 +73,7 @@ impl Counter {
     /// The record of the counters file the driver allocated: what a reader of the file
     /// finds the value by.
     pub fn id(&self) -> u32 {
-        self.cell.id()
+        self.id
     }
 
     /// The counter's type id: the `id` of its entry in `counters.toml`.
@@ -78,7 +87,9 @@ impl Counter {
     /// closed, and then nothing is stored.
     pub fn store_release(&self, value: i64) -> Result<(), ClientError> {
         self.open()?;
-        self.cell.store_release(value);
+        if let Some(cell) = &self.cell {
+            cell.store_release(value);
+        }
         Ok(())
     }
 
@@ -86,7 +97,9 @@ impl Counter {
     /// [`ClientError::Closed`] when the client is closed, and then nothing is stored.
     pub fn set(&self, value: i64) -> Result<(), ClientError> {
         self.open()?;
-        self.cell.set(value);
+        if let Some(cell) = &self.cell {
+            cell.set(value);
+        }
         Ok(())
     }
 
@@ -94,7 +107,9 @@ impl Counter {
     /// when the client is closed, and then nothing is added.
     pub fn increment(&self) -> Result<(), ClientError> {
         self.open()?;
-        self.cell.increment();
+        if let Some(cell) = &self.cell {
+            cell.increment();
+        }
         Ok(())
     }
 
@@ -102,13 +117,15 @@ impl Counter {
     /// nothing is added.
     pub fn add(&self, n: i64) -> Result<(), ClientError> {
         self.open()?;
-        self.cell.add(n);
+        if let Some(cell) = &self.cell {
+            cell.add(n);
+        }
         Ok(())
     }
 
     /// The value, with an acquire load.
     pub fn get(&self) -> i64 {
-        self.cell.load_acquire()
+        self.cell.as_ref().map_or(0, Cell::load_acquire)
     }
 
     /// Whether the client this counter belongs to is closed, so that every store from
@@ -137,6 +154,18 @@ impl Counter {
             return;
         }
         self.removed = true;
+        // The release word first: the handle on the record is given up, so nothing
+        // stores through this counter after it, and the driver gives the record to no
+        // other owner before it reads the word (ADR 0179).
+        if let Some(cell) = self.cell.take() {
+            cell.release();
+        }
+        // A client that is closed has nothing registered with the driver, which freed
+        // this counter's record with the client: a command from it now would read to
+        // the driver as a new client's first.
+        if self.shared.closed().is_some() {
+            return;
+        }
         let command = Command::RemoveCounter {
             client_id: self.client_id,
             correlation_id: self.producer.next_correlation_id(),

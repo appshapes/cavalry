@@ -1,4 +1,4 @@
-//! The client protocol's commands and events: `spec/client-protocol.md`, version 10
+//! The client protocol's commands and events: `spec/client-protocol.md`, version 11
 //! (ADR 0019; the recording commands and events are ADR 0025, the replay commands and
 //! events ADR 0030, the retention commands ADR 0031, the `cavalry:udp` channel, the
 //! channel status indicator id and error codes 4 and 9 ADR 0040, the destination
@@ -46,7 +46,7 @@
 use core::fmt;
 
 /// The version of `spec/client-protocol.md` this crate reads and writes.
-pub const VERSION: i32 = 10;
+pub const VERSION: i32 = 11;
 
 /// The longest string field, in bytes: `spec/client-protocol.md`, "Encoding".
 pub const MAX_STRING_LENGTH: usize = 4096;
@@ -64,6 +64,20 @@ pub const CORRELATED_LENGTH: usize = 16;
 /// The IPC channel; a `cavalry:udp` channel is [`crate::channel::Channel`]'s to parse
 /// (`spec/udp.md`, "The channel URI").
 pub const IPC_CHANNEL: &[u8] = b"cavalry:ipc";
+
+/// The directory of the clients' lock files in the driver's directory, which the
+/// driver creates when it starts (`spec/client-protocol.md`, "The driver directory" and
+/// "The records a client writes"; ADR 0179).
+pub const CLIENT_LOCK_DIRECTORY: &str = "clients";
+
+/// What follows a client's id, in decimal, in the name of its lock file:
+/// `clients/<client id>.lock`.
+pub const CLIENT_LOCK_SUFFIX: &str = ".lock";
+
+/// What follows a client's id in the name the driver gives the lock file of a client
+/// that closed or was timed out, until it holds that lock: `clients/<client id>.gone`.
+/// `cavalry doctor` names such a client by it.
+pub const CLIENT_GONE_SUFFIX: &str = ".gone";
 
 /// The channel status indicator id of a `cavalry:ipc` publication or subscription,
 /// which has no endpoint: `publication ready` and `subscription ready` carry it

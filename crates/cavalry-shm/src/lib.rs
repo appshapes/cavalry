@@ -2,6 +2,7 @@
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
 pub mod broadcast;
+pub mod client_lock;
 pub mod clock;
 pub mod command_ring;
 pub mod counters;

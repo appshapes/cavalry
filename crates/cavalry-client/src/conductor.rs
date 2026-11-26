@@ -20,8 +20,10 @@ use cavalry_proto::client_protocol::{Command, Event};
 use cavalry_shm::broadcast::{BroadcastError, Receiver};
 use cavalry_shm::command_ring::layout::DRIVER_CLOSED;
 use cavalry_shm::command_ring::{CommandRing, CommandRingError, Producer};
+use cavalry_shm::counters::CountersWriter;
 use cavalry_shm::counters::generated::{CLIENT_CONDUCTOR_PARKS_OVERDUE, SUBSCRIPTION_POSITION};
-use cavalry_shm::counters::{Counter, CountersWriter};
+
+use crate::owned::Owned as Counter;
 use cavalry_shm::log::{LogBuffers, LogDirectory, LogError};
 use cavalry_shm::spsc;
 
@@ -49,11 +51,47 @@ pub(crate) const NO_PENDING: i64 = -1;
 /// the rest is room for an answer that arrives after its caller gave up.
 pub(crate) const RESPONSE_QUEUE: usize = 4;
 
-/// How many subscriptions one client registers with its conductor: the driver's own
-/// bound on subscriptions, so the driver refuses first, with error code 10
-/// (`spec/client-protocol.md`, "Sizes"). A registration the registry cannot admit even
-/// after a sweep is refused, never dropped silently: see [`Registry::admit`].
+/// The driver's bound on subscriptions, those of every client together
+/// (`spec/client-protocol.md`, "Sizes"): an `add subscription` past it the driver
+/// refuses with error code 10. The conductor's registry holds one more,
+/// [`SUBSCRIPTION_REGISTRY`], which says why that is enough.
 pub(crate) const MAX_SUBSCRIPTIONS: usize = 1024;
+
+/// How many registrations the conductor's subscriptions registry holds: the driver's
+/// bound, [`MAX_SUBSCRIPTIONS`], and one for the `add subscription` in flight.
+///
+/// The registry keeps a removed subscription's registration until the conductor has
+/// read the driver's answer to its `remove subscription` ([`Registry::removed`]; ADR
+/// 0179). So a removal on its way takes a place beside the live subscriptions: a
+/// client at the bound that removes one subscription and adds another at once has
+/// both in the registry when the conductor admits the add, which it does before it
+/// reads the removal's answer. The bound holds them all the same.
+///
+/// `add_subscription` takes the client by `&mut` and waits for its answer, so one add
+/// is under way at a time. Take the last `add subscription` whose answer the
+/// conductor read before it admits a registration; before the first there is none,
+/// and none of the three below either. Once [`Registry::admit`] has swept, every other
+/// registration the registry holds is one of three:
+///
+/// - Live: its add was answered `subscription ready` no later than that answer, and
+///   it has sent no removal. The driver held it when it sent that answer.
+/// - With its removal unsent, as when the ring was full: the same, and the driver
+///   holds it until the client closes.
+/// - With its removal on its way. The driver answers `remove subscription` as it reads
+///   it, and the conductor reads the broadcast buffer in order and forgets the
+///   registration at that answer. So the driver read this removal after it sent that
+///   add's answer, and held the subscription when it sent it.
+///
+/// A registration whose subscription's halves went with no removal sent, of an add
+/// the driver refused or whose answer was never read, is what the sweep forgets.
+/// So every registration but the one admitted is of a subscription the driver held at
+/// the one moment it sent that answer, and the driver holds [`MAX_SUBSCRIPTIONS`] at
+/// most, of every client together. Against a driver that keeps its bound the registry is never full after
+/// its sweep, and it refuses only where the driver has gone past its bound. A
+/// subscription whose add the client never read the answer to is in no registration:
+/// the driver may hold it, and the client does not know it
+/// (`spec/client-protocol.md`, "The records a client writes").
+pub(crate) const SUBSCRIPTION_REGISTRY: usize = MAX_SUBSCRIPTIONS + 1;
 
 /// How many registrations may wait for the conductor between two of its cycles.
 pub(crate) const REGISTRATION_QUEUE: usize = 64;
@@ -126,6 +164,10 @@ pub(crate) struct Shared {
     /// Stored before the command is written and loaded after its answer is read, so the
     /// ring and the broadcast buffer order the two: see [`Conductor::events`].
     pending: AtomicI64,
+    /// The client's lock, where it could take one. Everything of the client that can
+    /// store into a counter holds this state, so the lock is let go when the last of
+    /// them is dropped (`spec/client-protocol.md`, "The records a client writes").
+    _lock: Option<crate::owned::ClientLock>,
 }
 
 /// The client's state word in a 128-byte slot of its own: a publisher loads it on
@@ -136,11 +178,12 @@ pub(crate) struct Shared {
 struct StateSlot(AtomicI32);
 
 impl Shared {
-    pub(crate) fn new(now: i64) -> Self {
+    pub(crate) fn new(now: i64, lock: Option<crate::owned::ClientLock>) -> Self {
         Self {
             state: StateSlot(AtomicI32::new(0)),
             last_sent: AtomicI64::new(now),
             pending: AtomicI64::new(NO_PENDING),
+            _lock: lock,
         }
     }
 
@@ -323,6 +366,7 @@ pub(crate) struct Conductor {
 fn own_answer(
     overdue: &mut OverduePublished,
     counters: &CountersWriter,
+    shared: &Arc<Shared>,
     type_id: i32,
     message: &[u8],
 ) {
@@ -338,7 +382,9 @@ fn own_answer(
                 .ok()
                 .and_then(|id| counters.counter(id).ok())
             {
-                Some(counter) => OverduePublished::Counter(counter, 0),
+                Some(counter) => {
+                    OverduePublished::Counter(Counter::new(counter, Arc::clone(shared)), 0)
+                }
                 None => OverduePublished::Refused,
             };
         }
@@ -376,7 +422,7 @@ impl Conductor {
             shared,
             responses,
             registrations,
-            registry: Registry::with_capacity(MAX_SUBSCRIPTIONS),
+            registry: Registry::new(),
             replay_registrations,
             replays: ReplayRegistry::with_capacity(MAX_REPLAYS + 1),
             recording_registrations,
@@ -598,7 +644,24 @@ impl Conductor {
             let got = self.receiver.receive(|type_id, message| {
                 // The answer to the conductor's own `add counter`, which is nobody's
                 // pending command and which `event` passes over (ADR 0177).
-                own_answer(overdue, counters, type_id, message);
+                own_answer(overdue, counters, shared, type_id, message);
+                // The driver's answer to a `remove subscription`, which is nobody's
+                // pending command either: its registration can be forgotten, since
+                // the driver announces nothing more for it (ADR 0179).
+                if registry.removing() {
+                    match Event::parse(type_id, message) {
+                        Ok(Event::OperationSuccess { correlation_id }) => {
+                            registry.removed(correlation_id);
+                        }
+                        Ok(Event::Error {
+                            offending_correlation_id,
+                            ..
+                        }) => {
+                            registry.removed(offending_correlation_id);
+                        }
+                        _ => {}
+                    }
+                }
                 outcome = event(
                     client_id,
                     shared.pending(),
@@ -715,11 +778,17 @@ impl Conductor {
             return Ok(());
         };
         if registration.images.peer_dropped() {
+            // The subscription's handle is gone and the driver has yet to answer its
+            // removal: the record this event names is this client's all the same, and
+            // nothing will poll it. Its release word is stored here, by its id.
+            if let Ok(record) = u32::try_from(position_counter_id) {
+                release_unheld(&self.counters, record, correlation_id, session_id);
+            }
             return Ok(());
         }
         let event = announced(
             &self.dir,
-            &self.counters,
+            (&self.counters, &self.shared),
             correlation_id,
             session_id,
             position_counter_id,
@@ -753,24 +822,30 @@ impl Conductor {
 /// read-only, with the owner's handle on the position counter the driver allocated,
 /// or the word that the image is gone.
 ///
-/// The driver keeps the log and the counter for the counter reuse timeout after the
-/// event, unless the subscription is removed first (`spec/client-protocol.md`,
-/// "Events"; ADR 0078). So a log that is not there, or a record that holds no counter
-/// or another image's, is an image that is `gone`: this client's own `remove
-/// subscription` was on its way, or its conductor read the event more than that time
-/// late. The image is not added, the subscription's next poll reports the fault, and
-/// the client stays open. A log that is there and fails a check, or a record id no
-/// counters file has, is the driver saying one thing and the directory another:
-/// corrupt.
+/// The driver keeps the log for the counter reuse timeout after the event, unless
+/// the subscription is removed first (`spec/client-protocol.md`, "Events"; ADR 0078).
+/// The counter's record it gives to no other owner before this client has let it go,
+/// however late this conductor reads the event (`spec/client-protocol.md`, "The
+/// records a client writes"; ADR 0179): no time is in that. So a log that is not
+/// there, or a record that holds no counter, is an image that is `gone`: it ended, or
+/// this client's own `remove subscription` was on its way, before this conductor read
+/// the event. The image is not added, the conductor stores the record's release word
+/// by its id, the subscription's next poll reports the fault, and the client stays
+/// open. A record that holds another image's counter is treated the same and is
+/// stored into by nobody; the rule above says it is never met. A log that is there
+/// and fails a check, or a record id no counters file has, is the driver saying one
+/// thing and the directory another: corrupt. The client closes, and the record is
+/// held until the driver has the client's lock.
 fn announced(
     dir: &Path,
-    counters: &CountersWriter,
+    owner: (&CountersWriter, &Arc<Shared>),
     correlation_id: i64,
     session_id: i32,
     position_counter_id: i32,
     log_name: (LogDirectory, i64),
     source_identity: String,
 ) -> Result<ImageEvent, Closed> {
+    let (counters, shared) = owner;
     let (directory, log_id) = log_name;
     let log = match LogBuffers::open_named(dir, directory, log_id, false) {
         Ok(log) => Some(log),
@@ -798,7 +873,10 @@ fn announced(
         Err(_) => return Err(Closed::Corrupt),
     };
     let position = if named {
-        counters.counter(record).ok()
+        counters
+            .counter(record)
+            .ok()
+            .map(|cell| Counter::new(cell, Arc::clone(shared)))
     } else {
         None
     };
@@ -810,8 +888,42 @@ fn announced(
             position,
             source_identity,
         },
-        _ => ImageEvent::Gone { session_id },
+        // The image is not added. The record the event named is this client's from the
+        // event on, and the driver gives it to nobody until its release word is
+        // stored: by the handle's drop when one was taken, and by the record's id
+        // when none was (`spec/client-protocol.md`, "The records a client writes").
+        (_, Some(position)) => {
+            drop(position);
+            ImageEvent::Gone { session_id }
+        }
+        (_, None) => {
+            release_unheld(counters, record, correlation_id, session_id);
+            ImageEvent::Gone { session_id }
+        }
     })
+}
+
+/// Stores, by its id, the release word of a record this client was told of in an
+/// `available image` and holds no handle on (`spec/client-protocol.md`, "The records a
+/// client writes"). The record is the client's from the event on, and the driver gives
+/// it to nobody before the word is stored, so the record either holds no counter, the
+/// driver having freed it and holding it, or is still the image's own. A record that
+/// holds another counter is neither: something broke the rule, and nothing is stored
+/// into it.
+fn release_unheld(counters: &CountersWriter, record: u32, correlation_id: i64, session_id: i32) {
+    let ours = match counters.record(record) {
+        Ok(None) => true,
+        Ok(Some(fields)) => {
+            let key = fields.key();
+            fields.type_id() == SUBSCRIPTION_POSITION.0
+                && key[..8] == correlation_id.to_le_bytes()
+                && key[8..12] == session_id.to_le_bytes()
+        }
+        Err(_) => false,
+    };
+    if ours {
+        let _ = counters.release(record);
+    }
 }
 
 /// The subscriptions one client holds, by registration id, with the queues to each:
@@ -822,6 +934,11 @@ pub(crate) struct Registry {
 }
 
 impl Registry {
+    /// The conductor's registry, of [`SUBSCRIPTION_REGISTRY`].
+    pub(crate) fn new() -> Self {
+        Self::with_capacity(SUBSCRIPTION_REGISTRY)
+    }
+
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             subscriptions: Vec::with_capacity(capacity),
@@ -834,7 +951,9 @@ impl Registry {
     /// halves of the two queues see their peer dropped, and `add subscription`, which
     /// looks after the answer, removes the subscription and returns
     /// [`crate::ClientError::SubscriptionsFull`]. A subscription is refused, never left
-    /// without its images.
+    /// without its images. At [`SUBSCRIPTION_REGISTRY`] that is a driver past its own
+    /// bound, and a removal waiting for its answer takes no place a live subscription
+    /// needs: the constant gives the argument.
     pub(crate) fn admit(&mut self, registration: Registration) -> bool {
         if self.subscriptions.len() >= self.capacity {
             self.sweep();
@@ -857,7 +976,16 @@ impl Registry {
                 drop(retired);
                 work += 1;
             }
-            if self.subscriptions[index].images.peer_dropped() {
+            // A registration whose subscription sent `remove subscription` stays until
+            // the driver has answered it (`removed`): until then the driver may
+            // announce an image for it, whose record `image_available` releases. So
+            // does one whose removal could not be written, which the driver keeps
+            // until the client closes. One whose halves were dropped with no removal,
+            // an `add subscription` the driver refused, has nothing to wait for.
+            if self.subscriptions[index].images.peer_dropped()
+                && self.subscriptions[index].removal.load(Ordering::Acquire)
+                    == crate::subscription::NOT_REMOVED
+            {
                 self.subscriptions.swap_remove(index);
                 work += 1;
             } else {
@@ -873,6 +1001,36 @@ impl Registry {
         self.subscriptions
             .iter()
             .any(|registration| registration.registration_id == registration_id)
+    }
+
+    /// Forgets the registration whose `remove subscription` had correlation id
+    /// `correlation_id`, which the driver has now answered: it announces nothing more
+    /// for that subscription. Returns whether one was forgotten.
+    pub(crate) fn removed(&mut self, correlation_id: i64) -> bool {
+        // A correlation id is 0 or more. The values below it are this field's own, for
+        // a subscription that has sent no removal and for one that could not: an
+        // event that carried one of them, as an error the driver could not place may,
+        // must forget neither.
+        if correlation_id < 0 {
+            return false;
+        }
+        let found = self.subscriptions.iter().position(|registration| {
+            registration.removal.load(Ordering::Acquire) == correlation_id
+        });
+        match found {
+            Some(index) => {
+                self.subscriptions.swap_remove(index);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether a registration waits for the answer to its removal.
+    pub(crate) fn removing(&self) -> bool {
+        self.subscriptions
+            .iter()
+            .any(|registration| registration.removal.load(Ordering::Acquire) >= 0)
     }
 
     /// The registration of the subscription with `registration_id`.
@@ -1368,13 +1526,14 @@ fn event(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
 
     use cavalry_shm::spsc;
 
     use super::{
         CountersWriter, Event, LogDirectory, MAX_REPLAYS, MAX_SUBSCRIPTIONS, NO_PENDING, Outcome,
         RECORDING_REGISTRY, RecordingRegistration, RecordingRegistry, Registry, ReplayRegistration,
-        ReplayRegistry, SUBSCRIPTION_POSITION, announced, event, log_name,
+        ReplayRegistry, SUBSCRIPTION_POSITION, SUBSCRIPTION_REGISTRY, announced, event, log_name,
     };
     use crate::error::Closed;
     use crate::recording::RecordingStop;
@@ -1594,6 +1753,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The conductor stores a release word by a record's id only into a record that is
+    /// the client's to release: one that holds no counter, which the driver has freed
+    /// and holds, or one that is still the image's own. Into a record that holds
+    /// another counter it stores nothing: that record is another owner's, and its
+    /// word would let the driver give it away under its writer (ADR 0179).
+    #[test]
+    fn the_conductor_releases_by_id_only_a_record_that_is_the_images_or_holds_no_counter() {
+        use cavalry_shm::counters::CountersFile;
+        use cavalry_shm::counters::generated::PUBLICATION_LIMIT;
+        let dir = std::env::temp_dir().join(format!(
+            "cavalry-client-conductor-release-by-id-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the directory");
+        let mut file = CountersFile::create(&dir, 256).expect("the counters file");
+        let writer = CountersWriter::open(&dir).expect("a client's mapping");
+        let (image, session) = (41i64, 7i32);
+        let mut key = [0u8; 16];
+        key[..8].copy_from_slice(&image.to_le_bytes());
+        key[8..12].copy_from_slice(&session.to_le_bytes());
+        let mut allocate = |type_id, key: &[u8]| {
+            file.allocate(type_id, key, "a counter")
+                .expect("a record")
+                .id()
+        };
+        let own = allocate(SUBSCRIPTION_POSITION, &key);
+        let held = allocate(SUBSCRIPTION_POSITION, &key);
+        let other_image = allocate(SUBSCRIPTION_POSITION, &[9u8; 16]);
+        let other_type = allocate(PUBLICATION_LIMIT, &key);
+        file.hold(held).expect("held");
+
+        for record in [own, held, other_image, other_type] {
+            assert!(!file.released(record).expect("a record"));
+            super::release_unheld(&writer, record, image, session);
+        }
+        assert!(file.released(own).expect("a record"), "the image's own");
+        assert!(
+            file.released(held).expect("a record"),
+            "freed and held for this client"
+        );
+        assert!(
+            !file.released(other_image).expect("a record"),
+            "another image's position is another owner's"
+        );
+        assert!(
+            !file.released(other_type).expect("a record"),
+            "and so is a counter of another kind"
+        );
+        super::release_unheld(&writer, 100_000, image, session);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// What [`announced`] makes of an `available image`, against a real driver's
     /// directory: the image when its log and its position counter are there; `gone`
     /// when the log is not there, or the record holds no counter, or another image's
@@ -1645,7 +1857,7 @@ mod tests {
         let of = |correlation_id, session_id, record, log| {
             announced(
                 &dir,
-                &counters,
+                (&counters, &Arc::new(super::Shared::new(0, None))),
                 correlation_id,
                 session_id,
                 record,
@@ -1950,71 +2162,217 @@ mod tests {
         assert_eq!(registry.len(), capacity - 2);
     }
 
-    /// A registration and the subscription's halves of its two queues.
-    fn registration(
-        registration_id: i64,
-    ) -> (
-        Registration,
-        spsc::Consumer<ImageEvent>,
-        spsc::Producer<Retired>,
-    ) {
+    /// The subscription's side of a registration: its halves of the two queues, and the
+    /// word its `remove subscription`'s correlation id is stored in. Dropped as it is,
+    /// it is an `add subscription` that returned an error, the driver's refusal or no
+    /// answer: the halves go, and no removal is sent. A subscription that was handed
+    /// out goes by [`Side::remove`] or [`Side::remove_unsent`].
+    struct Side {
+        incoming: spsc::Consumer<ImageEvent>,
+        retired: spsc::Producer<Retired>,
+        removal: Arc<AtomicI64>,
+    }
+
+    impl Side {
+        /// What a subscription's drop does (`Subscription::remove`): the removal's
+        /// correlation id stored before the command goes, then the halves dropped with
+        /// the handle.
+        fn remove(self, correlation_id: i64) {
+            self.removal.store(correlation_id, Ordering::Release);
+            drop(self);
+        }
+
+        /// The same, for a subscription whose removal could not be written.
+        fn remove_unsent(self) {
+            self.removal
+                .store(crate::subscription::REMOVAL_NOT_SENT, Ordering::Release);
+            drop(self);
+        }
+    }
+
+    /// A registration and the subscription's side of it.
+    fn registration(registration_id: i64) -> (Registration, Side) {
         let (images, incoming) = spsc::queue::<ImageEvent>(2);
         let (retired, retired_consumer) = spsc::queue::<Retired>(2);
+        let removal = Arc::new(AtomicI64::new(crate::subscription::NOT_REMOVED));
         (
             Registration {
                 registration_id,
                 images,
                 retired: retired_consumer,
+                removal: Arc::clone(&removal),
             },
-            incoming,
-            retired,
+            Side {
+                incoming,
+                retired,
+                removal,
+            },
         )
     }
 
+    /// The registry at its capacity. It is full so only against a driver past its own
+    /// bound (`SUBSCRIPTION_REGISTRY`), and the refusal is for that case: a registration
+    /// past the capacity is refused, and its subscription sees the refusal. A place is
+    /// freed by an add whose halves went with no removal, at the admission's sweep, and
+    /// by the driver's answer to a removal, but not by the removal itself.
     #[test]
     fn a_full_registry_sweeps_then_refuses_and_its_subscription_sees_the_refusal() {
-        let mut registry = Registry::with_capacity(MAX_SUBSCRIPTIONS);
-        let mut held = Vec::with_capacity(MAX_SUBSCRIPTIONS);
-        for id in 0..MAX_SUBSCRIPTIONS as i64 {
-            let (registration, incoming, retired) = registration(id);
+        let mut registry = Registry::new();
+        let mut held = Vec::with_capacity(SUBSCRIPTION_REGISTRY);
+        for id in 0..SUBSCRIPTION_REGISTRY as i64 {
+            let (registration, side) = registration(id);
             assert!(registry.admit(registration));
-            held.push((incoming, retired));
+            held.push(side);
         }
-        assert_eq!(registry.len(), MAX_SUBSCRIPTIONS);
+        assert_eq!(registry.len(), SUBSCRIPTION_REGISTRY);
 
         // Full, with every subscription alive: the next is refused, and its
         // subscription's halves see their peer dropped, which `add subscription` reports.
-        let over = MAX_SUBSCRIPTIONS as i64;
-        let (refused, incoming, retired) = registration(over);
+        let over = SUBSCRIPTION_REGISTRY as i64;
+        let (refused, side) = registration(over);
         assert!(!registry.admit(refused));
-        assert!(incoming.peer_dropped());
-        assert!(retired.peer_dropped());
+        assert!(side.incoming.peer_dropped());
+        assert!(side.retired.peer_dropped());
         assert!(registry.get(over).is_none());
-        assert_eq!(registry.len(), MAX_SUBSCRIPTIONS);
+        assert_eq!(registry.len(), SUBSCRIPTION_REGISTRY);
 
-        // A subscription dropped, then another added before any cycle swept: the
-        // admission sweeps first, and the new one takes the place.
-        drop(held.swap_remove(0));
-        let (admitted, incoming, _retired) = registration(over + 1);
+        // A subscription removed, its removal on its way: the admission's sweep keeps
+        // its registration, which waits for the driver's answer, so the next is refused.
+        held.swap_remove(0).remove(5000);
+        let (waits, side) = registration(over + 1);
+        assert!(!registry.admit(waits));
+        assert!(side.incoming.peer_dropped());
+        assert!(registry.get(0).is_some());
+
+        // The answer forgets it, and the next takes its place.
+        assert!(registry.removed(5000));
+        let (admitted, side) = registration(over + 2);
         assert!(registry.admit(admitted));
-        assert!(!incoming.peer_dropped());
-        assert!(registry.get(0).is_none());
-        assert!(registry.get(over + 1).is_some());
-        assert_eq!(registry.len(), MAX_SUBSCRIPTIONS);
+        assert!(!side.incoming.peer_dropped());
+        held.push(side);
+        assert_eq!(registry.len(), SUBSCRIPTION_REGISTRY);
+
+        // An add that returned an error after its registration was admitted, then
+        // another added before any cycle swept: the admission sweeps first, and the
+        // new one takes the place.
+        drop(held.pop());
+        let (admitted, side) = registration(over + 3);
+        assert!(registry.admit(admitted));
+        assert!(!side.incoming.peer_dropped());
+        assert!(registry.get(over + 2).is_none());
+        assert!(registry.get(over + 3).is_some());
+        assert_eq!(registry.len(), SUBSCRIPTION_REGISTRY);
+    }
+
+    /// The case of `SUBSCRIPTION_REGISTRY`: a client at the driver's bound removes a
+    /// subscription and adds another at once. The conductor admits the add at the start
+    /// of its next cycle, before that cycle's events, so before the driver's answer to
+    /// the removal, while the removal's registration waits for it. The add is admitted,
+    /// as the driver, which reads the removal first, admits it; the removal's answer
+    /// then takes the registry back to the bound. A client that replaces its
+    /// subscriptions one at a time so is never refused.
+    #[test]
+    fn a_registry_at_the_drivers_bound_admits_an_add_while_a_removal_waits_for_its_answer() {
+        let mut registry = Registry::new();
+        let mut held = Vec::with_capacity(MAX_SUBSCRIPTIONS);
+        for id in 0..MAX_SUBSCRIPTIONS as i64 {
+            let (registration, side) = registration(id);
+            assert!(registry.admit(registration));
+            held.push(side);
+        }
+        for round in 0..4i64 {
+            // The oldest subscription dropped: its removal is on its way.
+            let removal = 10_000 + round;
+            held.remove(0).remove(removal);
+            // The next cycle: its sweep, then its admissions, then its events.
+            assert_eq!(registry.sweep(), 0, "kept until the driver has answered");
+            let added = MAX_SUBSCRIPTIONS as i64 + round;
+            let (registration, side) = registration(added);
+            assert!(
+                registry.admit(registration),
+                "round {round}: an add the driver admits is admitted here, with {} \
+                 registrations held, one of them a removal on its way",
+                registry.len()
+            );
+            assert!(!side.incoming.peer_dropped());
+            assert!(!side.retired.peer_dropped());
+            assert!(registry.get(added).is_some());
+            assert!(
+                registry
+                    .get(round)
+                    .expect("the removed one waits for its answer")
+                    .images
+                    .peer_dropped()
+            );
+            assert_eq!(registry.len(), MAX_SUBSCRIPTIONS + 1);
+            assert!(registry.removed(removal));
+            assert!(registry.get(round).is_none());
+            assert_eq!(registry.len(), MAX_SUBSCRIPTIONS);
+            held.push(side);
+        }
     }
 
     #[test]
     fn a_sweep_forgets_a_registration_whose_subscription_is_gone() {
         let mut registry = Registry::with_capacity(4);
-        let (first, first_incoming, first_retired) = registration(1);
-        let (second, _second_incoming, _second_retired) = registration(2);
+        let (first, first_side) = registration(1);
+        let (second, _second_side) = registration(2);
         assert!(registry.admit(first));
         assert!(registry.admit(second));
-        drop((first_incoming, first_retired));
+        drop(first_side);
         assert_eq!(registry.sweep(), 1);
         assert!(registry.get(1).is_none());
         assert!(registry.get(2).is_some());
         assert_eq!(registry.sweep(), 0);
+    }
+
+    /// A registration whose subscription sent `remove subscription` is kept until the
+    /// driver has answered that command: until then the driver may announce an image
+    /// for the subscription, and the conductor must still know the registration to
+    /// store that image's release word (ADR 0179). One whose removal could not be
+    /// written is kept, since the driver keeps the subscription. Only one whose halves
+    /// went with no removal at all, an add the driver refused, is forgotten at a sweep.
+    #[test]
+    fn a_removed_subscriptions_registration_is_kept_until_the_driver_has_answered() {
+        use crate::subscription::REMOVAL_NOT_SENT;
+        let mut registry = Registry::with_capacity(4);
+        let (removed, removed_side) = registration(1);
+        let (unsent, unsent_side) = registration(2);
+        let (refused, refused_side) = registration(3);
+        for registration in [removed, unsent, refused] {
+            assert!(registry.admit(registration));
+        }
+        assert!(!registry.removing(), "none has sent a removal yet");
+        removed_side.remove(77);
+        unsent_side.remove_unsent();
+        drop(refused_side);
+        assert!(registry.removing(), "one waits for its answer");
+        assert_eq!(registry.sweep(), 1, "the add the driver refused, alone");
+        assert!(registry.get(3).is_none());
+        let kept = registry.get(1).expect("kept until the driver answers");
+        assert!(
+            kept.images.peer_dropped(),
+            "and known as a subscription whose handle is gone, so that an image \
+             announced for it is released and not queued"
+        );
+        assert!(registry.get(2).is_some());
+        assert_eq!(registry.sweep(), 0);
+        // Another command's answer forgets nothing; the removal's own does, once.
+        assert!(!registry.removed(76));
+        assert!(!registry.removed(REMOVAL_NOT_SENT));
+        assert!(
+            !registry.removed(crate::subscription::NOT_REMOVED),
+            "nor a subscription that has sent no removal: an event with no correlation \
+             id of its own must not take a live subscription's images away"
+        );
+        assert!(registry.removed(77));
+        assert!(registry.get(1).is_none());
+        assert!(!registry.removed(77));
+        assert!(!registry.removing());
+        assert!(
+            registry.get(2).is_some(),
+            "the driver was never told of this one"
+        );
     }
 
     // Vectors from `spec/vectors/client-protocol.json`, by name.

@@ -539,8 +539,12 @@ The wheel is named `cavalry-client`, since the name `cavalry` on PyPI, Python's 
 index, is another project's; the import stays `cavalry`. It holds the two generated
 files and, beside them, the shared library they load, so a program that uses it needs
 no checkout and no Rust toolchain. It does not hold the driver: `cavalry run` still
-comes from a checkout. No wheel is published yet. The release publishes one for each
-platform (work item 369), and until then a wheel is built from a checkout.
+comes from a checkout. No release's wheel is published yet. What PyPI holds under the
+name is one development build, version 0.0.0 for Linux on x86-64, published on
+2026-11-26 for one reason: PyPI holds a name for nobody until a version is published
+under it. That build is not to be installed, and its page there says so. The release
+publishes a wheel for each platform (work item 369), and until then a wheel is built
+from a checkout.
 
 ### Where it runs
 

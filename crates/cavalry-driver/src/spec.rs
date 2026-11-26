@@ -48,8 +48,13 @@ pub const PRODUCER_POSITION_INTERVAL: Duration = Duration::from_millis(2);
 /// How long a closed publication's log stays for its subscribers to drain.
 pub const PUBLICATION_LINGER: Duration = Duration::from_secs(5);
 
-/// How long a freed counter's record stays reclaimed before it is allocated again.
+/// How long a freed counter's record stays reclaimed before it is allocated again,
+/// counted for a record a client wrote from the moment its writer let it go.
 pub const COUNTER_REUSE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// How often the driver tries the lock of a client that has gone and for which it
+/// still holds a record (`spec/client-protocol.md`, "The records a client writes").
+pub const LOCK_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The counters file's capacity, in counters: sized so that the registries fill before
 /// it does, 16,155 at most in client protocol version 7 (`spec/client-protocol.md`,

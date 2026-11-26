@@ -316,6 +316,45 @@ impl CountersFile {
         Ok(())
     }
 
+    /// Frees counter `id` as [`free`](Self::free) does, and holds its record: a reader
+    /// sees no counter from now on, and the record is not allocated again until
+    /// [`let_go`](Self::let_go) gives it a deadline. For a record whose value a client
+    /// writes, an image's position or a counter the client added: a thread of that
+    /// client may store into the slot later than any time the driver could wait
+    /// (`spec/counters-file.md`, "Metadata record"; ADR 0179).
+    pub fn hold(&mut self, id: u32) -> Result<(), CountersError> {
+        self.free(id, super::layout::HELD)
+    }
+
+    /// Whether record `id` is held: freed, with no deadline after which it may be
+    /// allocated again ([`hold`](Self::hold)). [`CountersError::Id`] when `id` is not
+    /// below the capacity.
+    pub fn is_held(&self, id: u32) -> Result<bool, CountersError> {
+        let record = self.mapped.record(id)?;
+        Ok(record.state()? == State::Reclaimed && record.reclaim_deadline() == super::layout::HELD)
+    }
+
+    /// Whether the writer of held record `id` has let it go: its release word reads 1,
+    /// with an acquire load (`spec/counters-file.md`, "Value slot").
+    /// [`CountersError::Id`] when `id` is not below the capacity.
+    pub fn released(&self, id: u32) -> Result<bool, CountersError> {
+        Ok(self.mapped.slot(id)?.released())
+    }
+
+    /// Lets held record `id` go: it may be allocated again after `reusable_after`, a
+    /// reading of this process's nano clock as [`free`](Self::free) takes. The driver
+    /// calls it when [`released`](Self::released) is true or when it holds the lock of
+    /// the client the record was allocated for. [`CountersError::Id`] when `id` is not
+    /// below the capacity, and [`CountersError::NotHeld`] when the record is not held,
+    /// which changes nothing.
+    pub fn let_go(&mut self, id: u32, reusable_after: i64) -> Result<(), CountersError> {
+        if !self.is_held(id)? {
+            return Err(CountersError::NotHeld { id });
+        }
+        self.mapped.record(id)?.set_reclaim_deadline(reusable_after);
+        Ok(())
+    }
+
     /// A handle on the allocated counter in record `id`, static counters included: a
     /// static counter's record is its id. [`CountersError::Id`] when `id` is not below
     /// the capacity, and [`CountersError::Unallocated`] when the record holds no counter.
@@ -390,6 +429,17 @@ impl Counter {
     pub fn load_acquire(&self) -> i64 {
         self.mapped.slot_at(self.offset).get_acquire()
     }
+
+    /// Stores the release word: the last store the thread that owns this counter in a
+    /// client makes to its slot, by which it says that it will not store again. The
+    /// driver gives the record to no other owner before it reads the word, or holds
+    /// the client's lock (`spec/counters-file.md`, "Value slot";
+    /// `spec/client-protocol.md`, "The records a client writes"; ADR 0179). The caller
+    /// stores nothing through this handle or a clone of it afterwards; nothing here
+    /// can stop it, so a client keeps one handle on a record and does not clone it.
+    pub fn release(&self) {
+        self.mapped.slot_at(self.offset).release();
+    }
 }
 
 impl fmt::Debug for Counter {
@@ -410,10 +460,21 @@ pub struct CountersWriter {
 }
 
 impl CountersWriter {
+    /// A second handle on this mapping, for another part of one process: the same
+    /// file by construction, where a second [`CountersWriter::open`] would map
+    /// whatever file the directory names by then, which is another driver's once a
+    /// driver has started there again. A store through that one would land in a
+    /// record this process was never given.
+    pub fn share(&self) -> Self {
+        Self {
+            mapped: Arc::clone(&self.mapped),
+        }
+    }
+
     /// Opens `dir/counters` writable and runs the checks of [`CountersReader::open`].
     pub fn open(dir: &Path) -> Result<Self, CountersError> {
         Ok(Self {
-            mapped: open_mapped(dir, true)?,
+            mapped: open_mapped(dir, true, super::layout::VERSION)?,
         })
     }
 
@@ -435,6 +496,17 @@ impl CountersWriter {
     pub fn counter(&self, id: u32) -> Result<Counter, CountersError> {
         self.mapped.allocated(id)?;
         Counter::new(Arc::clone(&self.mapped), id)
+    }
+
+    /// Stores the release word of record `id`, by its id, for a record this client was
+    /// told of in an `available image` and holds no handle on: an image it does not
+    /// add, or one announced for a subscription it has removed. The record is this
+    /// client's from the event on, whatever its state reads, and the driver gives it
+    /// to nobody until the word is stored (`spec/client-protocol.md`, "The records a
+    /// client writes"). [`CountersError::Id`] when `id` is not below the capacity.
+    pub fn release(&self, id: u32) -> Result<(), CountersError> {
+        self.mapped.slot(id)?.release();
+        Ok(())
     }
 
     /// The metadata of counter `id`, as [`CountersReader::record`], with its refusals:
@@ -510,7 +582,7 @@ impl fmt::Debug for CounterValue {
 /// (`not-ready`, `magic`, `version`, `capacity`, `length`), then the header again through
 /// the final mapping, which must equal the first read (`changed`). What
 /// [`CountersReader::open`] and [`CountersWriter::open`] share.
-fn open_mapped(dir: &Path, writable: bool) -> Result<Arc<Mapped>, CountersError> {
+fn open_mapped(dir: &Path, writable: bool, oldest: i32) -> Result<Arc<Mapped>, CountersError> {
     let file = OpenOptions::new()
         .read(true)
         .write(writable)
@@ -528,7 +600,7 @@ fn open_mapped(dir: &Path, writable: bool) -> Result<Arc<Mapped>, CountersError>
         // file's size covers (checked above); `HeaderCells` is atomics and bytes; the
         // reference lives no longer than `probe`.
         let header = unsafe { &*probe.as_ptr().cast::<HeaderCells>() };
-        header.read(file_length)?
+        header.read_from(file_length, oldest)?
     };
     drop(probe);
     let length = first.file_length() as usize;
@@ -547,7 +619,7 @@ fn open_mapped(dir: &Path, writable: bool) -> Result<Arc<Mapped>, CountersError>
         Map::Reader(map)
     };
     let mapped = Mapped::new(map, first)?;
-    let second = mapped.header_cells().read(file_length)?;
+    let second = mapped.header_cells().read_from(file_length, oldest)?;
     if second != first {
         return Err(CountersError::Changed);
     }
@@ -570,7 +642,21 @@ impl CountersReader {
     /// that gets [`CountersError::NotReady`] waits and opens again.
     pub fn open(dir: &Path) -> Result<Self, CountersError> {
         Ok(Self {
-            mapped: open_mapped(dir, false)?,
+            mapped: open_mapped(dir, false, super::layout::VERSION)?,
+        })
+    }
+
+    /// As [`open`](Self::open), for a reader that only reads and is no client of the
+    /// driver: `cavalry doctor`. It also opens a file of an earlier version, back to
+    /// [`super::layout::OLDEST_READABLE`], so that the newer build's `doctor` reads a
+    /// driver of the older build while a cluster is upgraded one member at a time. An
+    /// earlier version differs in nothing a reader reads, and a reader stores nothing,
+    /// so the reason a client refuses such a file, that it would store into a record
+    /// that driver could give away, does not hold for it (ADR 0179). A counter the
+    /// older driver does not have reads as unallocated, as it always did.
+    pub fn open_to_read(dir: &Path) -> Result<Self, CountersError> {
+        Ok(Self {
+            mapped: open_mapped(dir, false, super::layout::OLDEST_READABLE)?,
         })
     }
 

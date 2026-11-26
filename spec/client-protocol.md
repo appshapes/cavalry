@@ -1,4 +1,4 @@
-# Client protocol, version 10
+# Client protocol, version 11
 
 The client protocol is how a client and the driver on one host talk: the driver's
 directory, which a client opens to find the driver; the commands a client sends through
@@ -63,7 +63,17 @@ has the term length the channel names, refusing it on a subscription's, a
 destination's and a replay's and reading past it on a recording's (ADR 0099); every
 version 9 encoding is unchanged, so a version 9 client's commands are version 10
 commands, and a version 9 driver answers a channel that names `term-length` with code
-1, as a key it does not name.
+1, as a key it does not name. Version 11 adds no command, no event and no encoding. It
+says when a counter's record that a client writes is given to another owner: when its
+writer has stored the release word of `spec/counters-file.md`, version 1, or when the
+client is gone, which the driver reads from a lock the client holds on a file of its
+own in `clients/` ("The records a client writes"; ADR 0179). A version 10
+client does not attach to a version 11 driver, nor a version 11 client to a version 10
+driver: each rejects the other's counters file with `version`, before it sends a
+command. So this version is the exception to the order of an upgrade that the
+versions before it kept, the clients before the driver: a host crosses to version 11
+with its driver and every client of that driver stopped together ("The records a
+client writes", "Crossing to this version").
 
 ## The driver directory
 
@@ -76,10 +86,13 @@ otherwise, where `<tmp>` is the system's temporary directory (`/tmp` on macOS) a
 | --- | --- | --- |
 | `pid` | below | when a driver has taken the directory, before its other files |
 | `counters` | `spec/counters-file.md` | when the driver starts, first |
-| `command-ring` | `spec/command-ring.md` | when the driver starts, second |
+| `command-ring` | `spec/command-ring.md` | when the driver starts, after `clients/` |
 | `broadcast-buffer` | `spec/broadcast-buffer.md` | when the driver starts, last |
 | `publications/<registration id>.logbuffer` | `spec/log-buffer.md` | when a publication is added, named by the publication's registration id; when a replay starts, named by the replay session id |
 | `images/<registration id>.logbuffer` | `spec/log-buffer.md`, type 2 | when a setup frame creates an image over UDP (`spec/udp.md`, "The receiver"), named by the image's own registration id, taken from the correlation id counter as a publication's is |
+| `clients/` | "The records a client writes" | when the driver starts, empty, after `counters` and before `command-ring` |
+| `clients/<client id>.lock` | "The records a client writes" | by a client, through a handle on `clients/`, just before its first command; empty, and locked by that client for as long as it has anything that can store into a counter; the client does not remove it |
+| `clients/<client id>.gone` | "The records a client writes" | by the driver, which gives this name to the lock file of a client that closed or was timed out; the driver removes it when it has taken the lock |
 | `log-recordings-<member id>` | `spec/cluster.md`, "The log's recordings" | by a cluster member's consensus module, a client of the driver and not the driver, each time the member names a recording of its log, written as `log-recordings-<member id>.tmp` and renamed; the driver neither reads nor writes it, and removes it with the rest when it starts (ADR 0103) |
 
 A driver holds the directory by an exclusive advisory lock of the operating system on
@@ -119,17 +132,71 @@ the directory in place, so that `doctor` can read the counters of a driver that 
 gone; the next driver removes them. A driver of an earlier version that starts in the
 directory removes it whole, `pid` with it, as it always did.
 
-A client attaches by opening the command ring writable and loading the consumer
-heartbeat, which is `driver-closed` or `driver-timeout` as the ring page says; then the
-broadcast buffer read-only, joining at the latest record; then the counters file
-read-only. It takes its client id from the ring's correlation id counter, so that no
-two clients of one driver share an id. The driver learns of a client from the first
-command that names its client id and forgets it on client close or timeout; it keeps no
-record of the clients it has forgotten, so a command that arrives from a timed-out
-client is a new client's first command, as it is in Aeron, and it is the client that
-acts on `client timeout`: a client that receives one with its own id closes, since its
-publications and subscriptions are gone. A first command that finds the client registry
-full is answered with error code 10 and registers nothing.
+A client attaches in this order. It opens a handle on the directory `clients/`. It
+opens the command ring writable and loads the consumer heartbeat, which is
+`driver-closed` or `driver-timeout` as the ring page says; then the broadcast buffer
+read-only, joining at the latest record; then the counters file, read-only and once
+more to write. It takes its client id from the ring's correlation id counter, so that
+no two clients of one driver share an id. It creates its lock file through the handle
+on `clients/`, and takes its lock ("The records a client writes"). Then it sends its
+first command. A command ring with no `clients/` beside it is read again, as a file
+that is still being created is (below). A `clients/` that is there and cannot be
+opened, or that is a file or a link and no directory, is refused at once, with its
+path.
+
+That order makes everything a client holds one driver's, and its lock file that
+driver's client's, with no clock and no name in the reason. A file is made in no
+directory that has been removed, though another directory has its name by then. A
+driver that starts removes everything the driver before it left, `clients/` with it,
+before it creates a file of its own. So when the lock file is made, the directory
+that the handle is on was still there: the driver that starts next had created
+nothing yet, and the driver whose `clients/` it is had removed everything of the one
+before it. Every file the client opened between the handle and the lock file is that
+one driver's. A client whose lock file is refused because the directory is gone
+gives up what it opened and its id, and attaches again from the beginning. A client
+that cannot make or lock its file for another reason does not attach, and says which
+file: a client without its lock sends no command. A name that is already there is
+not a file of this driver's client, since ids are distinct within a ring: the client
+takes its next id, eight in all, and then does not attach. Every mapping a client
+makes later is a second handle on one of those it opened then, and never a file
+opened by its name.
+
+A driver that removes `clients/` while a client of the driver before it is making
+its file there can find the directory not empty. Such a client makes one file, so
+the driver removes the directory once more. A start that still finds it not empty
+fails, with an error that says to start the driver again, and has created nothing
+but `pid`.
+
+The driver learns of a client from the first command that names its client id. When
+a client closes or is timed out, the driver notes it as a client that has gone, and
+forgets it when three things hold: it has taken the client's lock, nothing of the
+client's is left to free, and it has read the command ring up to where the ring's
+producers stood when it took the lock. A ring that the driver found corrupt is read
+no more, and the third does not count then. A command that names a client that has
+gone is dropped: the driver registers nobody for it and answers nothing, and
+`client_protocol.dropped_command` counts it. Such commands are an ordinary thing: a
+client that was stopped past its timeout and is continued sends a keepalive before
+it reads its `client timeout`, a thread of a client that closes can write one, and
+so can a client that ends just after it wrote. A client writes a command before it
+lets go of its lock, so every command of a client is in the ring before the driver
+can take the lock, and the driver has read them all, and dropped them, before it
+forgets the client: no command of a client that the driver noted as gone registers a
+client again.
+
+A first command whose client's lock the driver can take is of a client that has
+ended since it wrote the command: its process ended, or everything of it was
+dropped. The driver registers nobody for it, removes the file, drops the command
+and counts it, and notes the client as one that has gone and whose lock is taken, so
+that what else it wrote is dropped the same way.
+
+A client that the driver cannot ask about ("The records a client writes") is
+forgotten when it goes, so a command that arrives from it afterwards is a new
+client's first command. One that went while the driver's list of the clients that
+have gone was full still holds its lock, on a file that was never renamed, and is
+registered with it. It is the client that acts on `client timeout`: a client that
+receives one with its own id closes, since its publications and subscriptions are
+gone. A first command that finds the client registry full is answered with error
+code 10 and registers nothing.
 
 A client that attaches while the driver is still creating its files waits for them (ADR
 0072). The driver creates each of the three files, sizes it and writes its magic last,
@@ -814,7 +881,9 @@ closes on the first recording event a version 1 driver sends, a version 1 client
 the first replay event a version 2 driver sends, and a version 6 client on the first
 `counter ready` or `unavailable counter` a version 7 driver sends, so an upgrade
 restarts the clients before the driver; a client that sends a command to a driver of an earlier version is
-answered with code 6 and keeps running.
+answered with code 6 and keeps running. Neither holds across version 11, where a
+client and a driver of the two sides do not attach to each other at all ("The records
+a client writes", "Crossing to this version").
 
 | Event | Offset | Size | Field | Type | Bound |
 | --- | --- | --- | --- | --- | --- |
@@ -876,7 +945,9 @@ counter is not allocated or its key names another image, the image is `gone`
 (`spec/log-buffer.md`, "What a reader rejects"): the client's own `remove
 subscription` was on its way, or the client read the event more than the counter
 reuse timeout after the driver sent it. The client does not add the image and does
-not close. It tells the subscription, whose next poll reports the image with the
+not close. It stores the release word of the position record the event named, by the
+record's id: the record is that client's from the event on, and the driver gives it to
+nobody until the word is stored ("The records a client writes"). It tells the subscription, whose next poll reports the image with the
 reason `gone`: frames its publisher published after the join, if any, were not
 delivered to that subscription. A log that is there and fails another check is
 `corrupt`, as before. It sends `unavailable
@@ -934,7 +1005,8 @@ values and keeps 100 and above for its own (`spec/c-abi.md`, "Error codes").
 | command ring unblock timeout | 10 s | the driver | the client liveness timeout, as `spec/command-ring.md` says |
 | publication unblock timeout | 15 s | the driver | `spec/log-buffer.md`, "Unblocking" |
 | publication linger | 5 s | the driver | `spec/log-buffer.md`, "Closing"; a control channel's ends sooner when an `add subscription` on the driver needs its control address (`spec/udp.md`, "The sender"; ADR 0153) |
-| counter reuse timeout | 1 s | the driver | how long a freed counter's record stays reclaimed before it is allocated again (`spec/counters-file.md`); and how long after an `available image` the driver keeps the log and the position counter it names, unless the subscription is removed or the subscriber has moved the position ("Events"; ADR 0078) |
+| lock check interval | 100 ms | the driver | how often it tries the lock of a client that has gone and for which it still holds a record ("The records a client writes") |
+| counter reuse timeout | 1 s | the driver | how long a freed counter's record stays reclaimed before it is allocated again, counted for a record a client wrote from the moment its writer let it go (`spec/counters-file.md`; "The records a client writes"); and how long after an `available image` the driver keeps the log and the position counter it names, unless the subscription is removed or the subscriber has moved the position ("Events"; ADR 0078) |
 | recording sync interval | 1 s | the driver | how long after a recording's last sync, or its start, the recorder syncs it again when it has written bytes no sync covers; a `sync recording` syncs at once, and the interval then runs from that sync (ADR 0025, ADR 0069) |
 | replay connect timeout | 5 s | the driver | a replay whose publication has had no subscriber, or over `cavalry:udp` has not been connected as `spec/udp.md`, "The sender", defines it, for this long ends with reason 2: measured from the replay's start, from the moment its last subscriber went, or over `cavalry:udp` from the moment the connection timeout passed |
 | closing endpoint wait | 5 s | the driver | an `add subscription` that has waited this long for its channel's previous receive endpoint to close, or for a closed publication's control socket on its endpoint's address to go, and an `add publication` that has waited this long for a receive endpoint that holds its control address to close, measured from the moment the driver read it, is answered with code 4 and registers nothing ("Commands"); half the response timeout, so that the answer reaches the client before the client reports the add lost |
@@ -995,6 +1067,177 @@ to run when the host wakes as it had when the host slept. Where the operating sy
 clock counts the suspension, every interval runs on through it.
 
 What a step does to a recording's timestamps is in `spec/durable-log.md`, "Time index".
+
+## The records a client writes
+
+Two kinds of counter are written by a client and not by the driver: an image's position,
+which the driver allocates for a subscription and names in `available image`, and a
+counter the client added with `add counter`. The driver frees such a record when the
+image ends, when the subscription or the counter is removed, and when the client closes
+or is timed out. A thread of the client may still be about to store into it then: a
+subscriber's thread stores its position after each poll, and it learns that an image
+ended, or that its client was timed out, from an event that another thread, the
+client's conductor, reads. A process that was stopped, and a conductor that was not
+run for a while, store later than any time the driver could wait.
+
+So a record a client writes is **held** from the moment the driver frees it
+(`spec/counters-file.md`, "Metadata record"): no reader takes it for a counter, and
+the driver gives it to no other owner. The driver lets a held record go, and counts
+the counter reuse timeout from that moment, in two cases and no other:
+
+1. **Its writer has said so.** The record's release word reads 1.
+2. **Its client is gone.** The client was closed or timed out, and the driver holds
+   that client's lock.
+
+**The release word** is stored by the one thread that holds the client's handle on the
+record, as that thread's last store to the slot, when it gives the handle up. It is
+stored once for a handle: giving a handle up and dropping it are one act, after which
+there is no handle to store through, the word included. A second store of the word
+would come after the driver may have given the record to another owner, and would
+set that owner's word.
+
+- A subscription gives up an image's handle when it takes the image out: on
+  `unavailable image`, on a fault of the image, on its own close and when it finds its
+  client closed. It does so on the thread that polls, between two polls, so that no
+  poll of that image is under way or follows. The image's mapping may be dropped by
+  another thread afterwards; its handle is not passed on with it.
+- The owner of a counter the client added gives up its handle when it removes the
+  counter.
+- A handle that is dropped by anything else is given up by that: one still queued for
+  a subscription that goes, one that goes with its client.
+- For a record the client was told of and holds no handle on, the client's conductor
+  stores the word, by the record's id. That is an image it does not add because its
+  log buffer is `gone` ("Events"), and an image announced for a subscription the
+  client has removed. An image whose log buffer is `corrupt` closes the client, and
+  no word is stored for it: its record is held until the client has gone. The conductor stores it only into a record that holds no counter, which
+  the driver has freed and holds for the client, or that is still that image's own;
+  into a record that holds another counter it stores nothing. For an image of a
+  removed subscription, a client keeps the subscription's registration id until it
+  has read the driver's answer to its `remove subscription`, `operation success` or
+  an error: the driver announces nothing for the subscription after that answer. An
+  `add subscription` whose answer the client never read leaves the driver with a
+  subscription that the client does not know, and the records of its images are held
+  until the client has gone.
+
+A client sends `remove subscription` and `remove counter` after the handles they
+concern are given up. A client that is closed sends neither, nor `remove publication`:
+the driver removed everything of it when it closed or was timed out, and drops a
+command that names a client that has gone ("The driver directory"). A client that
+finds itself closed between the look and the command sends a command that the driver
+drops. It stores nothing into a record and lets no record go. A handle on a record belongs to one thread at a time, and is not
+copied. A caller of the C ABI that uses a handle from a second thread while the first
+closes it has broken that, and the fault is the caller's (`spec/c-abi.md`). So has a
+process that the client's process forked and that closes, drops or polls what it
+inherited: the child must use nothing of the client, since what it gives up is the
+parent's.
+
+**The lock** is an exclusive advisory lock of the operating system on the file
+`clients/<client id>.lock` in the driver's directory, as the driver's own is on the
+directory ("The driver directory"). A client creates the file, empty, and takes the
+lock after it has taken its client id and before its first command. Everything of
+the client that can store into a counter keeps the one open file: the client, its
+conductor, and every handle on a record. So the lock is let go when the last of them is
+dropped, and no handle outlives it; and when the process ends, however it ends. A
+process that is stopped still holds it, and so does a process that the client's
+process forked, for as long as it lives.
+
+The file `clients/<client id>.lock` in a driver's directory is the file of that
+driver's client of that id, and of no other process. The name does not say so: client
+ids begin again with each driver, and a path names the directory of whichever driver
+holds it at that moment. A client that was stopped between taking its id and making
+its file, while the driver was started again, would make a file by that path in the
+next driver's `clients/`, under an id that driver gives out again. So a client makes
+its file through a handle on `clients/` that it opened before it opened the ring its
+id is from, and such a client can make no file in the next driver's directory ("The
+driver directory").
+
+A client does not remove its file: only the driver removes a file, after it has
+taken its lock. The one exception is a client whose first command could not be
+written, or whose lock the system refused on the file it had made: the driver never
+learns of it, so it removes the file it made, through the handle it made it
+through. A client that is killed between making its file and its first command
+leaves an empty file that the driver never learns of; the driver that starts next
+removes it with the directory.
+
+When a client closes or is timed out, the driver renames its lock file to
+`clients/<client id>.gone`, before it frees anything of the client's. The lock is on
+the file and goes with it, and the name is how `cavalry doctor` tells a client that
+has gone from one that runs. The driver then tries the lock on the renamed file,
+without waiting, at most once every lock check interval: one try of every client
+that has gone, so a client's first try comes within that interval of its going. When it
+takes the lock, nothing of that client can store: it lets every record held for the
+client go, removes the file and lets go of the lock. A record of that client's that
+is freed after that, as a position over UDP is when the receiver says that its reader
+has gone, is not held at all. The driver forgets the client when nothing of its is
+still to be freed.
+
+Two parties lock such a file, and each takes an exclusive lock: the client, for its
+life, and the driver, in a try that does not wait and that it lets go of at once. The
+driver lets a record go by the lock only when its own try has taken it, so no other
+process can make that happen early: one that held the lock for a moment would delay
+the driver by a lock check interval and no more. `cavalry doctor` locks nothing. It
+reads the directory: a file named `.gone` is a client that has gone and still holds
+its lock, and the time the file has had that name is how long.
+
+A driver that starts removes `clients/` with everything else the driver before it
+left ("The driver directory"), and makes it again, empty. A client of that earlier
+driver that is stopped still holds a lock, on a file that no longer has a name, a
+handle on a directory that is gone, and mappings of that driver's three files, which
+have no name either: it can store into nothing of the driver that started, and it
+makes and removes nothing there. Continued, it finds its own ring's heartbeat older
+than the driver timeout and closes. `counters.held`,
+`counters.retired` and `client.without_lock` are counters of the new file and begin
+at 0.
+
+**A client the driver cannot ask about.** The driver can learn that a client is gone
+only by a lock that the client held. Three kinds of client give it nothing to try:
+
+- A client of which the driver finds no lock file when it reads its first command,
+  or whose lock the system fails to try. A client of this version sends no command
+  without its lock, so this is a lock file that another hand removed.
+  `client.without_lock` counts it, and `cavalry doctor` warns. It is forgotten when
+  it goes, so a command of its that comes late registers a client again, and is
+  counted again. A hand that puts another file of the name in its place, which
+  nobody locks, makes the client look like one that has ended: its commands are
+  dropped, and counted, until the ring is read past where it stood then, and its
+  next command registers it as this kind.
+- A client whose lock file could not be renamed when it went, or was removed by
+  another hand afterwards. A file that is not there is no answer. A try that the
+  system fails is none either, and is made again at the next interval.
+- A client that goes while the driver's list of the clients that have gone is full.
+  The list holds 256, the clients' registry's own bound, and a client leaves it when
+  the driver has taken its lock.
+
+Such a client's release words are read as any client's. What it leaves held when it
+closes or is timed out, with no release word, is out of use until the driver starts
+again, and `counters.retired` counts each record. Nothing is refused for it, and
+nothing of it is given away.
+
+**The bounds.** A held record is a record of the counters file, so the records held
+are fewer than its capacity, and the driver's table of them has that capacity: it is
+never full before the file is. An allocation that finds no record free fails as
+`spec/counters-file.md`, "When the file is full", says, which is the bound an operator
+meets. `counters.held` is how many are held. The driver looks at the release words of
+64 held records in a duty cycle, in turn. Records are held for long by a subscription
+whose thread no longer polls, which its client's queue of 64 image events closes; by a
+client that closed and keeps an object of the client alive; and by a process that was
+timed out and is stopped. `cavalry doctor` names the last two by their `.gone` file,
+once it has had that name for 2 s.
+
+**Crossing to this version.** A client of version 10 stores into a record with no
+word and no lock, so a driver of this version could give nothing of its back out, and
+a client of this version beside a driver of version 10 would be as exposed as it was.
+The counters file's version keeps the two apart: a reader of either side rejects the
+other's file with `version` when it attaches, and its message says which side is the
+older and what to do. So on one host the driver and every client of it are stopped
+together, and started from the newer build, the driver first. No order of the two
+works across this version, where every version before it let a newer client run
+beside an older driver for the length of an upgrade. Between hosts nothing changes:
+no frame and no message of `spec/udp.md` or `spec/cluster.md` moves, so a cluster is
+still upgraded one member at a time, each member with the driver and the service
+beside it (`docs/how-to/upgrade-a-cluster.md`). `cavalry doctor` of the newer build
+reads a driver of the older one, as that upgrade needs: it only reads, and is no
+client (`spec/counters-file.md`, "What a reader rejects").
 
 ## Sizes
 
@@ -1131,7 +1374,13 @@ stores it with a release store after each block. A replay publication's
 `publication.position` and `publication.limit` are keyed and labelled as a publication's,
 with the replay session id where the correlation id goes. A counter a client adds with
 `add counter` is a `client` counter of `counters.toml`, keyed and labelled by the
-client that adds it and written by that client alone (ADR 0062).
+client that adds it and written by that client alone (ADR 0062). Static
+`counters.held`, a gauge, and `counters.retired` are the records held for their
+writers and the records put out of use until the driver starts again, and
+`client.without_lock` the clients of which the driver found no lock file at their
+first command ("The records a client writes"; ADR 0179).
+`client_protocol.dropped_command` counts the commands dropped because their client
+had gone ("The driver directory").
 
 ## Vectors
 

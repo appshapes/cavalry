@@ -180,7 +180,7 @@ the line.
 | A log purged below a snapshot | By hand, with the member stopped | Feature 5 |
 | Dynamic membership, authentication, suspend and resume | Absent | Out |
 | Encryption, a metrics export, a console, discovery, Kubernetes, kernel bypass, Windows | Absent | Out |
-| Packages | None: every crate is `publish = false`, and a client is used from a checkout | Feature 10 |
+| Packages | None is released: every crate is `publish = false`, and a client is used from a checkout. The Python client's wheel is built, installed and run in CI by `just package` (ADR 0166, ADR 0178), and one development build of it, version 0.0.0, is on PyPI to hold the name `cavalry-client`: it is not to be installed | Feature 10 |
 
 ## What the cluster does when something fails
 

@@ -62,7 +62,7 @@ pub const CONDUCTOR_IDLE_STRATEGY: CounterId = CounterId(17);
 /// `counters.allocations`, a static counter: Counter allocations made since the driver started, the static counters' own records included: every record that went from unused or reclaimed to allocated, the transition counters.allocated adds one for, so that counters.allocations minus counters.freed is counters.allocated (spec/counters-file.md, Metadata record).
 pub const COUNTERS_ALLOCATIONS: CounterId = CounterId(18);
 
-/// `counters.freed`, a static counter: Counters freed since the driver started: every record that went from allocated to reclaimed, the transition counters.allocated loses one for; a reclaimed record is allocated again after the counter reuse timeout.
+/// `counters.freed`, a static counter: Counters freed since the driver started: every record that went from allocated to reclaimed, the transition counters.allocated loses one for; a reclaimed record is allocated again after the counter reuse timeout, and one whose value a client wrote only once its writer has let it go (counters.held).
 pub const COUNTERS_FREED: CounterId = CounterId(19);
 
 /// `recording.started`, a static counter: Recordings the driver started: a catalog slot taken, the time index and the first segment file created, the two position counters allocated and recording ready sent (spec/client-protocol.md, Commands).
@@ -626,6 +626,18 @@ pub const DRIVER_PARKS_OVERDUE: CounterId = CounterId(206);
 /// `client.conductor_parks_overdue`, a client counter: Parks of one client's conductor thread, or of the client's watch, that ran more than 200 ms past their timeout and that the other of the two then ended, by unparking it (ADR 0177). A client's conductor parks for at most 1 ms when its duty cycle found no work, and its watch for 100 ms. The client has a watch where a timed wait can outlive its timer, which is macOS (ADR 0171); its conductor adds this counter at the first such park and not before, so most clients have none, and stores the count with a release store; key: client id (i64), little-endian. A park is counted once, however many looks it takes to end. The driver frees the counter when the client closes or is timed out.
 pub const CLIENT_CONDUCTOR_PARKS_OVERDUE: CounterId = CounterId(207);
 
+/// `counters.held`, a static gauge: Records of the counters file that the driver has freed and gives to no other owner yet: an image's position or a counter a client added, whose writer in the client has not stored the release word and whose client the driver does not know to be gone. A reader sees no counter in a held record; the driver lets it go, and counts the counter reuse timeout from then, when the word is stored or when it holds the client's lock.
+pub const COUNTERS_HELD: CounterId = CounterId(208);
+
+/// `counters.retired`, a static counter: Records of the counters file that are out of use until the driver starts again: what a client that the driver cannot ask about left held, with no release word, when it closed or was timed out. That is a client whose lock file was not there at its first command, or whose lock the system failed to try then, one whose lock file could not be renamed when it went or was removed by another hand, and one that went while the driver's list of the clients that have gone, 256, was full. Nothing tells the driver that such a client can no longer store, so it gives the records to nobody.
+pub const COUNTERS_RETIRED: CounterId = CounterId(209);
+
+/// `client.without_lock`, a static counter: Clients of which the driver found no lock file in its directory when it read their first command, or whose lock the system failed to try: each is counted once, and again when a command of one that has gone registers it anew. A client takes its lock before its first command and sends none without it, so this counts a lock file that another hand removed. The driver cannot learn that such a client is gone, so what it leaves held with no release word when it closes or is timed out is put out of use, and counters.retired counts it.
+pub const CLIENT_WITHOUT_LOCK: CounterId = CounterId(210);
+
+/// `client_protocol.dropped_command`, a static counter: Commands the driver dropped because the client they named had gone: it had closed or been timed out and the driver had not finished with it, or the driver could take its lock when it read its first command. Nobody is registered for such a command and nothing is answered. A client that was stopped past the client liveness timeout sends one when it is continued, before it reads its client timeout, and a client that ends just after it wrote a command leaves one. Such a client's lock file is removed when the driver drops its first command; when 256 clients have gone and the driver has finished with none of them, the file stays until the driver starts again (spec/client-protocol.md, The driver directory).
+pub const CLIENT_PROTOCOL_DROPPED_COMMAND: CounterId = CounterId(211);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -785,7 +797,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "counters.freed",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Counters freed since the driver started: every record that went from allocated to reclaimed, the transition counters.allocated loses one for; a reclaimed record is allocated again after the counter reuse timeout.",
+        doc: "Counters freed since the driver started: every record that went from allocated to reclaimed, the transition counters.allocated loses one for; a reclaimed record is allocated again after the counter reuse timeout, and one whose value a client wrote only once its writer has let it go (counters.held).",
         doctor: "",
     },
     CounterDef {
@@ -2283,5 +2295,37 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Parks of one client's conductor thread, or of the client's watch, that ran more than 200 ms past their timeout and that the other of the two then ended, by unparking it (ADR 0177). A client's conductor parks for at most 1 ms when its duty cycle found no work, and its watch for 100 ms. The client has a watch where a timed wait can outlive its timer, which is macOS (ADR 0171); its conductor adds this counter at the first such park and not before, so most clients have none, and stores the count with a release store; key: client id (i64), little-endian. A park is counted once, however many looks it takes to end. The driver frees the counter when the client closes or is timed out.",
         doctor: "A client's conductor did not come back from a timed wait and was woken by the client's watch, after a stall of up to 300 ms past its timeout each time, in which the client sent no keepalive and took no image. On a Mac the system can lose a timer wake-up, about one in 40 million on the machine where it was found, and a few of these a day is that: nothing to do, and docs/how-to/find-a-wait-that-does-not-return.md says how to probe the machine. Many a minute means the host could not run the client's threads for 200 ms at a time: look for a host under memory pressure or CPU contention, or a process stopped and continued.",
+    },
+    CounterDef {
+        id: COUNTERS_HELD,
+        name: "counters.held",
+        kind: Kind::Gauge,
+        scope: Scope::Static,
+        doc: "Records of the counters file that the driver has freed and gives to no other owner yet: an image's position or a counter a client added, whose writer in the client has not stored the release word and whose client the driver does not know to be gone. A reader sees no counter in a held record; the driver lets it go, and counts the counter reuse timeout from then, when the word is stored or when it holds the client's lock.",
+        doctor: "The driver holds this many records of the counters file for clients that may still store into them. A few, for a moment, is every subscription and client that closes. Many that stay are held by a client that closed and keeps an object of the client alive, or by a process that was timed out and is stopped, or by a subscription that no longer polls: doctor names a client that has gone and still holds its lock. Continue or end that process, or drop the client in the program, and the records are free within the lock check interval and the counter reuse timeout. Held records count against the file's capacity; see docs/reference/client-protocol.md#the-records-a-client-writes.",
+    },
+    CounterDef {
+        id: COUNTERS_RETIRED,
+        name: "counters.retired",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Records of the counters file that are out of use until the driver starts again: what a client that the driver cannot ask about left held, with no release word, when it closed or was timed out. That is a client whose lock file was not there at its first command, or whose lock the system failed to try then, one whose lock file could not be renamed when it went or was removed by another hand, and one that went while the driver's list of the clients that have gone, 256, was full. Nothing tells the driver that such a client can no longer store, so it gives the records to nobody.",
+        doctor: "A client that the driver could not ask about closed or was timed out, and left this many records that the driver cannot give out again before it restarts. Most often something removed the client's lock file from clients/ in the driver's directory while the client ran (client.without_lock counts the ones gone by a client's first command): keep everything but the driver and its clients out of that directory. Otherwise more than 256 clients had gone at once and still held their locks: cavalry doctor names them. The records count against the counters file's capacity until the driver starts again; see docs/reference/client-protocol.md#the-records-a-client-writes.",
+    },
+    CounterDef {
+        id: CLIENT_WITHOUT_LOCK,
+        name: "client.without_lock",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Clients of which the driver found no lock file in its directory when it read their first command, or whose lock the system failed to try: each is counted once, and again when a command of one that has gone registers it anew. A client takes its lock before its first command and sends none without it, so this counts a lock file that another hand removed. The driver cannot learn that such a client is gone, so what it leaves held with no release word when it closes or is timed out is put out of use, and counters.retired counts it.",
+        doctor: "The driver read the first command of a client and found no lock file for it under clients/ in its directory. A client makes that file and locks it before its first command, so something else removed it: a cleaner that removes old files from the driver's directory, or a second program that uses the directory. The client works. But when it closes or is timed out, every counter's record that it has not let go is out of use until the driver starts again. Keep everything but the driver and its clients out of the driver's directory; see docs/reference/client-protocol.md#the-records-a-client-writes.",
+    },
+    CounterDef {
+        id: CLIENT_PROTOCOL_DROPPED_COMMAND,
+        name: "client_protocol.dropped_command",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Commands the driver dropped because the client they named had gone: it had closed or been timed out and the driver had not finished with it, or the driver could take its lock when it read its first command. Nobody is registered for such a command and nothing is answered. A client that was stopped past the client liveness timeout sends one when it is continued, before it reads its client timeout, and a client that ends just after it wrote a command leaves one. Such a client's lock file is removed when the driver drops its first command; when 256 clients have gone and the driver has finished with none of them, the file stays until the driver starts again (spec/client-protocol.md, The driver directory).",
+        doctor: "",
     },
 ];
