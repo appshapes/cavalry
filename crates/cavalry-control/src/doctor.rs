@@ -1033,8 +1033,8 @@ fn counters_checks(
     // Records held for their writers (ADR 0179). The gauge alone is no finding: it is
     // above 0 for a moment at every subscription and client that closes. A client
     // that has gone and whose process still holds its lock is one: the driver has
-    // given its lock file a name that ends `.gone`, and removes the file within the
-    // lock check interval of the lock being let go.
+    // given its lock file the name `clients/<client id>.gone`, and removes the file
+    // within the lock check interval of the lock being let go.
     checks += 1;
     if let Some(held) = read("counters.held", COUNTERS_HELD, findings) {
         let now = std::time::SystemTime::now()

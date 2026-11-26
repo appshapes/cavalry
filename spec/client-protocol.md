@@ -91,8 +91,8 @@ otherwise, where `<tmp>` is the system's temporary directory (`/tmp` on macOS) a
 | `publications/<registration id>.logbuffer` | `spec/log-buffer.md` | when a publication is added, named by the publication's registration id; when a replay starts, named by the replay session id |
 | `images/<registration id>.logbuffer` | `spec/log-buffer.md`, type 2 | when a setup frame creates an image over UDP (`spec/udp.md`, "The receiver"), named by the image's own registration id, taken from the correlation id counter as a publication's is |
 | `clients/` | "The records a client writes" | when the driver starts, empty, after `counters` and before `command-ring` |
-| `clients/<client id>-<device>-<file>.lock` | "The records a client writes" | by a client, just before its first command; empty, and locked by that client for as long as it has anything that can store into a counter; the client does not remove it. `<device>` and `<file>` say which counters file the client has mapped |
-| `clients/<client id>-<device>-<file>.gone` | "The records a client writes" | by the driver, which gives this name to the lock file of a client that closed or was timed out; the driver removes it when it has taken the lock |
+| `clients/<client id>.lock` | "The records a client writes" | by a client, through a handle on `clients/`, just before its first command; empty, and locked by that client for as long as it has anything that can store into a counter; the client does not remove it |
+| `clients/<client id>.gone` | "The records a client writes" | by the driver, which gives this name to the lock file of a client that closed or was timed out; the driver removes it when it has taken the lock |
 | `log-recordings-<member id>` | `spec/cluster.md`, "The log's recordings" | by a cluster member's consensus module, a client of the driver and not the driver, each time the member names a recording of its log, written as `log-recordings-<member id>.tmp` and renamed; the driver neither reads nor writes it, and removes it with the rest when it starts (ADR 0103) |
 
 A driver holds the directory by an exclusive advisory lock of the operating system on
@@ -132,33 +132,47 @@ the directory in place, so that `doctor` can read the counters of a driver that 
 gone; the next driver removes them. A driver of an earlier version that starts in the
 directory removes it whole, `pid` with it, as it always did.
 
-A client attaches by opening the command ring writable and loading the consumer
-heartbeat, which is `driver-closed` or `driver-timeout` as the ring page says; then the
-broadcast buffer read-only, joining at the latest record; then the counters file
-read-only. It then looks at the three names again, and attaches only when each still
-names the file it opened, by the file's device and file numbers; when one does not, a
-driver is starting there, and the client reads the directory again as it does for
-files that are still being created (below). So a client's three mappings are one
-driver's. A driver that starts removes everything the driver before it left before it
-creates a file of its own, so at any moment the directory names files of one driver;
-each of the three names was the client's file when the client opened it and is again
-at the second look; and the system gives a file's numbers to no other file while a
-process has it mapped. Every mapping a client makes later is of one of those three
-files: a second handle on the command ring is the same mapping, and a writing mapping
-of the counters file, which a client opens by its name, is refused with
-`driver-timeout` when the name is another file's by then. The client takes its client
-id from the ring's correlation id counter, so that no two clients of one driver share
-an id. It then creates its lock file and takes its lock ("The records a client
-writes"). The driver learns of a client from the first command that names its client
+A client attaches in this order. It opens a handle on the directory `clients/`. It
+opens the command ring writable and loads the consumer heartbeat, which is
+`driver-closed` or `driver-timeout` as the ring page says; then the broadcast buffer
+read-only, joining at the latest record; then the counters file, read-only and once
+more to write. It takes its client id from the ring's correlation id counter, so that
+no two clients of one driver share an id. It creates its lock file through the handle
+on `clients/`, and takes its lock ("The records a client writes"). Then it sends its
+first command. A command ring with no `clients/` beside it is read again, as a file
+that is still being created is (below).
+
+That order makes everything a client holds one driver's, and its lock file that
+driver's client's, with no clock and no name in the reason. A file is made in no
+directory that has been removed, though another directory has its name by then. A
+driver that starts removes everything the driver before it left, `clients/` with it,
+before it creates a file of its own. So when the lock file is made, the directory
+that the handle is on was still there: the driver that starts next had created
+nothing yet, and the driver whose `clients/` it is had removed everything of the one
+before it. Every file the client opened between the handle and the lock file is that
+one driver's. A client whose lock file is refused because the directory is gone
+gives up what it opened and its id, and attaches again from the beginning. A client
+that cannot make or lock its file for another reason does not attach, and says which
+file: a client without its lock sends no command. A name that is already there is
+not a file of this driver's client, since ids are distinct within a ring: the client
+takes its next id, eight in all, and then does not attach. Every mapping a client
+makes later is a second handle on one of those it opened then, and never a file
+opened by its name.
+
+A driver that removes `clients/` while a client of the driver before it is making
+its file there can find the directory not empty. It fails to start, with the error
+of that step, and the next start removes the file.
+
+The driver learns of a client from the first command that names its client
 id. When a client closes or is timed out, the driver notes it as a client that has
 gone until it has taken that client's lock and has nothing of the client's left to
 free, and then forgets it. A command that names a client that has gone is dropped: the
 driver registers nobody for it and answers nothing. Such a command is certain to come
 from a client that was stopped past its timeout: continued, its conductor sends a
 keepalive before it reads its `client timeout`. Once the driver has taken a client's
-lock, nothing of that client is left to send. A client that held no lock is forgotten
-when it goes, so a command that arrives from it afterwards is a new client's first
-command. It is the client that acts on `client timeout`: a client that receives one
+lock, nothing of that client is left to send. A client that the driver cannot ask
+about ("The records a client writes") is forgotten when it goes, so a command that
+arrives from it afterwards is a new client's first command. It is the client that acts on `client timeout`: a client that receives one
 with its own id closes, since its publications and subscriptions are gone. A first command that finds the client registry
 full is answered with error code 10 and registers nothing.
 
@@ -1087,55 +1101,41 @@ A client sends `remove subscription` and `remove counter` after the handles they
 concern are given up. A client that is closed sends neither, nor `remove publication`:
 the driver removed everything of it when it closed or was timed out, and drops a
 command that names a client that has gone ("The driver directory"). A client that
-finds itself closed between the look and the command sends a command that is
-dropped, or, when the driver has finished with the client, one that registers a
-client with no lock, which the driver times out. Neither stores anything into a
-record and neither lets a record go. A handle on a record belongs to one thread at a time, and is not
+finds itself closed between the look and the command sends a command that the driver
+drops. It stores nothing into a record and lets no record go. A handle on a record belongs to one thread at a time, and is not
 copied. A caller of the C ABI that uses a handle from a second thread while the first
 closes it has broken that, and the fault is the caller's (`spec/c-abi.md`). So has a
 process that the client's process forked and that closes, drops or polls what it
 inherited: the child must use nothing of the client, since what it gives up is the
 parent's.
 
-**The lock** is an exclusive advisory lock of the operating system on a file of the
-client's own in `clients/` of the driver's directory, as the driver's own is on the
+**The lock** is an exclusive advisory lock of the operating system on the file
+`clients/<client id>.lock` in the driver's directory, as the driver's own is on the
 directory ("The driver directory"). A client creates the file, empty, and takes the
-lock after it has taken its client id and just before its first command. Everything of
+lock after it has taken its client id and before its first command. Everything of
 the client that can store into a counter keeps the one open file: the client, its
 conductor, and every handle on a record. So the lock is let go when the last of them is
 dropped, and no handle outlives it; and when the process ends, however it ends. A
 process that is stopped still holds it, and so does a process that the client's
 process forked, for as long as it lives.
 
-The file's name is `<client id>-<device>-<file>.lock`: the client's id in decimal, and
-the device number and the file number of the counters file the client has mapped
-(`st_dev` and `st_ino` of the open file), each in lowercase hexadecimal with no
-prefix. A driver looks only at the names that carry its own counters file's numbers.
-The client id alone would not name one client: client ids begin again with each
-driver, and a client makes its file by a path, which names the directory of
-whichever driver holds it at that moment. A client that was stopped between taking
-its id and making its file, while the driver was started again, makes its file in
-the next driver's `clients/`, under an id that driver gives out again.
-
-With the counters file in the name, such a file cannot be taken for the lock of the
-next driver's client, and no clock is in the reason. The system gives two files that
-exist at once on one device different file numbers. A client has its counters file
-mapped when it makes its lock file. A driver creates its counters file before it
-creates `clients/`, and keeps it mapped for as long as it runs. So when a lock file
-is made in the `clients/` of a driver that runs, the client's counters file and the
-driver's are both open: the name carries the driver's numbers only when the two are
-one file. The client's command ring is then that driver's too, since a client's
-three mappings are one driver's ("The driver directory"), and within one ring client
-ids are distinct. A file under any other name is never tried, renamed or removed by
-the driver, and is removed with `clients/` by the driver that starts next.
+The file `clients/<client id>.lock` in a driver's directory is the file of that
+driver's client of that id, and of no other process. The name does not say so: client
+ids begin again with each driver, and a path names the directory of whichever driver
+holds it at that moment. A client that was stopped between taking its id and making
+its file, while the driver was started again, would make a file by that path in the
+next driver's `clients/`, under an id that driver gives out again. So a client makes
+its file through a handle on `clients/` that it opened before it opened the ring its
+id is from, and such a client can make no file in the next driver's directory ("The
+driver directory").
 
 A client does not remove its file: only the driver removes a file, after it has
 taken its lock. The one exception is a client whose first command could not be
 written: the driver never learns of it, so it removes the file it made, having
 checked that the name still names that file.
 
-When a client closes or is timed out, the driver renames its lock file from `.lock`
-to `.gone`, before it frees anything of the client's. The lock is on
+When a client closes or is timed out, the driver renames its lock file to
+`clients/<client id>.gone`, before it frees anything of the client's. The lock is on
 the file and goes with it, and the name is how `cavalry doctor` tells a client that
 has gone from one that runs. The driver then tries the lock on the renamed file,
 without waiting, at most once every lock check interval: one try of every client
@@ -1155,25 +1155,24 @@ reads the directory: a file named `.gone` is a client that has gone and still ho
 its lock, and the time the file has had that name is how long.
 
 A driver that starts removes `clients/` with everything else the driver before it
-left ("The driver directory"), and makes it again, empty, after its counters file. A
-client of that earlier driver that is stopped still holds a lock, on a file that no
-longer has a name, and mappings of that driver's three files, which have none
-either: it can store into nothing of the driver that started, and it removes nothing
-there. The one thing it can make there is a lock file under its own name, which is
-no name of the driver that started (above). Continued, it finds its own ring's
-heartbeat older than the driver timeout and closes. `counters.held`,
+left ("The driver directory"), and makes it again, empty. A client of that earlier
+driver that is stopped still holds a lock, on a file that no longer has a name, a
+handle on a directory that is gone, and mappings of that driver's three files, which
+have no name either: it can store into nothing of the driver that started, and it
+makes and removes nothing there. Continued, it finds its own ring's heartbeat older
+than the driver timeout and closes. `counters.held`,
 `counters.retired` and `client.without_lock` are counters of the new file and begin
 at 0.
 
 **A client the driver cannot ask about.** The driver can learn that a client is gone
 only by a lock that the client held. Three kinds of client give it nothing to try:
 
-- A client that holds no lock. A directory may refuse the lock, or the file. Such a
-  client attaches all the same. The driver tries the lock at each client's first
-  command, and one it can take, or that has no file, or whose try the system fails,
-  is a client that holds none: `client.without_lock` counts it, and `cavalry doctor`
-  warns while the client runs. It is forgotten when it goes, so a command of its that
-  comes late registers a client again, without a lock, and is counted again.
+- A client of which the driver finds no lock held when it reads its first command:
+  no file, a file that the driver's own try can lock, or a try that the system fails.
+  A client of this version sends no command without its lock, so this is a lock file
+  that another hand removed or let go of. `client.without_lock` counts it, and
+  `cavalry doctor` warns. It is forgotten when it goes, so a command of its that
+  comes late registers a client again, and is counted again.
 - A client whose lock file could not be renamed when it went, or was removed by
   another hand afterwards. A file that is not there is no answer. A try that the
   system fails is none either, and is made again at the next interval.
@@ -1350,8 +1349,8 @@ with the replay session id where the correlation id goes. A counter a client add
 client that adds it and written by that client alone (ADR 0062). Static
 `counters.held`, a gauge, and `counters.retired` are the records held for their
 writers and the records put out of use until the driver starts again, and
-`client.without_lock` the clients that held no lock at their first command ("The
-records a client writes"; ADR 0179).
+`client.without_lock` the clients of which the driver found no lock held at their
+first command ("The records a client writes"; ADR 0179).
 
 ## Vectors
 

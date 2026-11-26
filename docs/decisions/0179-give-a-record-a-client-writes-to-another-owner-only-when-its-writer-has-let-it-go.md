@@ -101,35 +101,30 @@ reuse timeout from that moment, in two cases.
    and only into a record that holds no counter or is still that image's. So the
    thread that stores and the thread that says so are one, and no second thread is in
    the argument.
-2. **The client's lock.** A client creates a file of its own in `clients/` of the
-   driver's directory before its first command and holds an exclusive advisory lock
-   on it, as the driver holds one on the directory (ADR 0079). Everything of the client that can
+2. **The client's lock.** A client creates `clients/<client id>.lock` in the driver's
+   directory before its first command and holds an exclusive advisory lock on it, as
+   the driver holds one on the directory (ADR 0079). Everything of the client that can
    store into a counter keeps the one open file, every handle on a record among
    them, so the lock is let go when the last of them is dropped, no handle outlives
    it, and the system lets go of it when the process ends. When a client closes or is
-   timed out the driver renames the file from `.lock` to `.gone`, before it frees
+   timed out the driver renames the file to `clients/<client id>.gone`, before it frees
    anything of the client's, tries its lock ten times a second, and lets every
    record held for the client go when it takes it. Only the driver removes a lock
    file, after it has taken the lock.
 
-**A lock file's name says whose it is, and no clock is in the reason.** The name is
-the client's id and which counters file the client has mapped, by that file's device
-and file numbers: `clients/<client id>-<device>-<file>.lock`. A driver looks only at
-names that carry its own counters file's numbers. The id alone names no one client:
-ids begin again with each driver, and a client makes its file by a path, which names
-the directory of whichever driver holds it then. The system gives two files that
-exist at once on one device different numbers. A client has its counters file mapped
-when it makes its lock file, and a driver creates its counters file before `clients/`
-and keeps it mapped while it runs. So a lock file made in a running driver's
-`clients/` carries that driver's numbers only when the client's counters file is the
-driver's.
-
-**A client's mappings are one driver's.** When it attaches, a client opens the three
-files and then looks at the three names again: each must still name the file it
-opened. A driver that starts removes everything of the driver before it and only then
-creates its own, so the directory never names two drivers' files at once. A second
-handle on the command ring is the same mapping, and a writing mapping of the counters
-file, opened by name later, is refused when the name is another file's by then.
+**A lock file is its driver's client's, by an order and not by a name.** A client
+opens a handle on the directory `clients/` first. Then it maps the command ring, the
+broadcast buffer and the counters file, takes its id from the ring, makes its lock
+file through the handle, locks it, and only then sends its first command. A file is
+made in no directory that has been removed, and a driver that starts removes
+everything the driver before it left, `clients/` with it, before it creates anything
+of its own. So a lock file that is made says that the directory the handle is on
+was still there, that the next driver had created nothing yet, and that everything
+the client opened between is of the one driver whose `clients/` that is. The name
+alone could not say it: client ids begin again with each driver, and a path names
+the directory of whichever driver holds it then. Every mapping a client makes later
+is a second handle on one it opened in that order. A client that cannot make and
+lock its file does not attach: a client without its lock sends no command.
 
 **A command that names a client that has gone is dropped.** The driver knows such a
 client until it has taken its lock and has nothing of its left to free. It registers
@@ -142,10 +137,12 @@ handle and drops it, so one handle stores one word by construction. It holds the
 client's shared state, which owns the lock. Nothing else in the crate holds a
 counter's writing handle. `cavalry-shm`'s own `Counter` stays `Clone` for the driver.
 
-The driver can learn that a client is gone only by a lock the client held. A client
-that holds none attaches all the same, and so do two more kinds the driver cannot ask
-about: one whose lock file could not be renamed or was removed by another hand, and
-one that goes while the driver's list of 256 clients that have gone is full. Such a
+The driver can learn that a client is gone only by a lock the client held. Three
+kinds of client give it nothing to try: one of which it finds no lock held at its
+first command, which a client of this version never is, so that it is a file
+another hand removed or let go of; one whose lock file could not be renamed or was
+removed by another hand; and one that goes while the driver's list of 256 clients
+that have gone is full. Such a
 client's release words are read as any client's. What it leaves held with no word
 when it closes or is timed out is out of use until the driver starts again. Nothing
 is refused for it, and nothing of it is given away.
@@ -159,8 +156,9 @@ for one.
 
 Three counters. `counters.held`, a gauge: the records freed and held.
 `counters.retired`: the records out of use until the driver starts again.
-`client.without_lock`: the clients that held no lock at their first command, so that
-`cavalry doctor` warns while such a client still runs. `doctor` also names each
+`client.without_lock`: the clients of which the driver found no lock held at their
+first command, so that `cavalry doctor` warns of a directory that another hand has
+changed. `doctor` also names each
 client that has gone and still holds its lock, by its `.gone` file, once it has had
 that name for 2 s.
 
@@ -195,21 +193,32 @@ that name for 2 s.
 - **Never allocate a freed record of a client's again.** It closes the hazard and
   spends a record for each image and each counter for the driver's life: a stream
   whose publications come and go would fill the counters file.
-- **A lock file named by the client's id alone.** The first build. A client of the
-  driver before a restart, stopped between taking its id and making its file, makes
-  it in the next driver's directory under an id that driver gives out again, and the
-  next driver takes it for its own client's lock.
-- **The start timestamps of the driver's files in the name.** Two runs of a driver
-  would be told apart by a clock: one that is stepped back, or is coarser than a
-  start, gives two runs one name. That is a likelihood and not a fact.
+- **A lock file made by its path.** The first build. A client of the driver before a
+  restart, stopped between taking its id and making its file, makes it in the next
+  driver's directory under an id that driver gives out again, and the next driver
+  takes it for its own client's lock.
+- **The start timestamps of the driver's files in the file's name.** Two runs of a
+  driver would be told apart by a clock: one that is stepped back, or is coarser
+  than a start, gives two runs one name. That is a likelihood and not a fact.
 - **A number from the system's random source in the command ring's header.** It
-  cannot repeat in practice, changes a shared layout and its page, and is still a
-  likelihood. The file's numbers are a fact the system keeps, and change no layout.
-- **The lock file made through a handle on `clients/` that the client opened with its
-  ring.** A driver that starts makes a new `clients/`, so the handle of an earlier
-  client names a directory that is gone. It is as strong as the file's numbers. It
-  lost because making a file under a directory handle is not in the standard
-  library, and `cavalry-client` holds no `unsafe` and takes no dependency for it.
+  does not repeat in practice, changes a shared layout and its page, and is still a
+  likelihood.
+- **The counters file's device and file numbers in the name**, with a second look at
+  the three names when a client attaches. This was built, and stood for an hour.
+  POSIX promises that two files that exist at once on one device have different
+  numbers. A Linux tmpfs, which `/dev/shm` is, does not keep that promise in every
+  case: its numbers were 32 bits from one counter that wraps, and since kernel 5.9 a
+  tmpfs mounted with 32-bit numbers, the default there, can still give one number to
+  two files once the counter has come round. The chance is small and the claim was
+  "cannot".
+- **A client that cannot take its lock attaches all the same**, and what it leaves
+  is put out of use. The second build. It lost because such a client leaves records
+  out of use for the driver's life, and because nothing needs it: a directory that
+  keeps no advisory locks is one in which the driver itself does not start (ADR
+  0079), so a client's lock is refused only where its user may not write. A client
+  that does not attach says which file it could not make, and the driver then
+  registers no client that it cannot ask about, short of another hand in its
+  directory.
 - **Register a late command's client again and keep its predecessor's records under
   the id.** It lost because two clients would then share one id while the first
   one's process still runs, and every rule here is by client id.
@@ -248,8 +257,8 @@ that name for 2 s.
   client's lock was taken, which is not held; the held records looked at in turn,
   past one cycle's 64; the list of the clients that have gone at its capacity of
   256, where the next client's records are put out of use and counted; a lock file
-  removed by another hand, which is no answer; and the three of the second read
-  below.
+  removed by another hand, which is no answer; a lock file that nobody holds; and
+  the two of the second read below.
 - **`doctor`**: `a_client_that_has_gone_and_holds_its_lock_is_named_by_its_file`.
 - **An independent read of the first build** found four faults that every gate,
   twenty runs on both runners and seven mutants had passed over. A handle stored its
@@ -269,19 +278,19 @@ that name for 2 s.
   and for what makes each impossible, a type or an order and never a time. Sixteen
   mutants were caught and three sets of twenty runs had passed on both runners. It
   found the release word's half sound and two faults in the lock's half. A lock
-  file's name was the client's id alone, which is the first alternative above: only
-  the width of a window stood between a client of the driver before a restart and
-  the records of the next driver's client. And a client that was stopped past its
-  timeout and continued sent a keepalive before it read `client timeout`, which is
-  certain and no race; the driver registered a second client of that id, with no
-  lock, and that client's own timeout put the first one's held records out of use
-  for good, with `client.without_lock` and `counters.retired` counting a fault that
-  was the driver's. Each is closed by the Decision, and has a test:
-  `a_lock_file_that_names_another_counters_file_is_not_this_clients_lock` and
-  `a_client_that_has_gone_is_not_registered_again_by_a_command_that_comes_late` in
-  the driver, the restart test in `stray_store.rs`, which now makes the earlier
-  client's file in the next driver's directory, and the stopped client's test, which
-  now reads both counters at 0. It also found the table of held records without its
+  file was made by its path, which is the first alternative above: only the width of
+  a window stood between a client of the driver before a restart and the records of
+  the next driver's client. And a client that was stopped past its timeout and
+  continued sent a keepalive before it read `client timeout`, which is certain and
+  no race; the driver registered a second client of that id, with no lock, and that
+  client's own timeout put the first one's held records out of use for good, with
+  `client.without_lock` and `counters.retired` counting a fault that was the
+  driver's. Each is closed by the Decision, and has a test:
+  `no_file_is_made_through_a_handle_on_a_directory_that_was_removed` in
+  `cavalry-shm`, on which the whole order stands, and
+  `a_lock_is_not_taken_in_the_directory_of_a_driver_that_started_since` in the
+  client; `a_client_that_has_gone_is_not_registered_again_by_a_command_that_comes_late`
+  in the driver; and the stopped client's test in `stray_store.rs`, which  now reads both counters at 0. It also found the table of held records without its
   test at capacity: `the_table_of_held_records_is_full_when_the_counters_file_is`.
 - **The upgrade gate** runs a program and the driver it is a client of from one build
   in every round (`conformance/upgrade/run.sh`, "The schedule"), so no round crosses
@@ -364,8 +373,8 @@ above 0 is the sign.
   `spec/client-protocol.md`, version 11, "The records a client writes".
 - `crates/cavalry-shm/src/counters/`; `crates/cavalry-driver/src/conductor.rs`, `hold`,
   `let_go_released`, `try_locks` and `client_going`; `crates/cavalry-client/src/owned.rs`,
-  `subscription.rs`, `conductor.rs`, and `client.rs` for the three mappings;
-  `crates/cavalry-shm/src/client_lock.rs`, a lock file's name.
+  `subscription.rs`, `conductor.rs`, and `client.rs` for the order a client attaches
+  in; `crates/cavalry-shm/src/client_lock.rs`, the handle on `clients/`.
 - Aeron: `aeron-client/src/main/java/io/aeron/Image.java` and `ClientConductor.java`,
   `aeron-driver/src/main/java/io/aeron/driver/Configuration.java`, and Agrona's
   `org/agrona/concurrent/status/CountersManager.java`, at their `master` on 2026-11-26.
