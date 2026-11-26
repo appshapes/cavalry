@@ -6,8 +6,12 @@
 // run.sh compiled, as the README's `java ... clients/jvm/example/Example.java` line does,
 // for up to 10 s, and exits 1 unless it exits 0 and prints the line the README promises
 // after "You will see". The README's shell lines around the program, the builds and the
-// driver, are run.sh's own steps. Run from the checkout's root. Java's standard library
-// only (ADR 0003).
+// driver, are run.sh's own steps. The program runs without CAVALRY_FFI_LIBRARY, which
+// run.sh sets for its own programs (work item 504): the README's shell lines do not set
+// it, so the reader's client finds the library by its own search, up from
+// clients/jvm/build/classes to the checkout's target/release (Abi.findLibrary), and this
+// is the test of that search. It finds there the library run.sh has just built. Run from
+// the checkout's root. Java's standard library only (ADR 0003).
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -40,8 +44,11 @@ public final class Readme {
             fail("the README's Java block is not " + EXAMPLE + "; the README shows the program that runs, so change both");
         }
         String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
-        Process run = new ProcessBuilder(List.of(java, "--enable-native-access=ALL-UNNAMED", "-cp",
-            "clients/jvm/build/classes", EXAMPLE)).redirectErrorStream(false).start();
+        ProcessBuilder reader = new ProcessBuilder(List.of(java, "--enable-native-access=ALL-UNNAMED", "-cp",
+            "clients/jvm/build/classes", EXAMPLE)).redirectErrorStream(false);
+        // The reader's environment, which has no CAVALRY_FFI_LIBRARY (see the head of this file).
+        reader.environment().remove("CAVALRY_FFI_LIBRARY");
+        Process run = reader.start();
         // Both streams are read after the wait: the program prints one line and the
         // runtime's warnings, if any, fit the pipe.
         if (!run.waitFor(WAIT_SECONDS, TimeUnit.SECONDS)) {

@@ -640,12 +640,14 @@ def new_leadership_term_action(log_term, append, msg, candidate_term, in_canvass
     return dict(none, action="replay", truncate_to=truncate_to, records=records)
 
 
-def withholds(own, vote_floor, log_heard):
-    """spec/cluster.md, "A member that lost its log" (ADR 0145, ADR 0161): whether a member
-    withholds its vote and its candidacy: its log `[term, position]` empty, term −1 at position
-    0, while a log is heard, or a vote floor held, 0 or more, −1 for none."""
+def withholds(own, vote_floor, log_heard, all_reported, candidate_term):
+    """spec/cluster.md, "A member that lost its log" (ADR 0145, ADR 0161, ADR 0174): whether a
+    member withholds its vote and its candidacy: its log `[term, position]` empty, term −1 at
+    position 0, while a log is heard, or while it holds no candidate term, −1, and not every
+    other voter has reported in this election; or a vote floor held, 0 or more, −1 for none."""
     empty = own[0] < 0 and own[1] == 0
-    return {"withholds": (empty and log_heard) or vote_floor >= 0}
+    return {"withholds": (empty and (log_heard or (candidate_term < 0 and not all_reported)))
+            or vote_floor >= 0}
 
 
 def clears_vote_floor(vote_floor, joined, append_position, answered):
@@ -690,6 +692,17 @@ def votes_in_term(voters, own, candidate, heard, term):
     vote = voters >= 1 and len(named) == voters and all(
         i in (own, candidate) or (t is not None and t < term) for i, t in enumerate(named))
     return {"vote": vote}
+
+
+def candidacy_term(own, candidate_term, heard):
+    """spec/cluster.md, state 2, nominate (ADR 0174): the term a member takes when it nominates
+    itself, its candidate term + 1, or, for a member that holds nothing, its log `[term, position]`
+    empty and its candidate term -1, the term above each term a member named in this election
+    too, `heard[i]` the highest term member i named or None, where that is higher."""
+    term = candidate_term + 1
+    if own[0] < 0 and own[1] == 0 and candidate_term < 0:
+        term = max([term] + [t + 1 for t in heard if t is not None])
+    return {"term": term}
 
 
 VOTING_STATES = (1, 2, 3, 4)  # canvass, nominate, candidate ballot, follower ballot
@@ -921,16 +934,22 @@ VECTORS += [
     arithmetic("ballot-short-of-a-quorum-with-none-against-waits", "ballot",
                {"members": 3, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}],
                 "heard": [0, 1], "timeout_passed": False}, {"leader": False, "unanimous": False, "lost": False}),
-    *[arithmetic(name, "withholds", {"own": own, "vote_floor": floor, "log_heard": heard},
-                 withholds(own, floor, heard))
-      for name, own, floor, heard in [
-          ("withholds-not-a-new-clusters-member", [-1, 0], -1, False),
-          ("withholds-an-empty-log-beside-a-log", [-1, 0], -1, True),
-          ("withholds-below-its-floor", [3, 4096], 8192, False),
-          ("withholds-at-its-floor-while-it-holds-it", [3, 8192], 8192, True),
-          ("withholds-a-log-with-no-floor-not", [3, 4096], -1, True),
-          ("withholds-past-its-floor-while-it-holds-it", [3, 12288], 8192, False),
-          ("withholds-with-a-floor-of-0", [0, 4096], 0, False),
+    *[arithmetic(name, "withholds",
+                 {"own": own, "vote_floor": floor, "log_heard": heard, "all_reported": reported,
+                  "candidate_term": candidate},
+                 withholds(own, floor, heard, reported, candidate))
+      for name, own, floor, heard, reported, candidate in [
+          ("withholds-not-a-new-clusters-member-once-every-voter-reported", [-1, 0], -1, False, True, -1),
+          ("withholds-a-new-clusters-member-until-every-voter-reported", [-1, 0], -1, False, False, -1),
+          ("withholds-not-a-new-clusters-member-that-holds-a-candidate-term", [-1, 0], -1, False, False, 0),
+          ("withholds-an-empty-log-beside-a-log", [-1, 0], -1, True, True, -1),
+          ("withholds-an-empty-log-beside-a-log-whatever-its-candidate-term", [-1, 0], -1, True, True, 2),
+          ("withholds-below-its-floor", [3, 4096], 8192, False, True, 3),
+          ("withholds-at-its-floor-while-it-holds-it", [3, 8192], 8192, True, True, 3),
+          ("withholds-a-log-with-no-floor-not", [3, 4096], -1, True, True, 3),
+          ("withholds-a-log-with-no-floor-not-before-every-voter-reported", [3, 4096], -1, False, False, -1),
+          ("withholds-past-its-floor-while-it-holds-it", [3, 12288], 8192, False, True, 3),
+          ("withholds-with-a-floor-of-0", [0, 4096], 0, False, True, 0),
       ]],
     *[arithmetic(name, "clears-vote-floor",
                  {"vote_floor": floor, "joined": joined, "append_position": append, "answered": answered},
@@ -974,6 +993,16 @@ VECTORS += [
           ("votes-in-term-another-voter-named-a-later-term", 3, 2, 0, [3, 5, None], 4),
           ("votes-in-term-another-voter-silent", 3, 2, 0, [3, None, None], 4),
           ("votes-in-term-a-standby-past-the-voters-unread", 2, 1, 0, [3, None, 9], 4),
+      ]],
+    *[arithmetic(name, "candidacy-term", {"own": own, "candidate_term": cand, "heard": heard},
+                 candidacy_term(own, cand, heard))
+      for name, own, cand, heard in [
+          ("candidacy-term-a-new-cluster-stands-in-term-0", [-1, 0], -1, [-1, -1, None]),
+          ("candidacy-term-holds-nothing-stands-above-every-term-named", [-1, 0], -1, [0, 0, None]),
+          ("candidacy-term-holds-nothing-stands-above-the-highest-named", [-1, 0], -1, [3, 1, None]),
+          ("candidacy-term-holds-a-candidate-term-takes-the-next", [-1, 0], 0, [3, 1, None]),
+          ("candidacy-term-holds-a-log-takes-the-next", [2, 4096], 2, [5, 1, None]),
+          ("candidacy-term-holds-nothing-hears-none-takes-term-0", [-1, 0], -1, [None, None, None]),
       ]],
     arithmetic("candidate-unanimous", "candidate",
                {"members": 3, "reports": [[3, 98304], [3, 98304], [2, 65536]], "own": [3, 98304],

@@ -5,8 +5,13 @@
 // is that file, byte for byte, builds the example with this SDK as the README's `dotnet run` does, runs
 // the built program with this runtime for up to 10 s, and exits 1 unless it exits 0 and
 // prints the line the README promises after "You will see". The README's shell lines
-// around the program, the builds and the driver, are run.sh's own steps. Run from the
-// checkout's root. .NET's standard library only (ADR 0003).
+// around the program, the builds and the driver, are run.sh's own steps. The program runs
+// without CAVALRY_FFI_LIBRARY, which run.sh sets for its own programs (work item 504): the
+// README's shell lines do not set it, so the reader's client finds the library by its own
+// search, up from clients/dotnet/example/bin/Release/net10.0 to the checkout's
+// target/release (Abi.FindLibrary), and this is the test of that search. It finds there the
+// library run.sh has just built. Run from the checkout's root. .NET's standard library only
+// (ADR 0003).
 
 using System;
 using System.Diagnostics;
@@ -63,10 +68,13 @@ public static class Readme
         {
             Fail("dotnet build of " + PROJECT + " failed with " + build.ExitCode + "; it printed " + Quote(buildOut) + " and " + Quote(buildErr));
         }
-        Process run = Process.Start(new ProcessStartInfo(dotnet, new[] { BUILT })
+        ProcessStartInfo reader = new ProcessStartInfo(dotnet, new[] { BUILT })
         {
             RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
-        })!;
+        };
+        // The reader's environment, which has no CAVALRY_FFI_LIBRARY (see the head of this file).
+        reader.Environment.Remove("CAVALRY_FFI_LIBRARY");
+        Process run = Process.Start(reader)!;
         string stdout = "", stderr = "";
         System.Threading.Tasks.Task<string> readOut = run.StandardOutput.ReadToEndAsync();
         System.Threading.Tasks.Task<string> readErr = run.StandardError.ReadToEndAsync();

@@ -2003,6 +2003,76 @@ fn records_of(counters: &CountersReader, counter: i32) -> usize {
         .count()
 }
 
+/// How long after a moment before a refusal a poll is surely inside the service's
+/// interval between two asks of its driver, `TIMER_REFRESH_INTERVAL_NS`, 1 s: the
+/// interval less a tenth, for two clocks that are read apart. The service counts its
+/// interval from the refusal itself, which is after that moment, so a poll that has
+/// returned by then cannot have asked the driver again (ADR 0168).
+const INSIDE_THE_INTERVAL: Duration = Duration::from_millis(900);
+
+/// What a test knows of a service's latest refused add: a moment before the poll that
+/// was refused and a moment after it, and how many refusals the driver has counted.
+///
+/// The two tests below hold every later poll to it, and neither says how many polls
+/// fit in an interval or how long any poll takes. The poll that opens a member's log
+/// maps that log and can take the whole interval on a loaded machine (work item 507);
+/// then no poll is inside the interval, a later one asks the driver again, as it
+/// should, and the test follows the service to that refusal and goes on from it.
+struct Refusal {
+    before: Instant,
+    after: Instant,
+    counted: i64,
+}
+
+impl Refusal {
+    /// Holds one poll, which started at `started` and has returned `polled`, to the
+    /// pacing; `counted` is the driver's count of refusals now. A poll that returned
+    /// inside the interval asked the driver nothing and reports nothing. One that
+    /// returned later may have asked and been refused, which is then the latest
+    /// refusal. Says whether the poll was inside the interval.
+    fn hold(
+        &mut self,
+        started: Instant,
+        polled: &Result<usize, ClusterError>,
+        counted: i64,
+    ) -> bool {
+        let inside = self.before.elapsed() < INSIDE_THE_INTERVAL;
+        if inside {
+            assert!(
+                polled.is_ok(),
+                "a poll that returned {:?} after a moment before the refusal: {polled:?}",
+                self.before.elapsed()
+            );
+        } else if polled.is_err() {
+            assert!(
+                matches!(
+                    polled,
+                    Err(ClusterError::Client(ClientError::Refused { .. }))
+                ),
+                "{polled:?}"
+            );
+            *self = Self {
+                before: started,
+                after: Instant::now(),
+                counted: self.counted + 1,
+            };
+        }
+        assert_eq!(
+            counted,
+            self.counted,
+            "the driver's refusals after a poll that returned {} the interval",
+            if inside { "inside" } else { "after" }
+        );
+        inside
+    }
+
+    /// Sleeps until the service's interval has passed since the latest refusal, so
+    /// that the next poll asks the driver again.
+    fn wait_out(&self) {
+        std::thread::sleep(Duration::from_millis(1100).saturating_sub(self.after.elapsed()));
+    }
+}
+
 /// A driver that refuses one of the six adds is the error of the poll that asked,
 /// returned once that poll's entries are taken, and the service asks again at its
 /// first poll a timer refresh interval later and at none between (`spec/cluster.md`,
@@ -2050,9 +2120,10 @@ fn a_refused_add_is_the_polls_error_once_an_interval_and_is_made_good() {
     // The poll that opens the log: its error is the driver's refusal, of one command.
     let mut first = Ok(0);
     // A moment before the refusal and a moment after it. The service counts its
-    // interval from the refusal, which is between the two: no poll that starts less
-    // than an interval after `asked_at` asks again, and the first poll an interval
-    // after `refused_by` does, however long the poll that opened the log took.
+    // interval from the refusal, which is between the two: no poll that has returned
+    // less than an interval after `asked_at` asked again, and the first poll an
+    // interval after `refused_by` does, however long the poll that opened the log
+    // took (`Refusal`, above).
     let mut asked_at = Instant::now();
     let mut refused_by = asked_at;
     wait("the service opens its member's log", || {
@@ -2072,25 +2143,27 @@ fn a_refused_add_is_the_polls_error_once_an_interval_and_is_made_good() {
         "{first:?}"
     );
     assert_eq!(refusals(), before + 1);
+    let mut refusal = Refusal {
+        before: asked_at,
+        after: refused_by,
+        counted: before + 1,
+    };
     let held_now = |counters: &CountersReader| FIVE.map(|counter| records_of(counters, counter));
     assert_eq!(
         held_now(&counters),
         [1, 1, 0, 0, 0],
         "the two the driver took"
     );
-    // No poll within the interval asks the driver again, or reports anything.
-    let mut polls = 0;
-    while asked_at.elapsed() < Duration::from_millis(600) {
-        poll_timers_seeing(&mut service, &mut client, &counters, &mut seen)
-            .expect("a poll between two asks");
-        polls += 1;
+    // No poll inside the interval asks the driver again, or reports anything, however
+    // few such polls there are: the poll that opened the log can have taken most of
+    // the interval, or all of it.
+    while refusal.before.elapsed() < Duration::from_millis(600) {
+        let started = Instant::now();
+        let polled = poll_timers_seeing(&mut service, &mut client, &counters, &mut seen);
+        if !refusal.hold(started, &polled, refusals()) {
+            break;
+        }
     }
-    assert!(polls > 10, "{polls} polls within 600 ms of the refusal");
-    assert_eq!(
-        refusals(),
-        before + 1,
-        "no ask in {polls} polls within the interval"
-    );
     assert_eq!(read_told(&mut stream, &mut told), 0, "no publication");
     // The program's entries meanwhile: a timer scheduled, and another scheduled and
     // cancelled. They are committed, and the service is not polled until the
@@ -2101,25 +2174,42 @@ fn a_refused_add_is_the_polls_error_once_an_interval_and_is_made_good() {
     member.message(0, -1, &cancel(8));
     member.commit();
     let entries = member.end;
-    std::thread::sleep(Duration::from_millis(1100).saturating_sub(refused_by.elapsed()));
+    refusal.wait_out();
     let handed = seen.len();
+    let asked_again_at = Instant::now();
     let again = poll_timers_seeing(&mut service, &mut client, &counters, &mut seen);
-    // After the second refusal, which the next interval is counted from.
-    let refused_again_by = Instant::now();
     assert!(
         matches!(
             again,
             Err(ClusterError::Client(ClientError::Refused { .. }))
         ),
         "the first poll {:?} after the refusal: {again:?}",
-        refused_by.elapsed()
+        refusal.after.elapsed()
     );
-    assert_eq!(refusals(), before + 2);
+    // The second refusal, which the next interval is counted from.
+    refusal = Refusal {
+        before: asked_again_at,
+        after: Instant::now(),
+        counted: refusal.counted + 1,
+    };
+    assert_eq!(refusals(), refusal.counted);
     assert_eq!(
         (seen.len() - handed, service.position()),
         (3, entries),
         "the poll that was refused took its entries first"
     );
+    // The same of the second refusal, whose poll opened no log and maps nothing: at
+    // least the first poll after it is held to the pacing, and on any machine that
+    // makes two polls within the interval it is inside it.
+    loop {
+        let started = Instant::now();
+        let polled = poll_timers_seeing(&mut service, &mut client, &counters, &mut seen);
+        if !refusal.hold(started, &polled, refusals())
+            || refusal.before.elapsed() >= Duration::from_millis(300)
+        {
+            break;
+        }
+    }
     assert_eq!(held_now(&counters), [1, 1, 0, 0, 0], "no counter twice");
     assert_eq!(read_told(&mut stream, &mut told), 0, "no publication");
     assert_eq!(told, [], "nothing is told without the publication");
@@ -2131,7 +2221,7 @@ fn a_refused_add_is_the_polls_error_once_an_interval_and_is_made_good() {
     }
     member.message(0, -1, b"after the driver has room");
     member.commit();
-    std::thread::sleep(Duration::from_millis(1100).saturating_sub(refused_again_by.elapsed()));
+    refusal.wait_out();
     let handed = seen.len();
     poll_timers_seeing(&mut service, &mut client, &counters, &mut seen)
         .expect("the poll that asks once the driver has room");
@@ -2140,7 +2230,7 @@ fn a_refused_add_is_the_polls_error_once_an_interval_and_is_made_good() {
         [5],
         "the adds come before the entries of the poll that makes them"
     );
-    assert_eq!(refusals(), before + 2, "the last ask was taken");
+    assert_eq!(refusals(), refusal.counted, "the last ask was taken");
     assert_eq!(
         held_now(&counters),
         [1, 1, 1, 1, 1],
@@ -2237,28 +2327,31 @@ fn a_refused_publication_is_the_polls_error_and_is_added_once_the_driver_has_roo
         [1, 1, 1, 1, 1],
         "the counters come before the publication"
     );
-    // Polls within the interval: no ask, no error, the entries read, nothing told.
+    // Polls until the entry is read. One inside the interval asks nothing and reports
+    // no error; one after it, on a machine too slow to read the entry inside it, asks
+    // again and is refused again, and the test goes on from that refusal.
+    let mut refusal = Refusal {
+        before: asked_at,
+        after: refused_by,
+        counted: before + 1,
+    };
     wait("the service reads the entry that schedules a timer", || {
-        poll_timers_seeing(&mut service, &mut client, &counters, &mut seen)
-            .expect("a poll between two asks");
+        let started = Instant::now();
+        let polled = poll_timers_seeing(&mut service, &mut client, &counters, &mut seen);
+        refusal.hold(started, &polled, refusals());
         service.position() == member.end
     });
-    assert!(
-        asked_at.elapsed() < Duration::from_millis(900),
-        "{:?}",
-        asked_at.elapsed()
-    );
-    assert_eq!(refusals(), before + 1);
+    assert_eq!(refusals(), refusal.counted);
     assert_eq!(service_counter(&client, CLUSTER_SERVICE_TIMERS.0), Some(1));
     assert_eq!(read_told(&mut stream, &mut told), 0, "no publication");
     // Room again: the first poll past the interval adds the publication. The service
     // is not polled again until the member's client has mapped its image, so the
     // image is that one poll's publication.
     drop(held);
-    std::thread::sleep(Duration::from_millis(1100).saturating_sub(refused_by.elapsed()));
+    refusal.wait_out();
     poll_timers_seeing(&mut service, &mut client, &counters, &mut seen)
         .expect("the poll that asks once the driver has room");
-    assert_eq!(refusals(), before + 1, "the second ask was taken");
+    assert_eq!(refusals(), refusal.counted, "the last ask was taken");
     wait(
         "the member has the image of the publication the first poll past the interval added",
         || read_told(&mut stream, &mut told) == 1,

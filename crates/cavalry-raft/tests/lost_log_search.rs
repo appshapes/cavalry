@@ -19,6 +19,14 @@
 //! member up to 20 s later, once it has left init (work items 411 and 458). Each is
 //! held only while no sender, or no frame, is held already.
 //!
+//! And a consensus stream from one member to another is held for up to 20 s, as a
+//! sender holds the frames its receiver's image is a receiver window behind for
+//! (`Cluster::hold_stream`; `spec/udp.md`, "The sender"). Every message written on it
+//! reaches the receiver in the order written, its next run if it is wiped meanwhile,
+//! so that a member that lost its log reads reports its peers wrote before that start:
+//! the case work item 476's rule rests on the order of a stream for, a report written
+//! before a candidate stood never read without the candidate's request.
+//!
 //! Each run of `just test` searches the seeds of [`SEEDS`]. A wider search names
 //! its own:
 //! `LOST_LOG_SEARCH_FROM`, `LOST_LOG_SEARCH_COUNT` and `LOST_LOG_SEARCH_MS`, for
@@ -41,14 +49,22 @@ use elected_cluster::Safety;
 /// The members.
 const IDS: [i32; 3] = [0, 1, 2];
 
-/// The seeds `just test` runs: seed 1, and seeds 1765 and 1961, at which the search
-/// finds two members leading one term with the term condition of ADR 0145's one case
-/// in which a member that withholds votes taken out. Seeds 779, 1573 and 2983 did so
-/// until the stalls and held frames of work item 467 moved the search's paths. Of
-/// seeds 1 to 3,000, seed 804 fails as well, and with the condition in too: a member
-/// that lost its log in a new cluster's first ballot, where every log is empty and it
-/// does not withhold, votes again in the term it voted in (work item 476).
-const SEEDS: [u64; 3] = [1, 1765, 1961];
+/// The seeds `just test` runs, each of which fails with one rule taken out:
+/// - seed 1;
+/// - seeds 804 and 937, at which the search, with work item 476's rule taken out, finds
+///   a member that lost its log in a new cluster's first ballot voting again in term 0,
+///   and two members leading it;
+/// - seeds 1765 and 1961, at which it finds a second vote in one term, and two members
+///   leading it, with the term condition of ADR 0145's one case in which a member that
+///   withholds votes taken out.
+///
+/// Of seeds 1 to 3,000, with the check of votes and terms of work item 476, seeds 762,
+/// 804, 937 and 2228 fail with work item 476's rule taken out, and the first six to
+/// fail with the term condition taken out are 408, 780, 1765, 1961, 2459 and 2829;
+/// 804, 937, 1765 and 1961 are the first that failed each way before that check saw
+/// votes. Seeds 779, 1573 and 2983 did so until the stalls and held frames of work
+/// item 467 moved the search's paths.
+const SEEDS: [u64; 5] = [1, 804, 937, 1765, 1961];
 
 /// A xorshift generator: the search is the seed's alone.
 struct Draw(u64);
@@ -92,6 +108,11 @@ struct Drawn {
     leaders_stalled: u64,
     senders_held: u64,
     frames_held: u64,
+    streams_held: u64,
+    streams_across_a_wipe: u64,
+    /// Messages the held streams lost, which would make a held stream reach its receiver
+    /// with less than its sender wrote.
+    stream_losses: u64,
 }
 
 /// Runs `seed` for `length_ms`, the check of every step failing the test where it
@@ -112,6 +133,10 @@ fn search(seed: u64, length_ms: u64) -> Drawn {
     // held back for a member, released from when.
     let mut sender_held: Option<(i32, u64)> = None;
     let mut frame_held: Option<(i32, u64)> = None;
+    // A consensus stream held from one member to another, until when: every message
+    // written on it waits and reaches the receiver in the order written, its next run
+    // if it starts again meanwhile (work item 476).
+    let mut stream_held: Option<(i32, i32, u64)> = None;
     let mut entry: u32 = 0;
     for ms in 0..length_ms {
         if draw.below(10) == 0 && cluster.offer(&entry.to_le_bytes()).is_ok() {
@@ -143,6 +168,15 @@ fn search(seed: u64, length_ms: u64) -> Drawn {
         {
             cluster.release_held_back(member);
             frame_held = None;
+        }
+        // Released once the receiver has left init, as its new image takes the frames
+        // (work item 458: the in-memory cluster reads a message in init).
+        if let Some((from, to, until)) = stream_held
+            && ms >= until
+            && cluster.election_state(to) != Some(cavalry_raft::ElectionState::Init)
+        {
+            cluster.release_stream(from, to);
+            stream_held = None;
         }
         if let Some((a, b, until)) = cut
             && ms >= until
@@ -215,6 +249,11 @@ fn search(seed: u64, length_ms: u64) -> Drawn {
                             drawn.frames_held += 1;
                         }
                     }
+                    // A stream held to the member reaches its next run: frames its peer
+                    // wrote before this start, as work item 476's rule must hold.
+                    if stream_held.is_some_and(|(_, to, _)| to == member) {
+                        drawn.streams_across_a_wipe += 1;
+                    }
                     safety.wipe(&mut cluster, member);
                     wiped = Some(member);
                     drawn.wipes += 1;
@@ -255,10 +294,22 @@ fn search(seed: u64, length_ms: u64) -> Drawn {
                     drawn.stalls += 1;
                 }
             }
+            // A stream held as a sender holds its frames while its receiver's image is a
+            // receiver window behind (`spec/udp.md`, "The sender"): from one member to
+            // another, for 1 ms to 20 s, so that a member that starts again meanwhile
+            // reads frames its peer wrote before that start (work item 476).
+            5 if stream_held.is_none() => {
+                let from = draw.pick(&IDS);
+                let to = draw.pick(&[(from + 1) % 3, (from + 2) % 3]);
+                cluster.hold_stream(from, to);
+                stream_held = Some((from, to, ms + 1 + draw.below(20_000)));
+                drawn.streams_held += 1;
+            }
             _ => {}
         }
         safety.run(&mut cluster, 1);
     }
+    drawn.stream_losses = cluster.held_stream_losses();
     drawn
 }
 
@@ -283,6 +334,9 @@ fn no_committed_entry_is_lost_across_lost_log_directories() {
         all.leaders_stalled += drawn.leaders_stalled;
         all.senders_held += drawn.senders_held;
         all.frames_held += drawn.frames_held;
+        all.streams_held += drawn.streams_held;
+        all.streams_across_a_wipe += drawn.streams_across_a_wipe;
+        all.stream_losses += drawn.stream_losses;
     }
     let Drawn {
         wipes,
@@ -291,6 +345,9 @@ fn no_committed_entry_is_lost_across_lost_log_directories() {
         leaders_stalled,
         senders_held,
         frames_held,
+        streams_held,
+        streams_across_a_wipe,
+        stream_losses,
     } = all;
     assert!(wipes > 0, "seeds {seeds:?} wiped no member");
     assert!(
@@ -300,6 +357,15 @@ fn no_committed_entry_is_lost_across_lost_log_directories() {
     assert!(
         senders_held > 0 && frames_held > 0,
         "seeds {seeds:?} held {senders_held} senders and {frames_held} frames at a wipe"
+    );
+    assert!(
+        streams_held > 0 && streams_across_a_wipe > 0,
+        "seeds {seeds:?} held {streams_held} streams, {streams_across_a_wipe} of them to a \
+         member wiped while they were held"
+    );
+    assert_eq!(
+        stream_losses, 0,
+        "seeds {seeds:?}: a held stream lost messages"
     );
     assert!(
         caught_up > 0,

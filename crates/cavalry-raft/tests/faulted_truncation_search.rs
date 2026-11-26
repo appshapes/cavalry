@@ -34,11 +34,13 @@ use elected_cluster::Safety;
 /// The members.
 const IDS: [i32; 3] = [0, 1, 2];
 
-/// The seeds `just test` runs: seed 1, and seeds 226, 411 and 489, the first three at
-/// which the search, with the rule of ADR 0148 taken out, finds a member that joins a
-/// log while its log is cut short of the end it reports. Seeds 96 and 482 did so until
-/// the stalls of work item 467 moved the search's paths.
-const SEEDS: [u64; 4] = [1, 226, 411, 489];
+/// The seeds `just test` runs: seed 1, and seeds 226, 411 and 609, at which the search,
+/// with the rule of ADR 0148 taken out, finds a member that joins a log while its log
+/// is cut short of the end it reports. Of seeds 1 to 1,500, the first six to do so are
+/// 226, 411, 516, 609, 697 and 1145. Seeds 96 and 482 did so until the stalls of work
+/// item 467 moved the search's paths, and seed 489 until work item 476's start of a new
+/// cluster did.
+const SEEDS: [u64; 4] = [1, 226, 411, 609];
 
 /// A xorshift generator: the search is the seed's alone.
 struct Draw(u64);

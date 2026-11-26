@@ -13,13 +13,15 @@ use std::time::{Duration, Instant};
 
 use cavalry_client::{Cavalry, CommittedLog, Publication, Subscription};
 use cavalry_driver::Driver;
-use cavalry_proto::cluster::{EGRESS_STREAM_ID, INGRESS_STREAM_ID, Message, Stream};
+use cavalry_proto::cluster::{
+    CONSENSUS_STREAM_ID, EGRESS_STREAM_ID, INGRESS_STREAM_ID, Message, Stream,
+};
 use cavalry_raft::{ConsensusModule, ElectionState, Role};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
     CLUSTER_CONNECTS_DROPPED, CLUSTER_INGRESS_IGNORED, CLUSTER_MESSAGES_REJECTED, CLUSTER_SESSIONS,
     CLUSTER_SESSIONS_ACCEPTED, CLUSTER_SESSIONS_CLOSED, CLUSTER_SESSIONS_OPENED,
-    CLUSTER_SESSIONS_TIMED_OUT,
+    CLUSTER_SESSIONS_TIMED_OUT, SUBSCRIPTION_POSITION,
 };
 
 struct TestDir(PathBuf);
@@ -144,20 +146,81 @@ fn run_until_led(members: &mut [Member]) {
     members.swap(0, leader);
 }
 
+/// Waits, with no duty cycle run, until each member's driver holds an image of every
+/// other member's consensus stream, which the drivers connect on their own threads.
+/// A canvass position sent before its receiver's image is up is lost. A member that
+/// holds nothing votes for a leader and takes one only once it has heard every voter
+/// (ADR 0174). Without this wait, the member started last can miss the only canvass
+/// position of a member that votes at once and sends no more, and it cannot follow
+/// until that member holds a log and answers it.
+fn await_consensus_images(members: &[Member]) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let others = members.len().saturating_sub(1);
+    while !members.iter().all(|member| {
+        let counters = CountersReader::open(&member.dir).expect("the counters file opens");
+        (0..counters.capacity())
+            .filter(|&id| {
+                matches!(
+                    counters.record(id),
+                    Ok(Some(record)) if record.type_id() == SUBSCRIPTION_POSITION.0
+                        && record.key().get(12..16)
+                            == Some(&CONSENSUS_STREAM_ID.to_le_bytes()[..])
+                )
+            })
+            .count()
+            >= others
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "the members' consensus images did not connect: {:?}",
+            members
+                .iter()
+                .map(|m| m.module.election_state())
+                .collect::<Vec<_>>()
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Whether every member but the one at `late` leads, or has left canvass behind a
+/// leader: voted for it or taken it. A member that holds nothing takes a leader only
+/// once it has voted it in or heard every voter (ADR 0145, ADR 0174), so a member
+/// still in canvass may wait for a report of the one held still, which a member that
+/// has taken its leader sends no more: the two could then close nothing.
+fn the_others_follow(members: &[Member], late: usize) -> bool {
+    members.iter().enumerate().all(|(index, m)| {
+        index == late
+            || m.module.role() == Role::Leader
+            || !matches!(
+                m.module.election_state(),
+                ElectionState::Init
+                    | ElectionState::Canvass
+                    | ElectionState::Nominate
+                    | ElectionState::CandidateBallot
+            )
+    })
+}
+
 /// As [`run_until_led`], with one follower made to join the log late, as
 /// `tests/cluster.rs` makes one on every run of its tests (ADR 0104, Evidence). The
-/// first member found in follower log init has taken the leader's term at position 0
-/// and has not yet subscribed to the leader's log. It runs no duty cycle until the
+/// first member found in follower log init, once the third has voted for the leader or
+/// taken it ([`the_others_follow`]), has taken the leader's term at position 0 and has
+/// not yet subscribed to the leader's log. It runs no duty cycle until the
 /// other two have closed their elections and hold the term's first entry. Its image
 /// of the log then joins past its append position: it fails its election and catches
 /// up in the next, and its log is then in more than one recording, which its
 /// module's read of its own committed log must cross. Returns the late follower's id.
 fn run_until_led_with_a_late_follower(members: &mut [Member]) -> i32 {
+    await_consensus_images(members);
     let mut late = None;
     run_until(members, "a member took a leader's term", |members| {
         late = members
             .iter()
-            .position(|m| m.module.election_state() == ElectionState::FollowerLogInit);
+            .position(|m| {
+                m.module.election_state() == ElectionState::FollowerLogInit
+                    && m.module.append_position() == 0
+            })
+            .filter(|&late| the_others_follow(members, late));
         late.is_some()
     });
     let late = late.expect("a member in follower log init");
