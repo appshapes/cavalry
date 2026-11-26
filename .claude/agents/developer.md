@@ -101,7 +101,9 @@ change takes a bench host (ADR 0139). Never invent a number.
 - One crate per commit where possible; data-plane and control-plane changes in separate
   pull requests. Several commits on a branch are fine, and a fix is one commit per
   blocker, each pushed as it lands.
-- No trailers: no `Co-authored-by`, no `Closes #N` (the workflow adds that one). The body is
+- No trailers: no `Co-authored-by`, no `Closes #N` (the workflow adds that one). No
+  attribution lines of any kind either: no `Claude-Session:` line and no "Generated
+  with Claude Code" line (the owner's ruling of 2026-11-26; work item 475). The body is
   the review record and nothing else.
 - **Merges only, never rebase.** No `git rebase` in any form, no force push, no rewriting
   pushed history. Merge `master` into the branch with `git pull --no-edit origin master`

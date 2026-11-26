@@ -1390,7 +1390,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
         ));
     }
     // Every static counter lives in the record whose index is its id, so the file holds
-    // more records than the largest static id in counters.toml (148, `run.member_given_up`).
+    // more records than the largest static id in counters.toml (204, `run.member_refused`).
     let mut counters = CountersFile::create(dir, 256).map_err(|e| e.to_string())?;
     let mut key = [0u8; 16];
     key[..8].copy_from_slice(&CORRELATION_ID.to_le_bytes());

@@ -1787,7 +1787,12 @@ of the durable log or before was making at the loss has no synced position, and
 recovery keeps what its files hold, as that version did: a member whose host lost
 power while it ran such a driver is not started on that log directory again, under
 any version, and starts on a new one, as a member whose log directory was lost does
-("A member that lost its log").
+("A member that lost its log"). No check holds this, and `cavalry doctor` names no
+sign of it. Nothing in such a directory tells a recording the loss cut from one that
+stopped whole: the synced position is what version 5 added to tell them apart. None
+is built, because Cavalry has made no release, so only a driver built from the
+repository's history before version 5 of the durable log writes such a directory
+(work item 472).
 
 **Versions and the upgrade.** A cluster's members may be of different versions of
 this page while their major is one, as they are during an upgrade (`CLAUDE.md`,

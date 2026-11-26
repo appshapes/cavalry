@@ -4082,7 +4082,7 @@ mod tests {
     use cavalry_shm::command_ring::CommandRing;
     use cavalry_shm::counters::CountersFile;
     use cavalry_shm::counters::generated::{
-        CLIENT_TIMED_OUT, RECORDING_CUT_TO_SYNCED, RUN_MEMBER_GIVEN_UP,
+        CLIENT_TIMED_OUT, RECORDING_CUT_TO_SYNCED, RUN_MEMBER_GIVEN_UP, RUN_MEMBER_REFUSED,
     };
 
     struct TestDir(PathBuf);
@@ -5933,6 +5933,48 @@ mod tests {
         );
         assert!(!report.to_string().contains("is 7"), "{report}");
         assert!(report.ok(), "{report}");
+    }
+
+    /// `cavalry run` started a driver for a cluster member whose start failed, and closed
+    /// the driver: the member never ran, so the driver's own count is all there is, and
+    /// doctor says where the reason was printed and what to do (work item 472).
+    #[test]
+    fn a_member_whose_start_failed_is_reported_from_the_file_a_closed_driver_left() {
+        let dir = TestDir::new("member-refused");
+        let counters = CountersFile::create(&dir.0, 256).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let report = examine(&dir.0);
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|found| found.check == "run.member_refused"),
+            "nothing to say of a member whose start did not fail: {report}"
+        );
+        counters
+            .counter(RUN_MEMBER_REFUSED.record())
+            .expect("static")
+            .increment();
+        consumer.store_heartbeat(DRIVER_CLOSED);
+        drop(counters);
+        let report = examine(&dir.0);
+        let found = finding(&report, "run.member_refused");
+        assert_eq!(found.level, Level::Warn, "{}", found.message);
+        assert!(
+            found.message.starts_with(
+                "run.member_refused is 1: `cavalry run` stopped this driver because its \
+                 cluster member's start failed"
+            ),
+            "{}",
+            found.message
+        );
+        assert!(
+            found.message.contains("docs/how-to/run-a-cluster.md")
+                && found.message.contains("start `cavalry run` again"),
+            "where to read why and what to do: {}",
+            found.message
+        );
     }
 
     /// `cavalry run` gave its cluster member up and closed the driver: the count is the
