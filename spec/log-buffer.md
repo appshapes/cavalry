@@ -39,11 +39,17 @@ sizes it, maps it and makes every page of it resident (ADR 0027) before it publi
 the header. Where one of those fails after the file exists, as where the directory's
 filesystem has no room for the log, the driver removes the file before it answers:
 with error code 12 for a publication or a replay (`spec/client-protocol.md`,
-"Commands"), or with the refusal of an image (`spec/udp.md`, "The receiver"), and one
-more in `driver.log_create_failed` either way. So the room the file had taken is the
-filesystem's again, and a caller that asks again, under a new correlation id and so
-a new file name, leaves nothing behind however often it asks (ADR 0171). A file that
-is already at the path is not the driver's to remove, and stays.
+"Commands"), or with the refusal of an image to its receiver (`spec/udp.md`, "The
+receiver"), and one more in `driver.log_create_failed` either way. So the room the
+file had taken is the filesystem's again, and nothing is left behind however often
+the log is asked for, each ask under a correlation id of its own, a client's for a
+publication or a replay and the conductor's for an image, and so under a file name
+of its own (ADR 0171). Two files stay. One that is already at the path fails the
+creation, is not the driver's to remove, and is whose it was: a replay's
+correlation id that is a live publication's leaves that publication its log. And
+one that the driver cannot remove either, as in a directory made read-only after
+the file was created, stays until the driver's next start, which removes whatever
+its directory held.
 
 ## Header
 

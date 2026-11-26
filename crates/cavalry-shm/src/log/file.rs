@@ -373,7 +373,11 @@ impl LogBuffers {
     /// it: sizes the file, sets tail 0 to (initial term id, 0) and tails 1 and 2 to the
     /// terms two and one back, the end of stream position to not ended, is connected
     /// to 0, and writes the header magic-last (`spec/log-buffer.md`, "Metadata page").
-    /// A file already at that path is [`LogError::Io`].
+    /// A file already at that path is [`LogError::Io`], and stays. A log that cannot
+    /// be created leaves no file: where the sizing, the mapping or the touch of every
+    /// page fails after this call created the file, as in a directory with no room,
+    /// the file is removed before the error is returned (`spec/log-buffer.md`, "File";
+    /// ADR 0171).
     pub fn create(dir: &Path, fields: &HeaderFields) -> Result<Self, LogError> {
         Self::create_at(dir, fields, 0)
     }

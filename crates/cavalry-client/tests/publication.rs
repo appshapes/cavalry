@@ -15,8 +15,9 @@ use cavalry_shm::broadcast::BroadcastBuffer;
 use cavalry_shm::command_ring::CommandRing;
 use cavalry_shm::counters::generated::DRIVER_LOG_CREATE_FAILED;
 
-// This test's port, from the one file that says how they are taken and why, which is
-// `cavalry-raft`'s: `crates/cavalry-raft/tests/ports/mod.rs`.
+// The one port these tests choose, for `a_driver_runs_where_files_are_limited`'s
+// publication over UDP, from the one file that says how ports are taken and why, which
+// is `cavalry-raft`'s: `crates/cavalry-raft/tests/ports/mod.rs`.
 #[path = "../../cavalry-raft/tests/ports/mod.rs"]
 mod ports;
 
@@ -511,8 +512,10 @@ fn available_kib(dir: &Path) -> u64 {
 /// filesystem has afterwards the room it had before (ADR 0171; work item 492).
 ///
 /// It needs such a directory, which a test cannot make for itself without the right
-/// to mount, so it is run by hand, on Linux, in a container whose `/dev/shm` is
-/// Docker's default, 64 MiB, less than the 192 MiB of a `cavalry:ipc` log:
+/// to mount, so `just test` passes it over and `just shm-exhaustion <directory>` runs
+/// it: in CI's Linux job on a filesystem of 64 MiB that the job mounts, and by hand
+/// in a container whose `/dev/shm` is Docker's default, 64 MiB, less than the 192 MiB
+/// of a `cavalry:ipc` log:
 ///
 /// ```sh
 /// docker run --rm -v "$PWD":/src:ro -e CARGO_TARGET_DIR=/target -w /src \

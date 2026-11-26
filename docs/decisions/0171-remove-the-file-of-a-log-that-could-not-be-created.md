@@ -8,12 +8,13 @@
 
 ## Context
 
-The driver creates a log in four steps: it creates the file, sizes it, maps it and
-makes every page of it resident (ADR 0027), and then publishes the header. When a
-step after the first failed, `LogBuffers::create_at` returned the error and left
-the file. The conductor counted `driver.log_create_failed`, answered error code 12,
-and did not remove it either. The file's name holds the command's correlation id,
-so a caller that asked again left another file each time.
+The driver creates a log in steps: it creates the file, sizes it, maps it, makes
+every page of it resident (ADR 0027), and then publishes the header. When a step
+after the first failed, `LogBuffers::create_at` returned the error and left the
+file. For a publication over `cavalry:ipc` or `cavalry:udp` and for an image the
+conductor counted `driver.log_create_failed`, refused, and did not remove it
+either. The file's name holds a correlation id that is new at each ask, so each
+ask left another file.
 
 The failure that matters is a driver directory with no room, `/dev/shm` on Linux,
 and there the file is what takes the room: the pages the filesystem could still
@@ -21,30 +22,32 @@ give went to the file that failed, and stayed with it. GitHub issue 238 measured
 it on 2026-11-12 in a container whose `/dev/shm` is 64 MiB, for an image's log
 that a sender's setups asked for ten times a second: 50 files after 5 s, 149 after
 15 s and 249 after 25 s, the first holding the 8,172 KiB the filesystem had left
-and the others nothing, all still there after the driver closed.
+and the others nothing, all still there after the driver closed. ADR 0168 made it
+pressing: every cluster service now asks its driver for a `cavalry:ipc` log of 192
+MiB at its start, and again once a second while it is refused.
 
-ADR 0168 made it pressing. A cluster service now adds its publication to its
-member, a `cavalry:ipc` log of 192 MiB, when it first opens its member's log, and
-asks again once a second while the driver refuses it. Every service is a caller
-of this path now, where only a program with a timer or a snapshot was.
+A replay's path did the opposite, and was wrong the other way. Its undo removed
+the file at the replay's path whether or not the replay had created it. A `start
+replay` whose correlation id was a live publication's failed its creation on that
+publication's file, and then removed it.
 
 ## Decision
 
-A log that the driver cannot create leaves no file. `LogBuffers::create_at`
-removes the file it created when any step after the creation fails, before it
-returns the error, and drops its mapping first, so that the filesystem has the
-file's pages back. A file that was already at the path fails the creation itself
-and is not removed. Every log the driver makes is created there, a publication's,
-an image's and a replay's, so the rule holds for all of them from one place, and
-`spec/log-buffer.md` says it.
+A log that the driver cannot create leaves no file, and a file that the creation
+did not make is not removed. `LogBuffers::create_at` removes the file it created
+when any step after the creation fails, before it returns the error, and drops
+its mapping first, so that the filesystem has the file's pages back. A file that
+was already at the path fails the creation itself and stays. Every log the driver
+makes is created there, a publication's, an image's and a replay's, so the rule
+holds for all of them from one place, and a replay's undo removes its log only
+where the replay made one. `spec/log-buffer.md` says both.
 
 ## Alternatives considered
 
 - **Remove the file in the conductor, in each path that creates a log.** The
-  conductor has four, and removes a log by its correlation id where a counter is
-  refused after the log was made. It lost to the one function they all call: a
-  fifth path would have to remember, and the function that made the file is the
-  one that knows it did.
+  conductor has four, and the one that did remove, the replay's, removed a file
+  that was not its own. It lost to the one function they all call: the function
+  that made the file is the one that knows it did.
 - **Leave the file and have the driver's start remove it.** The start already
   removes everything the last driver left in its directory. That frees the room
   at the next start, and not for the driver that runs, which is the one that
@@ -55,33 +58,56 @@ an image's and a replay's, so the rule holds for all of them from one place, and
 - **Remove the file only where the touch of its pages failed.** That is the
   failure issue 238 measured. A file that could not be sized or mapped is as
   much a log that was not created, and one rule is simpler to state.
+- **Ask the filesystem for its room before the file is sized, and refuse with
+  nothing created.** It would make a refusal cheap, where the removal makes it
+  cost what the Consequences say. It is no replacement, since room can go between
+  the question and the touch, and it needs a call that the standard library does
+  not have, so a dependency or an `unsafe` block in `cavalry-shm` for it. Left
+  for when the cost of a refusal is shown to matter.
 
 ## Evidence
 
 - **The measured case, in a container.** `rust:1` on Linux 7.0.14 on aarch64, in
-  Docker with its default `/dev/shm` of 64 MiB, the driver's directory on it. A
-  client asks the driver five times for a `cavalry:ipc` publication, 192 MiB.
-  Without the removal, the first ask is refused with "could not make the mapping
-  resident", and leaves `publications/2.logbuffer`, 201,330,688 bytes long, with
-  0 KiB available on the filesystem where 57,328 were. With the removal, each of
-  the five asks is refused with that error, the directory holds no log file
-  after any of them, and 57,328 KiB are available after each as before the
-  first. The test is
+  Docker on an Apple M5 Pro laptop, with Docker's default `/dev/shm` of 64 MiB and
+  the driver's directory on it. A client asks the driver five times for a
+  `cavalry:ipc` publication, 192 MiB. Without the removal, the first ask is
+  refused with "could not make the mapping resident", and leaves
+  `publications/2.logbuffer`, 201,330,688 bytes long, with 0 KiB available on
+  the filesystem where 57,328 were. With the removal, each of the five asks is
+  refused with that error, the directory holds no log file after any of them, and
+  57,328 KiB are available after each as before the first. The independent read
+  of this change ran it again, with the same numbers. The test is
   `a_driver_whose_directory_has_no_room_leaves_no_log_file` in
-  `crates/cavalry-client/tests/publication.rs`, marked to be run by hand, since a
-  test cannot mount a small filesystem for itself; its comment has the command.
-- **In the gate, on every runner.** Two tests make the creation fail for real,
-  after the file exists, with no hook in the code: each runs itself again as a
-  child process whose files the operating system limits to less than the log,
-  so that sizing the file fails. `a_log_that_cannot_be_created_leaves_no_file` in
-  `crates/cavalry-shm/tests/log_buffer.rs` asks three times and finds no file
-  after each, and then creates the log in the same directory with no limit.
-  `a_driver_that_cannot_create_a_log_refuses_it_and_leaves_no_file`, beside the
-  container's test, starts a driver under a limit of 32 or 64 MiB: five asks for
-  a `cavalry:ipc` publication are each error code 12 and one more in
-  `driver.log_create_failed`, with no log file after any, and a `cavalry:udp`
-  publication of 64 KiB terms is created after them. Each of the two fails
-  without the removal, with the file of the first ask in its message.
+  `crates/cavalry-client/tests/publication.rs`.
+- **That case as a gate.** `just shm-exhaustion <directory>` runs that test, and
+  CI's Linux job mounts a filesystem of 64 MiB and runs it there, since a test
+  cannot mount one for itself and `just test` passes it over. This is the "shm
+  exhaustion" that `CLAUDE.md`'s gate 3 names, which no test held before.
+- **In `just test`, on Linux and macOS.** Two tests make the creation fail for
+  real, after the file exists, with no hook in the code: each runs itself again
+  as a child process whose files the operating system limits to less than the
+  log, so that sizing the file fails. `a_log_that_cannot_be_created_leaves_no_file`
+  in `crates/cavalry-shm/tests/log_buffer.rs` asks three times and finds no file
+  after each, creates the log in the same directory with no limit, and then
+  holds that a creation which finds that file there fails and leaves it, still
+  opening. `a_driver_that_cannot_create_a_log_refuses_it_and_leaves_no_file`,
+  beside the container's test, starts a driver under a limit of 32 or 64 MiB:
+  five asks for a `cavalry:ipc` publication are each error code 12 and one more
+  in `driver.log_create_failed`, with no log file after any, and a `cavalry:udp`
+  publication of 64 KiB terms is created after them. Each fails without the
+  removal, with the file of the first ask in its message. The read ran both in
+  the container too, where `sh` is another shell: three of three passed with the
+  removal and none without. The driver's largest file of its own is 6,291,584
+  bytes, under the limit.
+- **A replay under a live publication's id.**
+  `a_replay_under_a_live_publications_id_leaves_that_publications_log`, in the
+  conductor's tests, is the read's probe: the replay is refused with error code
+  12 and counted, and the publication's log is there and opens. With the undo as
+  it was, the file is gone.
+- **What the gated tests do not hold.** They fail at the sizing, and only the
+  container's test and the CI step reach the touch of the pages. A removal made
+  only where the sizing fails would pass `just test` and fail
+  `just shm-exhaustion`.
 
 ## Consequences
 
@@ -89,26 +115,48 @@ an image's and a replay's, so the rule holds for all of them from one place, and
   keeps what room it has. ADR 0168's consequence, a file at each ask of a service
   that is refused its publication, ends with this decision, and the sentence the
   clients' READMEs carried for it is taken out.
+- Each refused ask now costs the driver more than the ones after the first did.
+  The read measured it in the container, twelve asks for a `cavalry:ipc` log
+  with 57,328 KiB free, in a debug build: with the removal every ask took 16.0
+  to 23.1 ms, since each populates all the room there is and gives it back;
+  without it the first took 16.7 ms and the later ones 0.3 to 0.9 ms, the room
+  being gone. That is on the conductor's thread, which serves every client of
+  the driver: an image asked for ten times a second costs it some 170 to 200 ms
+  of each second for as long as the directory has no room, and the filesystem is
+  full for its other users for the length of each ask. The last alternative
+  above is the way out if that is shown to matter.
 - A log that would fit once another is closed can now be created then: the room
   a closed log gives back is no longer behind a file that failed.
 - What `cavalry doctor` says of `driver.log_create_failed` is true of the
-  directory again: what it holds is what the driver's publications, images and
-  replays hold.
+  directory again: every file under `publications/` and `images/` is a live or
+  lingering publication's, an image's or a replay's.
 - Where the file cannot be removed either, as in a directory made read-only
-  after the file was created, it stays, and the error returned is the
-  creation's. Nothing counts that.
-- The failure itself still costs the driver the making of the file up to the step
-  that failed, on its conductor's thread, at each ask.
-- The gate's two tests need a shell with `ulimit -f` and `trap`, which every
+  after the file was created, it stays until the driver's next start, and the
+  error returned is the creation's. Nothing counts that. A driver that is killed
+  between the creation and the removal leaves the file the same way.
+- The driver's own three files, its counters, its command ring and its broadcast
+  buffer, are created the same way at its start and are not changed here: their
+  names are fixed, and a start that fails leaves them to the next start in that
+  directory, which removes them, so a retry does not multiply them.
+- A recording that cannot be started leaves a catalog slot and an index file
+  under a new recording id each time, by `cavalry-log`'s own stated rule, bounded
+  by the catalog. That is not this decision's.
+- The error a client reads where the directory has no room names a `doctor`
+  check that says nothing of room, and `doctor` has no check of a driver
+  directory's free room: work item 496.
+- CI's Linux job gains a step that mounts a filesystem with `sudo`. The gate's
+  two tests in `just test` need a shell with `ulimit -f` and `trap`, which every
   system Cavalry builds on has.
-- Revisit if a log is ever created outside `LogBuffers::create_at`.
+- Revisit if a log is ever created outside `LogBuffers::create_at`, and when a
+  refusal's cost on the conductor's thread is measured to hold a driver's other
+  clients up.
 
 ## References
 
 - Work item 492; GitHub issue 238, which measured it and which this change
   closes; work item 462 and
   [ADR 0168](0168-add-a-services-counters-and-its-publication-to-its-member-when-it-first-opens-its-members-log.md),
-  whose independent read found it again by reading the driver.
+  whose independent read found it again by reading the driver; work item 496.
 - `spec/log-buffer.md`, "File"; `spec/client-protocol.md`, "Commands"; `spec/udp.md`,
   "The receiver".
 - [ADR 0027](0027-pre-touch-shared-mappings-at-map-time.md).

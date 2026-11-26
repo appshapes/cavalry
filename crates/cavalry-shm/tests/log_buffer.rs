@@ -2320,8 +2320,17 @@ fn a_log_that_cannot_be_created_leaves_no_file() {
     assert_eq!(files_under(dir.path()), Vec::<PathBuf>::new(), "{said}");
     // The same directory, with no limit: the log is created, at the path the three
     // refusals left free.
-    LogBuffers::create(dir.path(), &fields(LogType::Concurrent)).expect("create");
+    let created = LogBuffers::create(dir.path(), &fields(LogType::Concurrent)).expect("create");
     assert_eq!(files_under(dir.path()).len(), 1);
+    // And a creation that fails because a file is already at the path removes
+    // nothing: that file is not its own. The log that is there still opens.
+    assert!(matches!(
+        LogBuffers::create(dir.path(), &fields(LogType::Concurrent)),
+        Err(LogError::Io(_))
+    ));
+    assert_eq!(files_under(dir.path()).len(), 1);
+    LogBuffers::open(dir.path(), CORRELATION, false).expect("the log that was there opens");
+    drop(created);
 }
 
 /// The child of [`a_log_that_cannot_be_created_leaves_no_file`], which runs it in a

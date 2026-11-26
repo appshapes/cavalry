@@ -292,6 +292,19 @@ docs-links:
 doctor:
     cargo run --quiet -p cavalry -- doctor
 
+# The driver on a directory with no room for a log, the "shm exhaustion" of CLAUDE.md's
+# gate 3 (ADR 0171): `dir` is a directory on a filesystem with less room than a
+# `cavalry:ipc` log's 192 MiB, as a container's default /dev/shm of 64 MiB is. A driver
+# whose directory is under it is asked five times for such a log: each ask is error
+# code 12, no log file is left, and the filesystem has afterwards the room it had. It
+# is Linux's failure: making a log's pages resident fails there on a filesystem that
+# cannot back them. A test cannot mount a small filesystem for itself, so `just test`
+# passes this one over, CI's Linux job mounts 64 MiB and runs this, and the test's
+# comment in crates/cavalry-client/tests/publication.rs has the container to run it in
+# by hand.
+shm-exhaustion dir:
+    CAVALRY_CLIENT_TEST_FULL_DIR={{dir}}/cavalry cargo test -p cavalry-client --test publication a_driver_whose_directory_has_no_room -- --ignored --nocapture
+
 # Miri on the unsafe crate: the layout, cell and conformance tests, which run on plain
 # memory. Miri has no file-backed mapping, so the file tests carry
 # `#[cfg_attr(miri, ignore)]` and the README's doctest, which creates a file, is left
