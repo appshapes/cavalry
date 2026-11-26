@@ -47,7 +47,7 @@ the two crates where `unsafe` is permitted.
   ([ADR 0027](../../docs/decisions/0027-pre-touch-shared-mappings-at-map-time.md)). A
   directory that cannot hold the file fails here, by name, and a log buffer that
   fails here leaves no file behind
-  ([ADR 0171](../../docs/decisions/0171-remove-the-file-of-a-log-that-could-not-be-created.md)).
+  ([ADR 0172](../../docs/decisions/0172-remove-the-file-of-a-log-that-could-not-be-created.md)).
 - Carries the control plane's two queues between the processes on a host: the command
   ring, through which every client sends the driver its commands, with a `Producer` per
   client thread and the driver's one `Consumer`, which only the ring's creator hands

@@ -6846,7 +6846,7 @@ impl Conductor {
             let _ = self.counters.free(counter.id(), reuse);
         }
         // The file is removed only where this replay made it. A log that was not
-        // created left none (`spec/log-buffer.md`, "File"; ADR 0171), and the path
+        // created left none (`spec/log-buffer.md`, "File"; ADR 0172), and the path
         // may then be another's: a `start replay` whose correlation id is a live
         // publication's fails its creation on that publication's file, which stays.
         if let Some(log) = log {
@@ -14153,7 +14153,7 @@ mod replay {
 
     /// A `start replay` whose correlation id is a live publication's registration id
     /// fails the creation of its log on that publication's file, which is not the
-    /// replay's to remove and stays (`spec/log-buffer.md`, "File"; ADR 0171; work
+    /// replay's to remove and stays (`spec/log-buffer.md`, "File"; ADR 0172; work
     /// item 492): the answer is error code 12, counted, and the publication goes on.
     /// Before, the replay's undo removed the path whether or not it had made the
     /// file, and the live publication lost its log.

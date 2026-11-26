@@ -377,7 +377,7 @@ impl LogBuffers {
     /// be created leaves no file: where the sizing, the mapping or the touch of every
     /// page fails after this call created the file, as in a directory with no room,
     /// the file is removed before the error is returned (`spec/log-buffer.md`, "File";
-    /// ADR 0171).
+    /// ADR 0172).
     pub fn create(dir: &Path, fields: &HeaderFields) -> Result<Self, LogError> {
         Self::create_at(dir, fields, 0)
     }
@@ -410,7 +410,7 @@ impl LogBuffers {
             .create_new(true)
             .open(&path)?;
         // From here the file is this call's. A log that is not created leaves no
-        // file (`spec/log-buffer.md`, "File"; ADR 0171): whatever fails below,
+        // file (`spec/log-buffer.md`, "File"; ADR 0172): whatever fails below,
         // the sizing, the mapping, the touch of every page or the header, the file
         // is removed before the error is returned, and with it the pages the
         // filesystem had given it. The file's name holds the command's correlation

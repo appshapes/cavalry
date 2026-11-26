@@ -399,7 +399,7 @@ fn log_files(dir: &Path) -> Vec<PathBuf> {
 
 /// A driver that cannot create a publication's log refuses the add with error code
 /// 12, counts it, and leaves no file in its directory, however often it is asked
-/// (invariant 3; `spec/log-buffer.md`, "File"; ADR 0171; work item 492; GitHub
+/// (invariant 3; `spec/log-buffer.md`, "File"; ADR 0172; work item 492; GitHub
 /// issue 238). Each ask has a correlation id of its own, and so a file name of its
 /// own: before the removal each left a file as long as the log, and the first kept
 /// what room a full directory had left. The creation is made to fail for real, after
@@ -509,7 +509,7 @@ fn available_kib(dir: &Path) -> u64 {
 /// directory is on a filesystem with no room for a log, where making the log's pages
 /// resident is what fails (ADR 0027), after the file exists and holds whatever room
 /// was left. The driver refuses each ask with error code 12, leaves no file, and the
-/// filesystem has afterwards the room it had before (ADR 0171; work item 492).
+/// filesystem has afterwards the room it had before (ADR 0172; work item 492).
 ///
 /// It needs such a directory, which a test cannot make for itself without the right
 /// to mount, so `just test` passes it over and `just shm-exhaustion <directory>` runs

@@ -1,4 +1,4 @@
-# 0171. Remove the file of a log that could not be created
+# 0172. Remove the file of a log that could not be created
 
 - **Status:** Accepted
 - **Date:** 2026-11-26

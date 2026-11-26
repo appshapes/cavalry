@@ -293,7 +293,7 @@ doctor:
     cargo run --quiet -p cavalry -- doctor
 
 # The driver on a directory with no room for a log, the "shm exhaustion" of CLAUDE.md's
-# gate 3 (ADR 0171): `dir` is a directory on a filesystem with less room than a
+# gate 3 (ADR 0172): `dir` is a directory on a filesystem with less room than a
 # `cavalry:ipc` log's 192 MiB, as a container's default /dev/shm of 64 MiB is. A driver
 # whose directory is under it is asked five times for such a log: each ask is error
 # code 12, no log file is left, and the filesystem has afterwards the room it had. It

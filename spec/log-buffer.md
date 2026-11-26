@@ -44,7 +44,7 @@ receiver"), and one more in `driver.log_create_failed` either way. So the room t
 file had taken is the filesystem's again, and nothing is left behind however often
 the log is asked for, each ask under a correlation id of its own, a client's for a
 publication or a replay and the conductor's for an image, and so under a file name
-of its own (ADR 0171). Two files stay. One that is already at the path fails the
+of its own (ADR 0172). Two files stay. One that is already at the path fails the
 creation, is not the driver's to remove, and is whose it was: a replay's
 correlation id that is a live publication's leaves that publication its log. And
 one that the driver cannot remove either, as in a directory made read-only after

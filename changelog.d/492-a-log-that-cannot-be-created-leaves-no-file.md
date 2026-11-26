@@ -6,4 +6,4 @@
   The driver now removes the file before it refuses, so the room is the filesystem's
   again however often it is asked. And a `start replay` whose correlation id is a
   live publication's no longer removes that publication's log when it is refused
-  ([ADR 0171](docs/decisions/0171-remove-the-file-of-a-log-that-could-not-be-created.md)).
+  ([ADR 0172](docs/decisions/0172-remove-the-file-of-a-log-that-could-not-be-created.md)).

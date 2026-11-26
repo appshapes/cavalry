@@ -129,7 +129,7 @@ jobs:
       - run: just lint
       - run: just test
       # A driver whose directory has no room for a log (CLAUDE.md, gate 3, "shm
-      # exhaustion"; ADR 0171). The failure is Linux's: making a new log's pages
+      # exhaustion"; ADR 0172). The failure is Linux's: making a new log's pages
       # resident fails on a filesystem that cannot back them, after the file exists.
       # The runner mounts the small filesystem, 64 MiB as a container's default
       # /dev/shm is, since a test cannot.
