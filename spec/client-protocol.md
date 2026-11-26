@@ -1,4 +1,4 @@
-# Client protocol, version 10
+# Client protocol, version 11
 
 The client protocol is how a client and the driver on one host talk: the driver's
 directory, which a client opens to find the driver; the commands a client sends through
@@ -63,7 +63,14 @@ has the term length the channel names, refusing it on a subscription's, a
 destination's and a replay's and reading past it on a recording's (ADR 0099); every
 version 9 encoding is unchanged, so a version 9 client's commands are version 10
 commands, and a version 9 driver answers a channel that names `term-length` with code
-1, as a key it does not name.
+1, as a key it does not name. Version 11 adds no command, no event and no encoding. It
+says when a counter's record that a client writes is given to another owner: when its
+writer has stored the release word of `spec/counters-file.md`, version 1, or when the
+client is gone, which the driver reads from a lock the client holds on a file of its
+own, `clients/<client id>.lock` ("The records a client writes"; ADR 0179). A version 10
+client does not attach to a version 11 driver, nor a version 11 client to a version 10
+driver: each rejects the other's counters file with `version`, before it sends a
+command.
 
 ## The driver directory
 
@@ -80,6 +87,8 @@ otherwise, where `<tmp>` is the system's temporary directory (`/tmp` on macOS) a
 | `broadcast-buffer` | `spec/broadcast-buffer.md` | when the driver starts, last |
 | `publications/<registration id>.logbuffer` | `spec/log-buffer.md` | when a publication is added, named by the publication's registration id; when a replay starts, named by the replay session id |
 | `images/<registration id>.logbuffer` | `spec/log-buffer.md`, type 2 | when a setup frame creates an image over UDP (`spec/udp.md`, "The receiver"), named by the image's own registration id, taken from the correlation id counter as a publication's is |
+| `clients/` | "The records a client writes" | when the driver starts, empty |
+| `clients/<client id>.lock` | "The records a client writes" | by a client, before its first command; empty, and locked by that client for as long as it has anything that can store into a counter; the driver removes it when it has taken the lock of a client that has gone |
 | `log-recordings-<member id>` | `spec/cluster.md`, "The log's recordings" | by a cluster member's consensus module, a client of the driver and not the driver, each time the member names a recording of its log, written as `log-recordings-<member id>.tmp` and renamed; the driver neither reads nor writes it, and removes it with the rest when it starts (ADR 0103) |
 
 A driver holds the directory by an exclusive advisory lock of the operating system on
@@ -123,9 +132,11 @@ A client attaches by opening the command ring writable and loading the consumer
 heartbeat, which is `driver-closed` or `driver-timeout` as the ring page says; then the
 broadcast buffer read-only, joining at the latest record; then the counters file
 read-only. It takes its client id from the ring's correlation id counter, so that no
-two clients of one driver share an id. The driver learns of a client from the first
+two clients of one driver share an id. It then creates its lock file and takes its lock
+("The records a client writes"). The driver learns of a client from the first
 command that names its client id and forgets it on client close or timeout; it keeps no
-record of the clients it has forgotten, so a command that arrives from a timed-out
+record of the clients it has forgotten but the counters' records it holds for them, so
+a command that arrives from a timed-out
 client is a new client's first command, as it is in Aeron, and it is the client that
 acts on `client timeout`: a client that receives one with its own id closes, since its
 publications and subscriptions are gone. A first command that finds the client registry
@@ -876,7 +887,9 @@ counter is not allocated or its key names another image, the image is `gone`
 (`spec/log-buffer.md`, "What a reader rejects"): the client's own `remove
 subscription` was on its way, or the client read the event more than the counter
 reuse timeout after the driver sent it. The client does not add the image and does
-not close. It tells the subscription, whose next poll reports the image with the
+not close. It stores the release word of the position record the event named, by the
+record's id: the record is that client's from the event on, and the driver gives it to
+nobody until the word is stored ("The records a client writes"). It tells the subscription, whose next poll reports the image with the
 reason `gone`: frames its publisher published after the join, if any, were not
 delivered to that subscription. A log that is there and fails another check is
 `corrupt`, as before. It sends `unavailable
@@ -934,7 +947,8 @@ values and keeps 100 and above for its own (`spec/c-abi.md`, "Error codes").
 | command ring unblock timeout | 10 s | the driver | the client liveness timeout, as `spec/command-ring.md` says |
 | publication unblock timeout | 15 s | the driver | `spec/log-buffer.md`, "Unblocking" |
 | publication linger | 5 s | the driver | `spec/log-buffer.md`, "Closing"; a control channel's ends sooner when an `add subscription` on the driver needs its control address (`spec/udp.md`, "The sender"; ADR 0153) |
-| counter reuse timeout | 1 s | the driver | how long a freed counter's record stays reclaimed before it is allocated again (`spec/counters-file.md`); and how long after an `available image` the driver keeps the log and the position counter it names, unless the subscription is removed or the subscriber has moved the position ("Events"; ADR 0078) |
+| lock check interval | 100 ms | the driver | how often it tries the lock of a client that has gone and for which it still holds a record ("The records a client writes") |
+| counter reuse timeout | 1 s | the driver | how long a freed counter's record stays reclaimed before it is allocated again, counted for a record a client wrote from the moment its writer let it go (`spec/counters-file.md`; "The records a client writes"); and how long after an `available image` the driver keeps the log and the position counter it names, unless the subscription is removed or the subscriber has moved the position ("Events"; ADR 0078) |
 | recording sync interval | 1 s | the driver | how long after a recording's last sync, or its start, the recorder syncs it again when it has written bytes no sync covers; a `sync recording` syncs at once, and the interval then runs from that sync (ADR 0025, ADR 0069) |
 | replay connect timeout | 5 s | the driver | a replay whose publication has had no subscriber, or over `cavalry:udp` has not been connected as `spec/udp.md`, "The sender", defines it, for this long ends with reason 2: measured from the replay's start, from the moment its last subscriber went, or over `cavalry:udp` from the moment the connection timeout passed |
 | closing endpoint wait | 5 s | the driver | an `add subscription` that has waited this long for its channel's previous receive endpoint to close, or for a closed publication's control socket on its endpoint's address to go, and an `add publication` that has waited this long for a receive endpoint that holds its control address to close, measured from the moment the driver read it, is answered with code 4 and registers nothing ("Commands"); half the response timeout, so that the answer reaches the client before the client reports the add lost |
@@ -995,6 +1009,77 @@ to run when the host wakes as it had when the host slept. Where the operating sy
 clock counts the suspension, every interval runs on through it.
 
 What a step does to a recording's timestamps is in `spec/durable-log.md`, "Time index".
+
+## The records a client writes
+
+Two kinds of counter are written by a client and not by the driver: an image's position,
+which the driver allocates for a subscription and names in `available image`, and a
+counter the client added with `add counter`. The driver frees such a record when the
+image ends, when the subscription or the counter is removed, and when the client closes
+or is timed out. A thread of the client may still be about to store into it then: a
+subscriber's thread stores its position after each poll, and it learns that an image
+ended, or that its client was timed out, from an event that another thread, the
+client's conductor, reads. A process that was stopped, and a conductor that was not
+run for a while, store later than any time the driver could wait.
+
+So a record a client writes is **held** from the moment the driver frees it
+(`spec/counters-file.md`, "Metadata record"): no reader takes it for a counter, and
+the driver gives it to no other owner. The driver lets a held record go, and counts
+the counter reuse timeout from that moment, in two cases and no other:
+
+1. **Its writer has said so.** The record's release word reads 1.
+2. **Its client is gone.** The client was closed or timed out, and the driver holds
+   that client's lock.
+
+**The release word** is stored by the one thread that holds the client's handle on the
+record, as that thread's last store to the slot, when it gives the handle up:
+
+- A subscription stores it when it takes an image out: on `unavailable image`, on a
+  fault of the image, on its own close and when it finds its client closed. It does so
+  on the thread that polls, between two polls, so that no poll of that image is under
+  way or follows.
+- The owner of a counter the client added stores it when it removes the counter.
+- Every handle stores it when it is dropped, whatever dropped it.
+- For a record the client was told of and holds no handle on, the client's conductor
+  stores it, by the record's id. That is an image it does not add, `gone` or `corrupt`
+  ("Events"), and an image announced for a subscription the client has removed. For
+  the second, a client keeps a removed subscription's registration id until it has
+  read the driver's `operation success` for its `remove subscription`: the driver
+  announces nothing for the subscription after that answer.
+
+A client sends `remove subscription` and `remove counter` after the release words they
+concern are stored. A handle on a record belongs to one thread at a time, and is not
+copied. A caller of the C ABI that uses a handle from a second thread while the first
+closes it has broken that, and the fault is the caller's (`spec/c-abi.md`).
+
+**The lock** is an exclusive advisory lock of the operating system on the file
+`clients/<client id>.lock` in the driver's directory, as the driver's own is on the
+directory ("The driver directory"). A client creates the file, empty, and takes the
+lock after it has taken its client id and before its first command. Everything of the
+client that can store into a counter shares the one open file: the client, its
+subscriptions, its counters and its conductor. So the lock is let go when the last of
+them is dropped, and when the process ends, however it ends, and a process that is
+stopped still holds it. A process that the client's process forked holds it too, with
+the mapping, for as long as it lives.
+
+For a client that has closed or was timed out and for which it still holds a record,
+the driver tries the lock once every lock check interval, without waiting. When it
+takes the lock, nothing of that client can store: it lets every record held for the
+client go, removes the file and lets go of the lock.
+
+**A client that holds no lock.** A directory may refuse the lock, or the file. Such a
+client attaches all the same. The driver tries the lock at the client's first command
+and so learns that the client does not hold it. Such a client's release words are read
+as any client's. What it leaves held when it closes or is timed out, with no release
+word, is out of use until the driver starts again, and `counters.retired` counts it.
+
+**The bound.** A held record is a record of the counters file, so the records held
+are fewer than its capacity, and an allocation that finds no record free fails as
+`spec/counters-file.md`, "When the file is full", says. `counters.held` is how many are
+held. Records are held for long by a subscription whose thread no longer polls, which
+its client's queue of 64 image events closes; by a client that closed and keeps an
+object of the client alive; and by a process that was timed out and is stopped. `cavalry
+doctor` names the last two by their lock.
 
 ## Sizes
 
@@ -1131,7 +1216,10 @@ stores it with a release store after each block. A replay publication's
 `publication.position` and `publication.limit` are keyed and labelled as a publication's,
 with the replay session id where the correlation id goes. A counter a client adds with
 `add counter` is a `client` counter of `counters.toml`, keyed and labelled by the
-client that adds it and written by that client alone (ADR 0062).
+client that adds it and written by that client alone (ADR 0062). Static
+`counters.held`, a gauge, and `counters.retired` are the records held for their
+writers and the records put out of use until the driver starts again ("The records a
+client writes"; ADR 0179).
 
 ## Vectors
 

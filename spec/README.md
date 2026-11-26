@@ -37,11 +37,11 @@ Protocol).
 | Page | Version | Decided in |
 | --- | --- | --- |
 | `frame.md`, the data frame header | 0 | ADR 0008 |
-| `counters-file.md`, the counters file | 0 | ADR 0012, ADR 0062 |
+| `counters-file.md`, the counters file | 1 | ADR 0012, ADR 0062, ADR 0179 |
 | `log-buffer.md`, the log buffer | 1 | ADR 0013, ADR 0040, ADR 0048, ADR 0066, ADR 0097, ADR 0172 |
 | `command-ring.md`, the command ring | 1 | ADR 0014, ADR 0018 |
 | `broadcast-buffer.md`, the broadcast buffer | 0 | ADR 0014 |
-| `client-protocol.md`, the client protocol | 10 | ADR 0019, ADR 0025, ADR 0030, ADR 0031, ADR 0040, ADR 0049, ADR 0053, ADR 0059, ADR 0062, ADR 0064, ADR 0065, ADR 0068, ADR 0069, ADR 0072, ADR 0097, ADR 0098, ADR 0099, ADR 0103, ADR 0153, ADR 0154 |
+| `client-protocol.md`, the client protocol | 10 | ADR 0019, ADR 0025, ADR 0030, ADR 0031, ADR 0040, ADR 0049, ADR 0053, ADR 0059, ADR 0062, ADR 0064, ADR 0065, ADR 0068, ADR 0069, ADR 0072, ADR 0097, ADR 0098, ADR 0099, ADR 0103, ADR 0153, ADR 0154, ADR 0179 |
 | `durable-log.md`, the durable log | 6 | ADR 0024, ADR 0031, ADR 0060, ADR 0064, ADR 0065, ADR 0108, ADR 0128, ADR 0130, ADR 0131, ADR 0133, ADR 0144, ADR 0145, ADR 0152, ADR 0161 |
 | `udp.md`, the UDP transport | 4 | ADR 0040, ADR 0045, ADR 0053, ADR 0059, ADR 0068, ADR 0097, ADR 0098, ADR 0099, ADR 0112, ADR 0145, ADR 0153, ADR 0154 |
 | `c-abi.md`, the C ABI | 7 | ADR 0051, ADR 0057, ADR 0070, ADR 0072, ADR 0078, ADR 0080, ADR 0103, ADR 0122, ADR 0123, ADR 0131, ADR 0135, ADR 0146, ADR 0150, ADR 0155, ADR 0159, ADR 0157, ADR 0168 |
