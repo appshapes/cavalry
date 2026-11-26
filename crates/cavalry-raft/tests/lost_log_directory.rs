@@ -289,7 +289,11 @@ fn two_members_that_lost_their_logs_while_the_third_is_stopped_wait_for_it() {
     cluster.run_ms(120_000);
     assert_eq!(cluster.leader(), None, "the two elect no leader");
     for &id in &lost {
-        assert_eq!(cluster.append_position(id), Some(0), "member {id} holds nothing");
+        assert_eq!(
+            cluster.append_position(id),
+            Some(0),
+            "member {id} holds nothing"
+        );
         let counts = cluster.counts(id).expect("a member");
         assert_eq!(counts.candidacies, 0, "member {id}: {counts:?}");
         assert_eq!(

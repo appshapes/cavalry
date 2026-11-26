@@ -190,7 +190,11 @@ fn a_member_of_a_new_cluster_that_lost_its_log_votes_only_once_it_has_heard_ever
     member
         .on_message(at(3), &empty_request(0, 0), &mut io)
         .expect("no fault");
-    assert_eq!(votes_to(&io, 0), 0, "no vote while member 1 has not reported");
+    assert_eq!(
+        votes_to(&io, 0),
+        0,
+        "no vote while member 1 has not reported"
+    );
     assert_eq!(
         io.count(|call| matches!(call, Call::StoreCandidateTerm(_))),
         0
