@@ -61,10 +61,10 @@ with what to do about a driver that is full. The same holds for a driver that
 names a record the client cannot open; that record stays the client's until its
 close.
 
-The driver frees the counter when the client closes or is timed out,
-as it frees every counter of a client, so `doctor` names a client by it for as long
-as the client lives: `doctor` reads every such counter and gives a finding for each
-that is above 0, with the client's id.
+The driver frees the counter when the client closes or is timed out, as it frees
+every counter of a client, so `doctor` names a client by it for as long as the
+client lives: `doctor` reads every such counter and gives a finding for each that
+is above 0, with the client's id.
 
 The watch is on where a timed wait has been seen to outlive its timer, which is
 macOS, and off elsewhere, as the driver's is and for the same reason. Off means no
