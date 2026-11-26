@@ -109,12 +109,16 @@ conflict: a conflict is resolved in place, as step 4 says.
    Claude Code" line (the owner's ruling of 2026-11-26; work item 475; `/commit`,
    step 5, has the reason). The body is the one that matters most, since it becomes
    the commit on `master`. The project's `.claude/settings.json` turns the lines off
-   (`attribution`), and this check of the file shows that none is there. It prints
-   `no attribution lines`, or the lines to take out. A sentence that names the lines,
-   as this step does, is not one of them, and neither is a person's `Co-Authored-By:`:
+   (`attribution`), and this check of the body's file shows that none is there. It
+   prints the lines to take out, or `no attribution lines`, or that it did not read
+   the file, which is no pass. It finds a line that begins with one of the three,
+   after any quote mark of Markdown or list mark, and a session's link anywhere. A
+   sentence that names the lines, as this step does, is not one of them, and neither
+   is a person's `Co-Authored-By:`. A person's line that it prints because their
+   address has `claude` in it stays:
 
    ```
-   grep -n -i -E '^co-authored-by:.*(claude|anthropic)|^claude-session:|generated with \[claude code\]|claude\.ai/code/session' <file> || echo "no attribution lines"
+   grep -n -i -E '^[^[:alnum:]"`]*(co-authored-by:.*(claude([^a-z]|$)|anthropic)|claude-session:|generated with \[?claude code)|claude\.ai/code/session' <file>; case $? in 0) ;; 1) echo "no attribution lines" ;; *) echo "the check did not read <file>: give it the body's file" ;; esac
    ```
 
    Run it again on the new file before any `gh pr edit <number> --body-file <file>`.
