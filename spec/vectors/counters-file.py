@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Write spec/vectors/counters-file.json: the test vectors for spec/counters-file.md,
-version 0. The reference encoder, standard library only. Run from the repository root:
+version 1. The reference encoder, standard library only. Run from the repository root:
 
     python3 spec/vectors/counters-file.py
 
@@ -19,7 +19,7 @@ HEADER_LENGTH, RECORD_LENGTH, SLOT_LENGTH = 128, 256, 128
 assert HEADER.size == HEADER_LENGTH and RECORD.size == RECORD_LENGTH
 
 
-def header(capacity=64, version=0, creator_pid=4242, start_timestamp=1_760_000_000_000_000_000, magic=MAGIC):
+def header(capacity=64, version=1, creator_pid=4242, start_timestamp=1_760_000_000_000_000_000, magic=MAGIC):
     return {"magic": magic.hex(), "version": version, "capacity": capacity,
             "creator_pid": creator_pid, "start_timestamp": start_timestamp}
 
@@ -68,18 +68,21 @@ VECTORS = [
     invalid_header("too-short", "too-short", encode_header(plain)[:127], 127),
     invalid_header("not-ready", "not-ready", encode_header(header(magic=b"\0" * 8)), file_length(64)),
     invalid_header("magic", "magic", encode_header(header(magic=b"CVLYLOGB")), file_length(64)),
-    invalid_header("version-1", "version", encode_header(header(version=1)), file_length(64)),
+    invalid_header("version-0", "version", encode_header(header(version=0)), file_length(64)),
+    invalid_header("version-2", "version", encode_header(header(version=2)), file_length(64)),
     invalid_header("capacity-not-power-of-two", "capacity", encode_header(header(capacity=100)), file_length(100)),
     invalid_header("capacity-below-minimum", "capacity", encode_header(header(capacity=32)), file_length(32)),
     invalid_header("capacity-above-maximum", "capacity", encode_header(header(capacity=131072)), file_length(131072)),
     invalid_header("capacity-negative", "capacity", encode_header(header(capacity=-64)), file_length(64)),
     invalid_header("length", "length", encode_header(plain), file_length(64) - 1),
-    invalid_header("version-before-capacity", "version", encode_header(header(version=1, capacity=100)), file_length(100)),
+    invalid_header("version-before-capacity", "version", encode_header(header(version=0, capacity=100)), file_length(100)),
     valid_record("record-static-allocated", record()),
     valid_record("record-instance-with-key",
                  record(type_id=7, key=struct.pack("<ii", 1, 1001), label=b"publication.back_pressure 1 1001")),
     valid_record("record-unused", record(state=0, type_id=0, label=b"")),
     valid_record("record-reclaimed", record(state=-1, reclaim_deadline=1_760_000_005_000_000_000)),
+    # Held: freed, and not to be reused until its writer has let it go (version 1).
+    valid_record("record-held", record(state=-1, type_id=4, reclaim_deadline=(1 << 63) - 1)),
     valid_record("record-label-maximum", record(label=b"x" * 124)),
     invalid_record("record-state-2", "state", encode_record(record(state=2))),
     invalid_record("record-label-too-long", "label",
@@ -90,7 +93,7 @@ VECTORS = [
 
 def main():
     out = Path(__file__).with_suffix(".json")
-    doc = {"spec": "spec/counters-file.md", "version": 0,
+    doc = {"spec": "spec/counters-file.md", "version": 1,
            "generated_by": "spec/vectors/counters-file.py; do not edit by hand", "vectors": VECTORS}
     out.write_text(json.dumps(doc, indent=2) + "\n")
     print(f"{out}: {len(VECTORS)} vectors")
