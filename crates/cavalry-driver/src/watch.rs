@@ -11,7 +11,7 @@
 //! [`OVERDUE`] past due, counting each in `driver.parks_overdue`. The watch's own park
 //! can be lost as any other can, so it stores its due time too, and the conductor looks
 //! at it on each idle pass and unparks the watch the same way. A lost wake-up then
-//! costs its thread a stall of at most the period and the grace, and both lost at once
+//! costs its thread a stall of at most the period and the grace, 300 ms, and both lost at once
 //! is the product of two rates of one in tens of millions.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -26,11 +26,11 @@ use crate::conductor::now_nanos;
 /// How long the watch parks between two looks at the five threads.
 pub(crate) const WATCH_PERIOD: Duration = Duration::from_millis(100);
 
-/// How far past its due time a park may be before the watch ends it: far above what a
-/// loaded host adds to a wake-up of a thread that is only late, so that a count here
-/// is a park that was not coming back by itself, or a host that could not run the
-/// thread for that long.
-pub(crate) const OVERDUE: Duration = Duration::from_millis(50);
+/// How far past its due time a park may be before the watch ends it: above what a
+/// loaded host was seen to add to the wake-up of a thread that is only late, 53 ms in
+/// 1.8 billion waits (ADR 0176), so that a count here is a park that was not coming
+/// back by itself, or a host that could not run the thread for that long.
+pub(crate) const OVERDUE: Duration = Duration::from_millis(200);
 
 /// Not parked.
 const NOT_PARKED: i64 = 0;

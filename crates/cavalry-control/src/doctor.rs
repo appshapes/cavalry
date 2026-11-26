@@ -4082,7 +4082,8 @@ mod tests {
     use cavalry_shm::command_ring::CommandRing;
     use cavalry_shm::counters::CountersFile;
     use cavalry_shm::counters::generated::{
-        CLIENT_TIMED_OUT, RECORDING_CUT_TO_SYNCED, RUN_MEMBER_GIVEN_UP, RUN_MEMBER_REFUSED,
+        CLIENT_TIMED_OUT, DRIVER_PARKS_OVERDUE, RECORDING_CUT_TO_SYNCED, RUN_MEMBER_GIVEN_UP,
+        RUN_MEMBER_REFUSED,
     };
 
     struct TestDir(PathBuf);
@@ -5752,6 +5753,43 @@ mod tests {
             report.to_string().contains("WARN client.timed_out"),
             "{report}"
         );
+    }
+
+    /// A driver thread that did not come back from a timed wait, and that the driver's
+    /// watch woke (ADR 0176): doctor says from the counter alone what happened, what it
+    /// cost, that a few a day on a Mac need nothing done, and the page that says how to
+    /// probe the machine.
+    #[test]
+    fn a_park_the_watch_ended_is_explained_from_its_counter() {
+        let dir = TestDir::new("parks-overdue");
+        let counters = CountersFile::create(&dir.0, 256).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let parks = counters
+            .counter(DRIVER_PARKS_OVERDUE.record())
+            .expect("static");
+        parks.increment();
+        parks.increment();
+        let report = examine(&dir.0);
+        let found = finding(&report, "driver.parks_overdue");
+        assert_eq!(found.level, Level::Warn);
+        assert!(
+            found.message.starts_with(
+                "driver.parks_overdue is 2: A thread of this driver did not come back from a \
+                 timed wait and was woken by the driver's watch"
+            ),
+            "{}",
+            found.message
+        );
+        for words in [
+            "a stall of up to 300 ms",
+            "nothing to do",
+            "docs/how-to/find-a-wait-that-does-not-return.md",
+            "could not run the driver's threads",
+        ] {
+            assert!(found.message.contains(words), "{words}: {}", found.message);
+        }
+        assert!(report.ok(), "a warning does not fail: {report}");
     }
 
     /// A recovery that cut a recording to what it had synced, after a crash of any kind

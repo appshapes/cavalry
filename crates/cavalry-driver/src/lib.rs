@@ -57,7 +57,9 @@ pub enum DriverThread {
 pub type ThreadStart = Arc<dyn Fn(DriverThread) + Send + Sync>;
 
 /// A running driver: its directory, its log directory, and its five threads, the
-/// conductor, the recorder, the replayer, the sender and the receiver. [`Driver::start`] creates the directory's
+/// conductor, the recorder, the replayer, the sender and the receiver, with a sixth on
+/// macOS, the watch, which does none of the driver's work and ends a park of the five
+/// that outlived its timeout (ADR 0176). [`Driver::start`] creates the directory's
 /// files, opens the log directory under its lock and recovers it, and starts the
 /// threads; [`Driver::close`] stops them, storing −1 in the command ring's heartbeat so
 /// that every client learns `driver-closed`, stopping every live recording at what was
@@ -175,7 +177,8 @@ impl Driver {
     /// actions in the `recording.*` counters, and the conductor, recorder, replayer,
     /// sender and receiver threads start (`spec/client-protocol.md`, "The driver
     /// directory"; `spec/durable-log.md`, "The driver"; `spec/udp.md`, "The sender" and
-    /// "The receiver").
+    /// "The receiver"). On macOS a sixth thread starts after them, the watch (ADR
+    /// 0176).
     pub fn start(dir: impl AsRef<Path>, log_dir: impl AsRef<Path>) -> Result<Self, DriverError> {
         Self::start_with(dir, log_dir, IdleStrategy::Backoff)
     }
@@ -682,8 +685,8 @@ mod tests {
     /// (ADR 0176). One driver for each thread, with a watch, in which that thread alone
     /// parks for an hour where it would park for its timeout. No other thread of it is
     /// held, so a count in `driver.parks_overdue` is the watch's unpark of that thread:
-    /// 50 ms after a millisecond for the conductor and the recorder, and 50 ms after a
-    /// second for a replayer, a sender and a receiver with nothing to do.
+    /// 200 ms after a millisecond for the conductor and the recorder, and 200 ms after
+    /// a second for a replayer, a sender and a receiver with nothing to do.
     #[test]
     fn the_watch_ends_a_park_that_outlived_its_timeout_for_each_thread() {
         const EACH: [&[DriverThread]; 5] = [

@@ -41,7 +41,10 @@ lost. It was not seen on Linux, or on macOS 26.3 in a virtual machine, in more t
    `join`, below `Driver::stop` or `Cavalry::shutdown`, and the thread it joins is
    one of `cavalry-conductor`, `cavalry-recorder`, `cavalry-replayer`,
    `cavalry-sender`, `cavalry-receiver`, `cavalry-client-conductor` or
-   `cavalry-consensus`.
+   `cavalry-consensus`. On macOS a driver has one more thread, `cavalry-watch`, which
+   parks a tenth of a second at a time: it is the thread that ends a park of the
+   other five that outlived its timeout
+   ([ADR 0176](../decisions/0176-watch-the-drivers-parks-and-end-one-that-outlived-its-timeout.md)).
 
 3. Read that thread's stack in both files.
 
@@ -114,7 +117,10 @@ lost. It was not seen on Linux, or on macOS 26.3 in a virtual machine, in more t
   or in one of the waits that ADR 0171 names as not covered, which are sleeps on a
   thread that is the caller's: a client's wait for the driver's answer, or a test's
   own `std::thread::sleep`.
-- **A driver or a client does no work, and no stop was asked for.** A lost wake-up
-  holds an idle thread until something wakes it, and ADR 0171 says which threads
-  nothing wakes while they run. Step 1 and step 3 show it: the thread is in one park
-  in every sample.
+- **A driver or a client does no work, and no stop was asked for.** On macOS a
+  driver's watch ends a park of one of its five threads within 300 ms of its
+  timeout, and counts it: `cavalry doctor` then prints `driver.parks_overdue` with
+  the count. A driver thread that stays in one park in every sample of step 1 for
+  longer than that is not held by this fault alone. A client's conductor has no
+  watch yet: one that is held sends no keepalive, and its driver times the client
+  out after 10 s and counts it in `client.timed_out`.
