@@ -43,8 +43,14 @@ impl TestDir {
 }
 
 impl Drop for TestDir {
+    /// Removes the directory, unless the test failed: then it is kept and named, so
+    /// that a failure on this host can be read from its counters and its log.
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        if std::thread::panicking() {
+            eprintln!("kept for the failure: {}", self.0.display());
+        } else {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 }
 
@@ -786,6 +792,31 @@ const CLUSTER_ROLE: &str = "cluster.role";
 const CLUSTER_ELECTION_STATE: &str = "cluster.election_state";
 const CLUSTER_LEADERSHIP_TERM_ID: &str = "cluster.leadership_term_id";
 
+/// The counters of a member's election that say how far it went and what it met on
+/// the way, by name: printed for each member when the election does not close in
+/// time, so that a failure on a runner tells a start that took more than one ballot,
+/// a failed election or a log image lost from one that waited on a single step.
+const ELECTION_COUNTERS: [&str; 18] = [
+    "cluster.election_state",
+    "cluster.role",
+    "cluster.leadership_term_id",
+    "cluster.election_cause",
+    "cluster.elections",
+    "cluster.elections_failed",
+    "cluster.candidacies",
+    "cluster.ballots_lost",
+    "cluster.votes_for",
+    "cluster.votes_against",
+    "cluster.votes_withheld",
+    "cluster.voters_unheard",
+    "cluster.leaders_withheld",
+    "cluster.log_images_lost",
+    "cluster.join_position_mismatches",
+    "cluster.higher_terms_seen",
+    "cluster.append_position",
+    "cluster.commit_position",
+];
+
 #[test]
 fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_elect_a_leader() {
     let ports = loopback_ports(15);
@@ -823,10 +854,13 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_elect_a_leader() 
     // Every member's election closes, state 17, one member leading, role 2, whichever
     // the members elected, and the others following, role 0: read from each driver's
     // counters file.
-    // A wait that fails says where each member's election stood, from the same
-    // counters, and the members string, whose ports a member's error names; `Runs`
-    // then prints what each member's `run` wrote. Together they tell a member that
-    // could not bind an endpoint from one whose leader closed without it.
+    // A wait that fails says where each member's election stood and how it got there,
+    // from the counters of `ELECTION_COUNTERS`, and the members string, whose ports a
+    // member's error names; `Runs` then prints what each member's `run` wrote, and
+    // each member's directory is kept on this host. Together they tell a member that
+    // could not bind an endpoint from one whose leader closed without it, and a start
+    // that took more than one ballot, or failed an election, from one that waited on
+    // a single step.
     let deadline = Instant::now() + Duration::from_secs(10);
     while !dirs
         .iter()
@@ -835,11 +869,11 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_elect_a_leader() 
         if Instant::now() >= deadline {
             let mut report = vec![format!("the members string: {members}")];
             for (member, dir) in dirs.iter().enumerate() {
-                report.push(format!(
-                    "member {member}: {CLUSTER_ELECTION_STATE} {:?}, {CLUSTER_ROLE} {:?}",
-                    cluster_counter(&dir.0, CLUSTER_ELECTION_STATE),
-                    cluster_counter(&dir.0, CLUSTER_ROLE)
-                ));
+                let counters: Vec<String> = ELECTION_COUNTERS
+                    .iter()
+                    .map(|name| format!("{name} {:?}", cluster_counter(&dir.0, name)))
+                    .collect();
+                report.push(format!("member {member}: {}", counters.join(", ")));
             }
             panic!(
                 "every member's election closed within 10 s\n{}",
