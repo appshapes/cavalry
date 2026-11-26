@@ -100,9 +100,14 @@ lost. It was not seen on Linux, or on macOS 26.3 in a virtual machine, in more t
 - **`sample` says the process does not exist or cannot be examined.** The run ended,
   or it is another user's. Take the samples while it hangs, as the user who started
   it.
-- **The probe does not build on your system.** It calls `nanosleep`, `pthread_kill`
-  and `signal` by their C names and reads `errno` as macOS and Linux give it. On
-  another system, give it that system's name for `errno`.
+- **The probe does not build on your system.** On any system but 64-bit macOS or
+  Linux, on x86-64 or Arm, `rustc` stops with `error: the sleep probe declares the C
+  library of 64-bit macOS and Linux only`. The probe declares the C library itself,
+  as those systems lay it out. To build it on another system, check four things
+  against that system's headers: `Timespec` against `struct timespec`, the width of
+  `pthread_t` and of a signal handler's address against `usize`, and the number the
+  probe's `const SIGUSR1` gives. Then add the system to the `cfg` above
+  `compile_error!` in `scripts/sleep-probe.rs`.
 - **A Cavalry program hangs in a join on a machine that has the fault, at a commit
   after ADR 0171.** A stop wakes every thread it joins, so a lost wake-up in an idle
   wait does not hold it. Read step 3 again: the thread it joins is in another call,
