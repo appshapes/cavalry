@@ -673,8 +673,28 @@ committed once a quorum, two of three, has it on disk.
   each one finished, and the count is history. It stays until this member starts
   again. A count that rises often names a driver or a disk to look at: the line
   `cavalry run` printed for each fault says which.
-- `WARN cluster.timers`: this member leads and holds no timer, while the service
-  beside it has timers pending; the line names how many. A service sends its member
+- `WARN cluster.timers`, with `no service reads its log on this host`: this member
+  leads and holds timers, which a service told it of, and no service reads its log
+  now. The program beside this member has stopped. A member is told of timers only
+  by the service beside it, and only a leader appends a timer's event, so while this
+  member leads the program beside every other member waits for its timers, and no
+  entry of the term is answered: a reply is sent by the service beside the leader.
+  Start the program beside this member. `cavalry doctor` reads this from the
+  driver's counters: a service that runs holds a subscription on the service log
+  stream, stream 104, and the driver keeps its `subscription.position` until the
+  service closes or its client times out. A service that is finding its member's
+  recording again holds none for a moment, so run `cavalry doctor` a second time
+  before you act
+  ([ADR 0166](../decisions/0166-have-doctor-name-a-leader-beside-which-no-service-reads-the-log.md)).
+- `note cluster-no-service`: this member leads, holds no timer, and no service
+  reads its log on this host. In a cluster that runs no program yet, that is how
+  it is, and there is nothing to do. Where a program runs beside the other
+  members, start it beside this member too: until then its timers wait and no
+  entry of the term is answered, as for the warning above. The leader's host
+  cannot tell the two cases apart, which is why this is a note
+  ([ADR 0166](../decisions/0166-have-doctor-name-a-leader-beside-which-no-service-reads-the-log.md)).
+- `WARN cluster.timers`, with `holds no timer`: this member leads and holds no
+  timer, while the service beside it has timers pending; the line names how many. A service sends its member
   every pending timer again each second, and tells it nothing while it reads its
   history after a start, so a first run of `cavalry doctor` may catch the second
   after a member started or a service that is still reading. When a second run,

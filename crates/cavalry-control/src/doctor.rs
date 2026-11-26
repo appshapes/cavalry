@@ -30,7 +30,7 @@ use cavalry_log::catalog::CatalogReader;
 use cavalry_log::layout::{Descriptor, State as SlotState, locate};
 use cavalry_proto::cluster::{
     CONTROL_TOGGLE_SNAPSHOT, EMPTY_MEMBER, Endpoint, LEADER_HEARTBEAT_TIMEOUT_NS, MAX_MEMBERS,
-    STARTUP_CANVASS_TIMEOUT_NS, control_toggle_id, parse_members, quorum,
+    SERVICE_LOG_STREAM_ID, STARTUP_CANVASS_TIMEOUT_NS, control_toggle_id, parse_members, quorum,
 };
 #[cfg(target_os = "linux")]
 use cavalry_proto::udp::DATAGRAMS_PER_BURST;
@@ -1596,11 +1596,24 @@ fn cluster_checks(
     // holds a session's record at all.
     let mut stale: Vec<(i64, CounterId, i64)> = Vec::new();
     let mut sessions = false;
+    // How many subscriptions read the service log stream on this driver, one position
+    // for each replay a subscription reads: a service that runs holds one from its
+    // first replay of its member's log to its close, whatever its program does, and
+    // nothing else subscribes to that stream (`spec/cluster.md`, "Members and
+    // streams", "The service"; ADR 0166).
+    let mut service_readers = 0usize;
     for id in 0..reader.capacity() {
         let Some(fields) = reader.record(id).ok().flatten() else {
             continue;
         };
         let type_id = fields.type_id();
+        if type_id == SUBSCRIPTION_POSITION.0 {
+            // Keyed by a correlation id, a session id and then the stream id.
+            if fields.key().get(12..16) == Some(&SERVICE_LOG_STREAM_ID.to_le_bytes()[..]) {
+                service_readers += 1;
+            }
+            continue;
+        }
         if !cluster_ids.contains(&type_id) {
             continue;
         }
@@ -1711,12 +1724,13 @@ fn cluster_checks(
     if !members.is_empty() {
         members.sort_by_key(|member| member.id);
         for member in &members {
-            member_findings(member, cluster, findings);
+            member_findings(member, cluster, service_readers, findings);
         }
-        // The ten of `member_findings`, the vote floor's (ADR 0145), the control
-        // toggle's (ADR 0147), the owed truncation's (ADR 0148) and the leader's
-        // timers' (ADR 0151) among them, and one for each of the member's counts.
-        checks += 10 + MEMBER_COUNTS.len();
+        // The eleven of `member_findings`, the vote floor's (ADR 0145), the control
+        // toggle's (ADR 0147), the owed truncation's (ADR 0148), the leader's
+        // timers' (ADR 0151) and the leader's service's (ADR 0166) among them, and
+        // one for each of the member's counts.
+        checks += 11 + MEMBER_COUNTS.len();
     }
     if sessions {
         stale.sort_by_key(|(session, counter, _)| (*session, counter.0));
@@ -2072,6 +2086,7 @@ fn joining_message(member: &MemberCounters, state: i64, cluster: Option<&Cluster
 fn member_findings(
     member: &MemberCounters,
     cluster: Option<&Cluster>,
+    service_readers: usize,
     findings: &mut Vec<Finding>,
 ) {
     let id = member.id;
@@ -2320,6 +2335,54 @@ fn member_findings(
             ),
             doc: DOC_CLUSTER,
         });
+    }
+    // A leader beside which no service reads the log is told of no timer, and no
+    // service answers the entries of its term (`spec/cluster.md`, "The service",
+    // "Replies", "Timers"): the timers of the program beside every other member
+    // wait while it leads. A service's own counters are closed with it, and a
+    // service that has nothing to tell its member adds none, so neither says whether
+    // one runs. Its subscription on the service log stream does: a service holds it
+    // from its first replay of the member's log to its close, and the driver removes
+    // its position with it (ADR 0166). A leader that holds timers was told of them by
+    // a service, so one that holds some with no reader is a service that stopped: a
+    // warning. A leader that holds none may be of a cluster that runs no program
+    // yet, which the leader's host cannot tell from one whose other members' programs
+    // wait: a note that says both. A service that finds its member's recording again
+    // holds no replay for a moment, so the warning asks for a second run.
+    if leads && closed && service_readers == 0 {
+        let reads = format!(
+            "this driver's counters hold no subscription.position of stream \
+             {SERVICE_LOG_STREAM_ID}, the service log stream"
+        );
+        match member.timers.filter(|held| *held > 0) {
+            Some(held) => findings.push(Finding {
+                check: "cluster.timers",
+                level: Level::Warn,
+                message: format!(
+                    "the leader, member {id}, holds {held} of a service's timers, its \
+                     cluster.timers, and no service reads its log on this host: {reads}. \
+                     Where a second run of doctor says the same, the program beside this \
+                     member has stopped. The member is told of no timer while it is, and \
+                     appends one event at the most for each it holds, so the timers of \
+                     the program beside every other member wait while this member \
+                     leads, and no entry of its term is answered. Start the program \
+                     beside this member."
+                ),
+                doc: DOC_CLUSTER,
+            }),
+            None => findings.push(Finding {
+                check: "cluster-no-service",
+                level: Level::Note,
+                message: format!(
+                    "no service reads the log of the leader, member {id}, on this host: \
+                     {reads}. Where a program runs beside the other members, its timers \
+                     wait and no entry of this term is answered while this member \
+                     leads: start the program beside this member too. A cluster that \
+                     runs no program yet has nothing to start."
+                ),
+                doc: DOC_CLUSTER,
+            }),
+        }
     }
     for (counter, value) in MEMBER_COUNTS.iter().zip(member.counts) {
         let Some(def) = COUNTERS.iter().find(|def| def.id == *counter) else {
@@ -6657,8 +6720,20 @@ mod tests {
         );
     }
 
-    /// A counters file with one cluster member's counters, each set as given.
+    /// A counters file with one cluster member's counters, each set as given, and a
+    /// service that reads the member's log beside it ([`service_reader`]).
     fn member_file(dir: &TestDir, id: i32, values: &[(CounterId, i64)]) -> CountersReader {
+        member_file_read_on(dir, id, values, &[SERVICE_LOG_STREAM_ID])
+    }
+
+    /// A counters file with one cluster member's counters, each set as given, and a
+    /// subscription's position on each of the streams given.
+    fn member_file_read_on(
+        dir: &TestDir,
+        id: i32,
+        values: &[(CounterId, i64)],
+        streams: &[i32],
+    ) -> CountersReader {
         let mut file = CountersFile::create(&dir.0, 1024).expect("the counters file");
         for (type_id, value) in values {
             let counter = file
@@ -6666,11 +6741,43 @@ mod tests {
                 .expect("a counter");
             counter.set(*value);
         }
+        for stream in streams {
+            service_reader(&mut file, *stream);
+        }
         CountersReader::open(&dir.0).expect("opens")
+    }
+
+    /// What a driver's counters hold of a service that reads its member's log: the
+    /// position of its subscription on the service log stream, for the replay it
+    /// reads (`spec/cluster.md`, "The service"). On another stream it is some other
+    /// subscription's.
+    fn service_reader(file: &mut CountersFile, stream: i32) {
+        file.allocate(
+            SUBSCRIPTION_POSITION,
+            &position_key(9, 3, stream),
+            &format!("subscription.position 9 3 {stream}"),
+        )
+        .expect("a subscription's position")
+        .set(4096);
     }
 
     fn cluster_findings(test: &str, id: i32, values: &[(CounterId, i64)]) -> (usize, Vec<Finding>) {
         cluster_findings_in(test, id, None, values)
+    }
+
+    /// [`cluster_findings`] of a driver whose subscriptions read the streams given,
+    /// and no other: with none, no service reads the member's log.
+    fn cluster_findings_read_on(
+        test: &str,
+        id: i32,
+        values: &[(CounterId, i64)],
+        streams: &[i32],
+    ) -> Vec<Finding> {
+        let dir = TestDir::new(test);
+        let reader = member_file_read_on(&dir, id, values, streams);
+        let mut findings = Vec::new();
+        cluster_checks(&reader, true, None, &mut findings);
+        findings
     }
 
     /// [`cluster_findings`] with the cluster doctor was given a members string for.
@@ -7913,6 +8020,139 @@ mod tests {
         );
     }
 
+    /// A leader beside which no service reads the log is named (ADR 0166): with a
+    /// warning when it holds timers, which a service told it of and has since stopped,
+    /// and with a note when it holds none, as in a cluster that runs no program yet.
+    /// What says that a service reads is a subscription's position on the service log
+    /// stream in the driver's counters, and on no other stream; the service's own
+    /// counters say nothing either way. A follower and a leader whose election is
+    /// open are told of in neither. Neither line says "cluster member", the words
+    /// by which `docs/tutorials/run-a-cluster.md` picks the member's own note.
+    #[test]
+    fn a_leader_beside_which_no_service_reads_its_log_is_named() {
+        let member = |role: i64, state: i64, more: &[(CounterId, i64)]| {
+            let mut counters = vec![
+                (CLUSTER_ROLE, role),
+                (CLUSTER_ELECTION_STATE, state),
+                (CLUSTER_LEADERSHIP_TERM_ID, 3),
+                (CLUSTER_LEADER_MEMBER_ID, 1),
+                (CLUSTER_APPEND_POSITION, 4096),
+                (CLUSTER_COMMIT_POSITION, 4096),
+            ];
+            counters.extend_from_slice(more);
+            counters
+        };
+        let of = |findings: &[Finding]| -> Vec<(&'static str, Level, String)> {
+            findings
+                .iter()
+                .filter(|finding| finding.check != "cluster-member")
+                .map(|finding| {
+                    assert_eq!(finding.doc, DOC_CLUSTER);
+                    assert!(
+                        !finding.message.contains("cluster member"),
+                        "{}",
+                        finding.message
+                    );
+                    (finding.check, finding.level, finding.message.clone())
+                })
+                .collect()
+        };
+        let warning = |held: i64| {
+            (
+                "cluster.timers",
+                Level::Warn,
+                format!(
+                    "the leader, member 1, holds {held} of a service's timers, its \
+                     cluster.timers, and no service reads its log on this host: this driver's \
+                     counters hold no subscription.position of stream 104, the service log \
+                     stream. Where a second run of doctor says the same, the program beside \
+                     this member has stopped. The member is told of no timer while it is, and \
+                     appends one event at the most for each it holds, so the timers of the \
+                     program beside every other member wait while this member leads, and no \
+                     entry of its term is answered. Start the program beside this member."
+                ),
+            )
+        };
+        let note = (
+            "cluster-no-service",
+            Level::Note,
+            "no service reads the log of the leader, member 1, on this host: this driver's \
+             counters hold no subscription.position of stream 104, the service log stream. \
+             Where a program runs beside the other members, its timers wait and no entry of \
+             this term is answered while this member leads: start the program beside this \
+             member too. A cluster that runs no program yet has nothing to start."
+                .to_string(),
+        );
+        // The program beside the leader has stopped, and its service's counters went
+        // with it: the member holds the timers it was last told of.
+        for held in [1, 3] {
+            let findings = cluster_findings_read_on(
+                "service-stopped",
+                1,
+                &member(2, 17, &[(CLUSTER_TIMERS, held)]),
+                &[],
+            );
+            assert_eq!(of(&findings), [warning(held)]);
+        }
+        // A service's gauge that is still there says nothing of whether it reads.
+        let findings = cluster_findings_read_on(
+            "service-stopped-gauge",
+            1,
+            &member(2, 17, &[(CLUSTER_TIMERS, 2), (CLUSTER_SERVICE_TIMERS, 2)]),
+            &[],
+        );
+        assert_eq!(of(&findings), [warning(2)]);
+        // The member's own replay of its log, a service's messages to its member and
+        // a snapshot's replay are other streams: no service reads the log.
+        let findings = cluster_findings_read_on(
+            "service-other-streams",
+            1,
+            &member(2, 17, &[(CLUSTER_TIMERS, 1)]),
+            &[103, 105, 109],
+        );
+        assert_eq!(of(&findings), [warning(1)]);
+        // A leader that holds no timer, and one of a build without the gauge: a note.
+        for (name, more) in [
+            ("service-none", &[(CLUSTER_TIMERS, 0)][..]),
+            ("service-none-older-build", &[][..]),
+        ] {
+            let findings = cluster_findings_read_on(name, 1, &member(2, 17, more), &[]);
+            assert_eq!(of(&findings), [note.clone()], "{name}");
+        }
+        // Nothing for: a leader beside which a service reads, whatever it holds, a
+        // follower, a leader whose election is open.
+        for (name, counters, streams) in [
+            (
+                "service-reads",
+                member(2, 17, &[(CLUSTER_TIMERS, 1)]),
+                &[SERVICE_LOG_STREAM_ID][..],
+            ),
+            (
+                "service-reads-none-held",
+                member(2, 17, &[(CLUSTER_TIMERS, 0)]),
+                &[103, SERVICE_LOG_STREAM_ID][..],
+            ),
+            (
+                "service-follower",
+                member(0, 17, &[(CLUSTER_TIMERS, 1)]),
+                &[][..],
+            ),
+            (
+                "service-election-open",
+                member(2, 5, &[(CLUSTER_TIMERS, 1)]),
+                &[][..],
+            ),
+        ] {
+            let findings = cluster_findings_read_on(name, 1, &counters, streams);
+            assert!(
+                !findings.iter().any(|finding| {
+                    finding.check == "cluster.timers" || finding.check == "cluster-no-service"
+                }),
+                "{name}: {findings:?}"
+            );
+        }
+    }
+
     /// A leader that holds no timer is named when the service beside it has timers
     /// pending, with both counts and what to check; a leader beside which no service
     /// has added its gauge, as beside an application that schedules no timer, a
@@ -8694,7 +8934,7 @@ mod tests {
 
         // A follower that follows: the note alone, with who it is and what it knows.
         let (checks, findings) = cluster_findings("cluster-follower", 1, &follower);
-        assert_eq!(checks, 28);
+        assert_eq!(checks, 29);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].check, "cluster-member");
         assert_eq!(findings[0].level, Level::Note);
@@ -8871,7 +9111,7 @@ mod tests {
         let dir = TestDir::new("cluster-session-member");
         let reader = session_file(&dir, 7, 2, Some((1, &follower)));
         let mut findings = Vec::new();
-        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 29);
+        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 30);
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
         assert_eq!(
             found,
@@ -9093,6 +9333,7 @@ mod tests {
                 .expect("a counter")
                 .set(value);
         }
+        service_reader(&mut file, SERVICE_LOG_STREAM_ID);
         let reader = CountersReader::open(&dir.0).expect("opens");
         let mut findings = Vec::new();
         cluster_checks(&reader, true, None, &mut findings);

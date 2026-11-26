@@ -176,7 +176,8 @@ In Aeron, these are a service's `scheduleTimer` and `cancelTimer`, and its
 
 - **The programs print nothing.** No program runs beside the member that leads, or
   the cluster has no leader. Run the program beside every member. Then run `cavalry
-  doctor --dir` with a member's directory and its two variables set: a member whose
+  doctor --dir` with a member's directory and its two variables set. Beside a leader
+  with no program, doctor prints `note cluster-no-service`. A member whose
   `cluster-member` line says `election closed` has a log, and one in an election
   has none until it has joined its leader's ([Run a cluster of three
   members](run-a-cluster.md)).
@@ -186,10 +187,11 @@ In Aeron, these are a service's `scheduleTimer` and `cancelTimer`, and its
 - **The lines stop in every terminal.** The program beside the member that leads
   has stopped, or the cluster is electing a leader. Timers wait while no member
   leads and while no service runs beside the leader: step 3. Run `cavalry doctor`
-  for each member. Where one of them says `the leader in term` and `election
-  closed`, the cluster has its leader, and the program beside that member is the
-  one that stopped: doctor has no line for a leader with no service beside it. A
-  member that prints `WARN cluster-no-leader` is in an election.
+  for each member. Beside the leader whose program has stopped, doctor prints
+  `WARN cluster.timers`: the leader holds timers, and
+  `no service reads its log on this host`. Start the program beside that member,
+  and the lines go on in every terminal. A member that prints
+  `WARN cluster-no-leader` is in an election.
 - **A program prints `ended at position 256: code 102` and ends**, with its own
   position. A poll failed, and the program ends on a poll that fails. Code 102 is
   `CAVALRY_ERR_CLOSED`: the service's client is closed, as it is when the member's

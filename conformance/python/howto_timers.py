@@ -25,6 +25,12 @@ the page:
    timer it was last told of, and one event hands over two deadlines at the most, a
    tick and a tock that fall due together. So the third of the three came after the
    restart: the program goes on with the others.
+4. What `cavalry doctor` says beside the leader, which the page quotes and work item 464
+   added (ADR 0166): the note `cluster-no-service` before any program runs; neither
+   line while the program runs beside it; `WARN cluster.timers` with "no service reads
+   its log on this host" while its program is stopped, and nothing of it beside a
+   follower; and neither line again once the program runs again. The page's words for
+   the warning are held to what doctor prints.
 
 It exits 1 with what it found otherwise. The cluster is its own so that the log holds
 nothing but its first entry when the program starts. What differs from the page: the
@@ -52,6 +58,10 @@ LINES = 3             # the page's opening: a tick and a tock at once, then a ti
 FIRST_POSITION = 96   # where a log that holds one new leadership term ends
 EVENT_BYTES = 64      # a timer event in the log
 LINE = re.compile(r"(tick|tock) at position (\d+), (\d+) ms after its deadline")
+# What doctor prints beside a leader with no service that reads its log, as the page
+# quotes it: the warning's check and words, and the note's check.
+STOPPED = ("WARN cluster.timers", "no service reads its log on this host")
+NO_SERVICE = "cluster-no-service"
 
 
 def fail(what):
@@ -96,6 +106,10 @@ def page():
         if fourth.group(1) != "tock" or above <= 0 or above % EVENT_BYTES != 0:
             fail(f"the page's fourth line is `{said[LINES]}`; after `{said[LINES - 1]}` the program prints a tock, "
                  f"one or more timer events of {EVENT_BYTES} bytes above it")
+    for words in STOPPED:
+        if f"`{words}`" not in " ".join(text.split()):
+            fail(f"the page does not quote `{words}`, which doctor prints beside a leader whose program has "
+                 "stopped and this test waits for; keep the page's words those of doctor")
     program = "\n".join(line[3:] if line.startswith("   ") else line for line in blocks[0].split("\n"))
     return program, said
 
@@ -161,6 +175,23 @@ def main():
             capture_output=True, text=True, timeout=WAIT_SECONDS, check=False,
             env=dict(environment, CAVALRY_CLUSTER_MEMBER_ID=str(member))).stdout
 
+    def stopped_line(said, member):
+        """Doctor's warning for a leader that holds timers and has no service that reads
+        its log, if `said` has it."""
+        return re.search(rf"{re.escape(STOPPED[0])}\s+the leader, member {member}, holds \d+ of a service's timers, "
+                         rf"its cluster\.timers, and {re.escape(STOPPED[1])}: ", said)
+
+    def wait_for_doctor(member, wanted, what):
+        """What doctor prints beside one member, once `wanted` holds of it."""
+        deadline = time.monotonic() + WAIT_SECONDS
+        while True:
+            said = doctor(member)
+            if wanted(said):
+                return said
+            if time.monotonic() > deadline:
+                fail(f"doctor beside member {member} did not say {what} within {WAIT_SECONDS:.0f} s; it said: {said}")
+            time.sleep(0.1)
+
     def run_service(member, name):
         """The page's step 2: the program beside one member, its output in a file."""
         path = os.path.join(directory, name)
@@ -193,6 +224,14 @@ def main():
 
         # 1. A cluster that has run for a while: past both of the program's first deadlines.
         time.sleep(PAST_SECONDS)
+        # No program runs yet: doctor's note beside the leader, and beside no follower.
+        for member in range(MEMBERS):
+            said = doctor(member)
+            noted = re.search(rf"note\s+{NO_SERVICE}\s+no service reads the log of the leader, member {member}, "
+                              r"on this host: ", said) is not None
+            if noted != (member == leader) or stopped_line(said, member):
+                fail(f"before any program ran, doctor beside member {member} said: {said}; the note "
+                     f"`{NO_SERVICE}` is the leader's, member {leader}'s, alone, and no member has the warning")
 
         # 2. The program beside each member: the page's opening, the same beside each.
         services = [run_service(member, f"service-{member}.out") for member in range(MEMBERS)]
@@ -207,6 +246,10 @@ def main():
                 fail(f"the program beside member {member} printed {first[member]} and the one beside member 0 "
                      f"{first[0]}; the page says the same lines beside every member")
 
+        # A program reads beside every member: doctor has neither line for the leader.
+        wait_for_doctor(leader, lambda said: NO_SERVICE not in said and not stopped_line(said, leader),
+                        "nothing of a leader with no service, with the program running beside it")
+
         # 3. Ctrl-C beside the leader, and the program again: its earlier lines from the
         # log's start, and then three it had not printed, which another program prints
         # too. The leader's member holds one timer and nobody schedules it again while
@@ -217,6 +260,15 @@ def main():
         more = 3
         stop(services[leader][0], signal.SIGINT)
         before = [line for line in printed(services[leader][1]) if LINE.fullmatch(line)]
+        # The leader's program is stopped and the others run: doctor's warning beside the
+        # leader, which holds the timer it was last told of, and nothing beside a follower.
+        warned = wait_for_doctor(leader, lambda said: stopped_line(said, leader),
+                                 f"`{STOPPED[0]}` with \"{STOPPED[1]}\", with the program beside it stopped")
+        warned = stopped_line(warned, leader).group(0)
+        said = doctor(other)
+        if stopped_line(said, other) or NO_SERVICE in said:
+            fail(f"with the leader's program stopped, doctor beside member {other}, a follower whose program "
+                 f"runs, said: {said}")
         again, path = run_service(leader, f"service-{leader}-again.out")
         replayed = wait_for_lines(again, path, len(before) + more, f"the program's second run beside member {leader}")
         if replayed[:len(before)] != before:
@@ -228,13 +280,16 @@ def main():
             fail(f"after its second run the program beside member {leader}, the leader, printed "
                  f"{replayed[:len(before) + more]} and the one beside member {other} {others[:len(before) + more]}; "
                  f"the page says it goes on with the others")
+        wait_for_doctor(leader, lambda said: NO_SERVICE not in said and not stopped_line(said, leader),
+                        "nothing of a leader with no service, with the program running beside it again")
     finally:
         for process in reversed(started):
             stop(process, signal.SIGINT if process.args[0] == sys.executable else signal.SIGTERM)
 
     print(f"conformance/python: {PAGE}: its program printed {first[0]} beside each of three members of its own; "
           f"stopped beside member {leader}, the leader, and run again, it printed its {len(before)} lines again and "
-          f"then {replayed[len(before):len(before) + more]}, as the program beside member {other} did")
+          f"then {replayed[len(before):len(before) + more]}, as the program beside member {other} did; while it "
+          f"was stopped doctor beside the leader said `{' '.join(warned.split())}`, and nothing of it before or after")
     print(f"conformance/python: {PAGE} ok")
 
 
