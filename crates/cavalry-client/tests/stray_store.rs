@@ -418,6 +418,14 @@ fn a_client_refuses_an_older_drivers_counters_file_before_it_sends_a_command() {
         .expect("the counters file");
     file.write_all_at(&0i32.to_le_bytes(), 8)
         .expect("the version is written");
+    // The command ring's correlation ids are taken in order, a client's id first and
+    // then one for each command: two ids taken here, one before and one after, differ
+    // by one when the client between them took none.
+    let ring = cavalry_shm::command_ring::CommandRing::open(dir.path(), true).expect("the ring");
+    let ids = ring
+        .producer(cavalry_driver::spec::DRIVER_TIMEOUT)
+        .expect("a producer");
+    let before = ids.next_correlation_id();
     let error = match Cavalry::connect_to(dir.path()) {
         Ok(_) => panic!("a client attached to a counters file of version 0"),
         Err(error) => error.to_string(),
@@ -430,6 +438,11 @@ fn a_client_refuses_an_older_drivers_counters_file_before_it_sends_a_command() {
     ] {
         assert!(error.contains(part), "{part}: {error}");
     }
+    assert_eq!(
+        ids.next_correlation_id(),
+        before + 1,
+        "the client that refused took no client id and sent no command"
+    );
     assert_eq!(
         std::fs::read_dir(dir.path().join("clients"))
             .expect("the directory of the locks")

@@ -946,6 +946,13 @@ impl Registry {
     /// `correlation_id`, which the driver has now answered: it announces nothing more
     /// for that subscription. Returns whether one was forgotten.
     pub(crate) fn removed(&mut self, correlation_id: i64) -> bool {
+        // A correlation id is 0 or more. The values below it are this field's own, for
+        // a subscription that has sent no removal and for one that could not: an
+        // event that carried one of them, as an error the driver could not place may,
+        // must forget neither.
+        if correlation_id < 0 {
+            return false;
+        }
         let found = self.subscriptions.iter().position(|registration| {
             registration.removal.load(Ordering::Acquire) == correlation_id
         });
@@ -2298,6 +2305,58 @@ mod tests {
         assert!(registry.get(1).is_none());
         assert!(registry.get(2).is_some());
         assert_eq!(registry.sweep(), 0);
+    }
+
+    /// A registration whose subscription sent `remove subscription` is kept until the
+    /// driver has answered that command: until then the driver may announce an image
+    /// for the subscription, and the conductor must still know the registration to
+    /// store that image's release word (ADR 0179). One whose removal could not be
+    /// written is kept, since the driver keeps the subscription. Only one whose halves
+    /// went with no removal at all, an add the driver refused, is forgotten at a sweep.
+    #[test]
+    fn a_removed_subscriptions_registration_is_kept_until_the_driver_has_answered() {
+        use crate::subscription::REMOVAL_NOT_SENT;
+        use std::sync::atomic::Ordering;
+        let mut registry = Registry::with_capacity(4);
+        let (removed, removed_incoming, removed_retired) = registration(1);
+        let (unsent, unsent_incoming, unsent_retired) = registration(2);
+        let (refused, refused_incoming, refused_retired) = registration(3);
+        // What `Subscription::remove` stores before it writes its command.
+        removed.removal.store(77, Ordering::Release);
+        unsent.removal.store(REMOVAL_NOT_SENT, Ordering::Release);
+        for registration in [removed, unsent, refused] {
+            assert!(registry.admit(registration));
+        }
+        assert!(registry.removing(), "one waits for its answer");
+        drop((removed_incoming, removed_retired));
+        drop((unsent_incoming, unsent_retired));
+        drop((refused_incoming, refused_retired));
+        assert_eq!(registry.sweep(), 1, "the add the driver refused, alone");
+        assert!(registry.get(3).is_none());
+        let kept = registry.get(1).expect("kept until the driver answers");
+        assert!(
+            kept.images.peer_dropped(),
+            "and known as a subscription whose handle is gone, so that an image \
+             announced for it is released and not queued"
+        );
+        assert!(registry.get(2).is_some());
+        assert_eq!(registry.sweep(), 0);
+        // Another command's answer forgets nothing; the removal's own does, once.
+        assert!(!registry.removed(76));
+        assert!(!registry.removed(REMOVAL_NOT_SENT));
+        assert!(
+            !registry.removed(crate::subscription::NOT_REMOVED),
+            "nor a subscription that has sent no removal: an event with no correlation \
+             id of its own must not take a live subscription's images away"
+        );
+        assert!(registry.removed(77));
+        assert!(registry.get(1).is_none());
+        assert!(!registry.removed(77));
+        assert!(!registry.removing());
+        assert!(
+            registry.get(2).is_some(),
+            "the driver was never told of this one"
+        );
     }
 
     // Vectors from `spec/vectors/client-protocol.json`, by name.
