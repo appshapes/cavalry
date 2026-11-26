@@ -100,7 +100,10 @@ conflict: a conflict is resolved in place, as step 4 says.
    inline: it is the commit message on `master`, so it is the review record in full,
    built from the branch's commit messages the way the loop's `open-pr` job builds it
    from the agent's: what changed, which invariant by number, the evidence, and what CI
-   does not check (the `just fuzz` result after a parser change). A bench table is not
+   does not check (the `just fuzz` result after a parser change). The evidence says
+   which gates ran on the laptop and that it is a Mac: no check runs the change on
+   macOS before the week's run (ADR 0170), so that line is its macOS result until
+   then, and the reviewer reads it. A bench table is not
    owed: no change takes a bench host, and the latency gate runs each night on `master`
    (ADR 0139). End it with `Closes #<issue>` when an
    issue exists, and with nothing after that: **no attribution lines**, in the body
@@ -253,9 +256,7 @@ gh pr checks <number>
   yours. A red run there is yours to fix forward, before the work item and before
   any other work. It has one job, `gates (linux)`: no bench job (ADR 0139), and no
   macOS job, since the macOS gates run each week at `master`'s head and at a release
-  (ADR 0170; `docs/how-to/read-the-weekly-run-of-the-macos-gates.md`). The gates you
-  ran on the laptop are the change's macOS result until then, so say in the body
-  what ran there. Then comment the commit hash and the run on the work item (`brigade
+  (ADR 0170; `docs/how-to/read-the-weekly-run-of-the-macos-gates.md`). Then comment the commit hash and the run on the work item (`brigade
   work-item comment <number>`, the text on stdin), and run `just tidy`: it retires the
   branch locally, with its worktree, and GitHub has already deleted it on origin. The
   work item moves to Done only when this was its last pull request and every "Done

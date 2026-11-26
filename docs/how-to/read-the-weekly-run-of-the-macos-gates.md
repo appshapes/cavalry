@@ -38,7 +38,10 @@ red week is not a red `master`.
    at the head of `master`. In a terminal the first column is a mark: `✓` for a run
    that passed and `X` for one that did not. A run that passed needs nothing more.
    `gh run view <run id>` says whether an `X` failed or was cancelled. Either is a
-   red week. The `/next-task` skill reads the same lines before it names a task.
+   red week, with one exception: a run that waited behind another and was cancelled
+   with no job, because a run started by hand took its place. The run that took its
+   place, the line above it, is then the week's result. The `/next-task` skill reads
+   the same lines before it names a task.
 
 2. For a red week, read which step failed:
 
