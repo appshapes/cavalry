@@ -1192,11 +1192,14 @@ impl Conductor {
             let now = now_nanos();
             if self.duty_cycle(now) == 0 {
                 if let Some((watched, parks_overdue)) = &watch
-                    && let Some(due) = watched.rescue(now)
-                    && due != counted
+                    && let Some((thread, due)) = watched.overdue(now)
                 {
-                    counted = due;
-                    parks_overdue.increment();
+                    // Counted before the watch is woken, as the watch counts.
+                    if due != counted {
+                        counted = due;
+                        parks_overdue.increment();
+                    }
+                    thread.unpark();
                 }
                 self.idler.idle();
             } else {

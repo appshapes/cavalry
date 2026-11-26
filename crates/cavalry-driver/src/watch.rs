@@ -95,15 +95,14 @@ pub(crate) struct Watched {
 }
 
 impl Watched {
-    /// Unparks the watch when its park is overdue, and returns that park's due time.
-    /// The conductor calls it on an idle pass, one load and one compare, and may
-    /// call it many times before the watch has woken and cleared its due time: it
-    /// counts the park when the due time is one it has not counted.
-    pub(crate) fn rescue(&self, now: i64) -> Option<i64> {
+    /// The watch's thread and its park's due time, when that park is overdue: for the
+    /// conductor to count and then unpark. The conductor calls it on an idle pass, one
+    /// load and one compare, and may call it many times before the watch has woken
+    /// and cleared its due time: it counts the park when the due time is one it has
+    /// not counted, and unparks the watch each time.
+    pub(crate) fn overdue(&self, now: i64) -> Option<(&Thread, i64)> {
         let due = self.due.overdue(now)?;
-        let thread = self.thread.get()?;
-        thread.unpark();
-        Some(due)
+        Some((self.thread.get()?, due))
     }
 }
 
@@ -139,14 +138,16 @@ impl Watch {
             let now = now_nanos();
             for ((thread, due), counted) in self.threads.iter().zip(&mut counted) {
                 if let Some(due) = due.overdue(now) {
-                    // The thread reads its work and its stop flag as it wakes. A thread
-                    // that woke by itself between the load and this leaves a token, and
-                    // its next park returns at once: one duty cycle.
-                    thread.unpark();
+                    // Counted before the thread is woken, so that the counter never
+                    // lags the thread it explains.
                     if *counted != due {
                         *counted = due;
                         self.parks_overdue.increment();
                     }
+                    // The thread reads its work and its stop flag as it wakes. A thread
+                    // that woke by itself between the load and this leaves a token, and
+                    // its next park returns at once: one duty cycle.
+                    thread.unpark();
                 }
             }
         }
