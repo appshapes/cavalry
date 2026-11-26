@@ -53,8 +53,8 @@ decision's commit. Each goes through one of four methods of `cavalry-shm`'s `Cou
 
 | Record | Stored in | By which thread | Its handle, and whether it can be shared |
 | --- | --- | --- | --- |
-| An image's position, `subscription.position` | `cavalry-client`, `subscription.rs`: `poll` (line 387), `controlled_poll` (508), `bounded_controlled_poll` (573), `bounded_poll_at` (646) | The thread that polls the subscription | In the image, which its subscription holds and polls by `&mut`: one thread at a time. The conductor takes it in `announced` and hands it over a queue |
-| The conductor's own counter, `client.conductor_parks_overdue` | `conductor.rs`, `publish_overdue` (501) | The client's conductor | In the conductor, which no other thread reaches |
+| An image's position, `subscription.position` | `cavalry-client`, `subscription.rs`: `poll` (line 389), `controlled_poll` (510), `bounded_controlled_poll` (575), `bounded_poll_at` (648) | The thread that polls the subscription | In the image, which its subscription holds and polls by `&mut`: one thread at a time. The conductor takes it in `announced` and hands it over a queue |
+| The conductor's own counter, `client.conductor_parks_overdue` | `conductor.rs`, `publish_overdue` (504) | The client's conductor | In the conductor, which no other thread reaches |
 | A counter the client added: a cluster session's `cluster.replies_stale` | `cluster.rs`, `ClusterSession::poll` (760) | The thread that polls the session | The crate's `Counter`, which is not `Clone` and sends `remove counter` when it is closed or dropped |
 | A cluster service's counters | `service.rs`: `Replies::reply` (1113, 1151, 1161), `restore` (1425, 1429, 1430), `store_counts` (1959 to 1961), `snapshot` (2160, 2172, 2190, 2195) | The thread that polls the service | The same |
 | A cluster member's counters | `cavalry-raft`: `module.rs`, `Stored::add` (2760) and `Stored::store` (2771); `timers.rs` (281, 351); `toggle.rs` (61, 143, 144); `snapshot.rs` (236, 350) | The member's consensus thread | The same |

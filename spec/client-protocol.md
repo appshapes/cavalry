@@ -1067,7 +1067,10 @@ set that owner's word.
   until the client has gone.
 
 A client sends `remove subscription` and `remove counter` after the handles they
-concern are given up. A handle on a record belongs to one thread at a time, and is not
+concern are given up. A client that is closed sends neither, nor `remove publication`:
+the driver removed everything of it when it closed or was timed out, and a command
+from a client the driver has forgotten is a new client's first ("The driver
+directory"). A handle on a record belongs to one thread at a time, and is not
 copied. A caller of the C ABI that uses a handle from a second thread while the first
 closes it has broken that, and the fault is the caller's (`spec/c-abi.md`). So has a
 process that the client's process forked and that closes, drops or polls what it
