@@ -1201,9 +1201,10 @@ const MEMBER_COUNTS: [CounterId; 18] = [
 /// by the member's id (`spec/cluster.md`, "Counters", "Snapshots", "Timers"): its
 /// dropped replies when it first opens its member's log; two for a start from a
 /// snapshot, before it reads one; and five together, two of its snapshots and three of
-/// its timers, at the first of its first snapshot, the first thing it has to tell its
-/// member of a timer and the first timer event it passes over. It holds each from
-/// then to its close, and the driver frees them when its client closes or times out.
+/// its timers, when it first opens its member's log too (ADR 0168), where a service of
+/// a build before that ADR added them at the first of its first snapshot, the first
+/// thing it had to tell its member of a timer and the first timer event it passed
+/// over. It holds each from then to its close, and the driver frees them when its client closes or times out.
 /// So a member with none of them in its driver's counters has no service beside it
 /// that has opened its log or begun a start from a snapshot (ADR 0167). A program
 /// that reads the committed log and is no service adds none. A new counter that a
@@ -2331,10 +2332,10 @@ fn member_findings(
     // does not read what it is told: the gauge's text, with both counts. A service
     // tells its member nothing while it reads its history after a start, so one run
     // may catch that: the finding asks for a second. A leader beside which no
-    // service has added the gauge is told of in nothing: an application that
-    // schedules no timer looks the same in the counters file: a service adds the
-    // gauge with its first snapshot, its first timer or the first timer event it
-    // passes over, whichever comes first.
+    // service has added the gauge is told of in nothing here: no service has opened
+    // its log, which `cluster-no-service` below names, or the service is of a build
+    // before ADR 0168, which added the gauge with its first snapshot, its first
+    // timer or the first timer event it passed over.
     if leads
         && closed
         && member.timers == Some(0)
@@ -8273,7 +8274,8 @@ mod tests {
 
     /// A leader that holds no timer is named when the service beside it has timers
     /// pending, with both counts and what to check; a leader beside which no service
-    /// has added its gauge, as beside an application that schedules no timer, a
+    /// has added its gauge, as beside a service of a build before ADR 0168 whose
+    /// program schedules no timer, a
     /// leader that holds timers, a leader beside a service with none pending, a
     /// follower and a member of a build without the gauge are told of in nothing
     /// (ADR 0151). A member that removed

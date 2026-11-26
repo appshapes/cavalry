@@ -160,7 +160,10 @@ commit path runs per message.
   with `offer(payload)`, up to 1,344 bytes an entry. A consensus message whose step
   faults does not take the rest of its poll with it: `do_work()` hands every message
   the poll read to the election, as the next cycle would have, and returns the first
-  fault. An entry that the leader's log publication refuses for a reason that waiting
+  fault. When the read itself then fails in the same cycle, at a later frame or on
+  another image, the member has two faults of one cycle and reports both, the
+  message's first: that `do_work()` returns the message's fault, and the next returns
+  the read's, `RaftError::Poll`, before it reads anything. An entry that the leader's log publication refuses for a reason that waiting
   does not mend, a stream at its largest position, a closed client or an entry longer
   than the publication takes, is an `append` error, `RaftError::Append`, whose message
   says what to do; under back pressure, on a log no member has joined yet and where a

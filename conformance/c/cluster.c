@@ -32,11 +32,13 @@
 #define MESSAGE_LENGTH 5
 /* The timer each service's program schedules when it takes the message: its id, and
  * how long after the message's entry it is due, in the cluster's time. A second, and
- * not the 50 ms this round had first: a service tells its member of a timer only once
- * the poll that took the entry has sent the six commands of its first timer, some 25 ms
- * on a laptop and more on a busy host, so the event of a timer that was wrongly due at
- * once is stamped about as late as a deadline of 50 ms, 49 ms after the message in a run
- * of the Python round, and that margin would let it pass. */
+ * not the 50 ms this round had first: the event of a timer that is due at once is
+ * stamped tens of milliseconds after its message, the time an entry takes to be
+ * committed and read by a service on a laptop, 9 to 42 ms in the Python round's runs
+ * there, and more on a busy host, so a deadline of 50 ms is a thin margin for telling a
+ * timer that was wrongly due at once from one that waited. Before ADR 0168 a service's
+ * first timer waited for its publication to its member too, 49 ms in a run of the
+ * Python round. */
 #define TIMER_ID 7
 #define TIMER_AFTER_MS 1000
 /* The timer each service's program schedules as due at once and cancels in the same

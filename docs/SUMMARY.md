@@ -229,4 +229,5 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0166. Carry the native library inside a client's package, and look for it there first](decisions/0166-carry-the-native-library-inside-a-clients-package-and-look-for-it-there-first.md)
 - [0169. Count a cluster member's failed start, and say what no check holds](decisions/0169-count-a-cluster-members-failed-start-and-say-what-no-check-holds.md)
 - [0170. Run the macOS gates each week and at a release, and not for every commit](decisions/0170-run-the-macos-gates-each-week-and-at-a-release-and-not-for-every-commit.md)
+- [0168. Add a service's counters and its publication to its member when it first opens its member's log](decisions/0168-add-a-services-counters-and-its-publication-to-its-member-when-it-first-opens-its-members-log.md)
 - [0171. Park the idle loops where a stop can wake them, and wake every thread at a stop](decisions/0171-park-the-idle-loops-where-a-stop-can-wake-them-and-wake-every-thread-at-a-stop.md)
