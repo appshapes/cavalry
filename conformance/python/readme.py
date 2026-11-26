@@ -7,6 +7,12 @@ promises after "You will see", runs the program with this Python and
 `PYTHONPATH=clients/python` from the checkout's root, as the README's shell lines do, for
 up to 10 s, and exits 1 unless the program exits 0 and prints that line. The README's
 shell lines around the program, the builds and the driver, are run.sh's own steps.
+
+The program runs without `CAVALRY_FFI_LIBRARY`, which run.sh sets for its own programs
+(work item 504): the README's shell lines do not set it, so the reader's package finds
+the library by its own search, up from `clients/python/cavalry` to the checkout's
+`target/release`, and this is the test of that search. It finds there the library run.sh
+has just built, and run.sh has stopped already where a library sits beside the module.
 Python 3.9 standard library only (ADR 0003).
 """
 
@@ -41,7 +47,10 @@ def example():
 
 def main():
     program, expected = example()
-    environment = dict(os.environ, PYTHONPATH=os.path.join(ROOT, "clients", "python"))
+    # The reader's environment: the README's PYTHONPATH, and no CAVALRY_FFI_LIBRARY, which
+    # the README's shell lines never set (see the module's docstring).
+    environment = {name: value for name, value in os.environ.items() if name != "CAVALRY_FFI_LIBRARY"}
+    environment["PYTHONPATH"] = os.path.join(ROOT, "clients", "python")
     try:
         result = subprocess.run([sys.executable, "-"], input=program, capture_output=True, text=True,
                                 timeout=WAIT_SECONDS, cwd=ROOT, env=environment)
