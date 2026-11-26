@@ -39,6 +39,14 @@ that is no int64 refused before the ABI is called; the
 session's close as an entry every service is handed; a session and a service closed
 twice, and a service closed after its client.
 
+Then a measurement, printed and gated only for what must hold: 200 messages, one at a
+time, at each of which every service's program schedules one more timer, due at once.
+Each is handed to every service once, at one position and no earlier than its message.
+The round prints how long after its message each was stamped by the leader, in the
+milliseconds of the cluster's time, as a histogram, and how long the leader's service
+waited from the schedule to the timer, by this process's clock, beside what the run's
+first timers took (work item 462; ADR 0168).
+
 Then a report, printed and never gated: how many polls the three services made, how many
 took over a millisecond, and the longest, which is how long a poll held the GIL
 (clients/python/README.md, "The call").
@@ -74,6 +82,9 @@ CANCELLED_ID = 78          # the timer that is scheduled and cancelled in the sa
 # margin would let it pass. The round prints what it was in its own run.
 TIMER_AFTER_MS = 1000
 HOUR_MS = 3_600_000        # the deadline its first schedule gives it, which the second replaces
+LATER_MESSAGE = b"later"   # the prefix of a message at which each program schedules one more timer, due at once
+LATER = 200                # how many of them the round sends, one at a time
+LATER_ID = 1000            # the id of the first of their timers; the others count on from it
 INT64_MIN, INT64_MAX = -(2 ** 63), 2 ** 63 - 1
 REFRESH_SECONDS = 1.2      # a timer refresh interval of spec/cluster.md, "Values", 1 s, and more
 SENT = _abi.CAVALRY_CLUSTER_REPLY_SENT
@@ -131,6 +142,10 @@ class Served:
         self.timers = []       # every timer handed over: (position, correlation id, the event's time)
         self.timer_at = None   # when the last was handed over, by this process's monotonic clock
         self.timer_codes = []  # what the schedules and the cancel at TIMER_MESSAGE answered
+        self.first_at = None   # when the program scheduled at TIMER_MESSAGE, by this process's clock, in ns
+        self.first_took = None  # from then to the first timer it was handed, in ns
+        self.later_scheduled = {}  # a later timer's id -> (its message's time, when scheduled in ns, the answer)
+        self.later = {}        # a later timer's id -> (its position, its event's time, when handed over in ns)
         self.refused_inside = "no call"  # what a schedule of an id above int64 from inside the handler did
         self.polls = 0         # the report: every poll, those over a millisecond, and the longest
         self.over_a_millisecond = 0
@@ -144,7 +159,15 @@ class Served:
         if entry.type != MESSAGE or entry.session_id < 0:
             if len(body) != 0:
                 fail(f"an entry that is no session's message has a payload of {len(body)} bytes: {values}")
-            if entry.type == TIMER:
+            if entry.type == TIMER and LATER_ID <= entry.correlation_id < LATER_ID + LATER:
+                if entry.correlation_id in self.later:
+                    fail(f"the service beside member {self.member} was handed timer {entry.correlation_id} a "
+                         f"second time, at position {entry.position}")
+                self.later[entry.correlation_id] = (entry.position, entry.timestamp, time.perf_counter_ns())
+                self.timer_at = time.monotonic()
+            elif entry.type == TIMER:
+                if self.first_took is None and self.first_at is not None:
+                    self.first_took = time.perf_counter_ns() - self.first_at
                 self.timers.append((entry.position, entry.correlation_id, entry.timestamp))
                 self.timer_at = time.monotonic()
             elif entry.correlation_id != 0:
@@ -202,6 +225,13 @@ class Served:
                                 service.cancel_timer(CANCELLED_ID),
                                 service.schedule_timer(INT64_MIN, entry.timestamp),
                                 service.schedule_timer(INT64_MAX, entry.timestamp)]
+            self.first_at = time.perf_counter_ns()
+        if payload.startswith(LATER_MESSAGE):
+            # One more timer, due at once, at a message of its own: what a timer costs
+            # once a service has scheduled its first.
+            timer_id = LATER_ID + int(payload[len(LATER_MESSAGE):])
+            answer = service.schedule_timer(timer_id, entry.timestamp)
+            self.later_scheduled[timer_id] = (entry.timestamp, time.perf_counter_ns(), answer)
         self.codes.setdefault(payload, []).append(code)
         self.messages.setdefault(payload, []).append(values)
         self.entries.append(values)
@@ -578,6 +608,37 @@ def main():
           f"{CANCELLED_ID}, due at once and cancelled in the same handling, handed to none; both calls refused "
           f"from outside the handler, and what is no int64 before the ABI is called, from inside the handler too")
 
+    # 9c. Later timers: what a timer costs a service that has scheduled one already.
+    # One message at a time, and the next when every service has been handed the
+    # timer of the last, so that each is measured alone.
+    for n in range(LATER):
+        offer(session, LATER_MESSAGE + b"%03d" % n, served, answered)
+        wait(f"each service is handed the timer of later message {n}",
+             lambda n=n: all(LATER_ID + n in s.later for s in served), served, answered)
+    ids = range(LATER_ID, LATER_ID + LATER)
+    for s in served:
+        answers = {s.later_scheduled[i][2] for i in ids}
+        if answers != {SCHEDULED}:
+            fail(f"the service beside member {s.member} was answered {answers} for its {LATER} later schedules; "
+                 f"expected {SCHEDULED} for each")
+        if [s.later[i][:2] for i in ids] != [served[0].later[i][:2] for i in ids]:
+            fail(f"the service beside member {s.member} was handed its later timers at other positions or times "
+                 f"than the service beside member {served[0].member}")
+        early = [i for i in ids if s.later[i][1] < s.later_scheduled[i][0]]
+        if early:
+            fail(f"the service beside member {s.member} was handed the later timers {early} with a time before "
+                 f"their messages'")
+    stamped = sorted(served[0].later[i][1] - served[0].later_scheduled[i][0] for i in ids)
+    counts = ", ".join(f"{ms} ms: {stamped.count(ms)}" for ms in sorted(set(stamped)))
+    waited = sorted((leader.later[i][2] - leader.later_scheduled[i][1]) // 1000 for i in ids)
+    quantile = lambda q: waited[min(len(waited) - 1, int(q * len(waited)))]  # noqa: E731
+    print(f"conformance/python: cluster round: {LATER} later timers, each due at once at a message of its own and "
+          f"handed to three services once: stamped by the leader after their message's time, {counts}; the "
+          f"service beside the leader was handed each {quantile(0.5):,} us after it scheduled it at the p50, "
+          f"{quantile(0.99):,} us at the p99 and {waited[-1]:,} us at the most, of {LATER}, where its first timers "
+          f"of this run took {leader.first_took // 1000:,} us and were stamped {at_once} ms after their message "
+          f"(not gated)")
+
     # 10. The session before its client. Its close is an entry every service is handed,
     # after which the log holds no session open.
     session.close()
@@ -600,9 +661,9 @@ def main():
     while time.monotonic() < until:
         cycle(served)
     for s in served:
-        if len(s.timers) != 3:
-            fail(f"the service beside member {s.member} was handed the timers {s.timers} by {REFRESH_SECONDS} s "
-                 f"after the last; expected three, once each")
+        if len(s.timers) != 3 or len(s.later) != LATER:
+            fail(f"the service beside member {s.member} was handed the timers {s.timers} and {len(s.later)} later "
+                 f"ones by {REFRESH_SECONDS} s after the last; expected three and {LATER}, once each")
 
     # 11. Each service before its own client, twice; and the last after its client.
     for s in served[:-1]:

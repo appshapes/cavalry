@@ -84,7 +84,7 @@ constants in this version:
 | egress | 102 | the leader's, one per open session; the service's that answers the term's entries, the one beside the member that led the term, one per open session, for its replies ("Replies"); and any member's, one per connect it answers with a redirect or a refusal, at most the pending answers of "Values" at a time; each on the client's response channel | the client's, on its response channel |
 | service log | 104 | the member's driver's, one for each service: a replay of the member's recording of the log that follows it, on `cavalry:ipc` ("The service") | the service's, on `cavalry:ipc` |
 | log replay | 103 | the member's driver's, one: a replay of the member's recordings of the log that follows them, on `cavalry:ipc`, which the member's own consensus module reads as a service reads the service log, for its sessions ("Sessions"; ADR 0116). A stream of its own, so that this replay and a service's never reach each other's subscription | the consensus module's, on `cavalry:ipc` |
-| consensus module | 105 | a service's, on `cavalry:ipc`, from the first of its first snapshot, the first thing it has to tell of a timer and the first timer event it passes over, to its close: the service acks by which it tells the member on its driver of a snapshot it took ("Snapshots"; ADR 0131), and the schedule timer and cancel timer by which it tells that member of its timers ("Timers"; ADR 0151) | the member's consensus module's, on `cavalry:ipc`, from its start |
+| consensus module | 105 | a service's, on `cavalry:ipc`, from its first open of its member's log to its close ("What a service tells its member"; ADR 0168): the service acks by which it tells the member on its driver of a snapshot it took ("Snapshots"; ADR 0131), and the schedule timer and cancel timer by which it tells that member of its timers ("Timers"; ADR 0151) | the member's consensus module's, on `cavalry:ipc`, from its start |
 | service snapshot replay | 109 | the member's driver's, one for each start of a service from a snapshot: a replay of the snapshot's recording, whole, on `cavalry:ipc` ("Snapshots", "A service's start"; ADR 0132). A stream of its own, subscribed to only while a snapshot is read: on the service log stream a service that is not reading would hold the replay at its own position, as it holds another service's | the starting service's, on `cavalry:ipc`, while it reads its snapshot |
 
 The members' ingress endpoints, listed as a redirect lists them ("Session event,
@@ -726,18 +726,15 @@ timeout, which is a member that is not running. The service asks the stop of a
 recording that has not stopped, reports the failure to its program, counts it in
 `cluster.service_snapshots_failed`, and reads on when its program next reads. A
 service adds its counters ("Counters", the ones a service adds) before its
-publications, at the first of its first snapshot, the first thing it has to
-tell its member of a timer and the first timer event it passes over ("The
-service", "Timers"), so that a
+publications, when it first opens its member's log ("The service", "Timers",
+"What a service tells its member"; ADR 0168), so that a
 publication the driver refuses at a snapshot is counted, as that snapshot's
 failure. Two failures are counted in no counter of the service's: a counter that
 the driver refuses, for which there is no counter yet, and the publication on the
-consensus module stream when the driver refuses it at a read, where the service
-has something to tell of a timer or an event to pass over and no snapshot fails.
-The service reports each to its program, as the error of that snapshot or that
-read, and its next snapshot, or its next read with something to tell of a timer or
-an event to pass over, adds what is missing. The driver counts every command it
-refuses (`client_protocol.errors`; ADR 0159). A
+consensus module stream when the driver refuses it at a read, where no snapshot
+fails. The service reports each to its program, as the error of that snapshot or
+that read, and its next snapshot, or its next read, adds what is missing. The
+driver counts every command it refuses (`client_protocol.errors`; ADR 0159). A
 snapshot whose ack the stream took is counted in `cluster.service_snapshots_taken`.
 
 **The member's list of a service's snapshots.** A member subscribes to the consensus
@@ -2364,16 +2361,20 @@ handed the same event again, which is the same handing.
 
 **What a service tells its member.** The service holds one publication on
 `cavalry:ipc` and the consensus module stream, the one its service acks are on
-("Snapshots"), from the first of its first snapshot, the first thing it has to
-tell its member of a timer and the first timer event it passes over, to its
-close. What it has to tell is a timer that an entry it took left pending, a
+("Snapshots"), from its first open of its member's log to its close. It adds its
+counters and then that publication in the read that first opens the log, before
+that read hands its program an entry, whatever the program does: adding a
+publication is the one command of a service's that takes long, since the driver
+makes the whole of a new log resident, and no read that has a timer to tell
+waits for it (ADR 0168). What it has to tell is a timer that an entry it took left pending, a
 cancel, or the timers of the snapshot it started from, which it has to tell when
 it has read its history, though it reads no entry. A driver that refuses that
 publication, or the counters the service adds before it ("Snapshots", "A
 service's snapshot"), fails no call that the program makes in a handler and
 changes no timer: the service reports the refusal to its program as the error of
-that read, and adds them again at its next read while it has something to tell
-(ADR 0159).
+that read, once the read's entries are taken, and adds what is missing at each
+read after it, before the read's entries (ADR 0159, ADR 0168). Until it has the
+publication it tells its member nothing, and keeps what it has to tell.
 
 On that publication the service tells the member on its driver what its timers
 are. What it tells follows from the entries its program has taken, and from
