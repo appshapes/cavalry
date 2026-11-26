@@ -21,9 +21,8 @@ What that costs was seen the same day. A test process that had stood on the lapt
 for 31 hours, a driver and two clients with seven waiting threads, was sampled twice
 four seconds apart: one client's conductor, the driver's sender and its receiver each
 stood in `nanosleep`, and the replayer in a timed wait on a semaphore, each in one
-stack in every sample. Four of seven threads were held, which is about what the rate
-gives for a day and a third. A driver left running on such a machine goes silent one
-thread at a time.
+stack in every sample. Four of seven threads were held. A driver left running on
+such a machine goes silent one thread at a time.
 
 A held conductor is noticed from outside in 10 s, by its clients' `driver-timeout`.
 A held recorder, sender, receiver or replayer is not noticed by anything.
@@ -43,9 +42,19 @@ The watch's own park can be lost as any other can. It stores its due time too, a
 the conductor reads it on each idle pass, one load and one compare, and unparks the
 watch when it is more than 200 ms past due, counting it in the same counter. So each
 of the two gets the other back. A lost wake-up then costs its thread a stall of at
-most 300 ms, or of a second and 300 ms for a thread that held nothing to do. Both
-lost within the same tenth of a second leaves the driver as ADR 0171 describes it:
-the product of two rates of one in tens of millions.
+most 300 ms past its park's timeout, the grace and one period of the watch, while
+the watch's own park is on time. A park is counted once, however many looks it takes
+to end: a conductor that spins sees the watch overdue many times before the watch
+has woken.
+
+What is not ended: the conductor's park and the watch's lost together, within the
+300 ms in which one would have ended the other. That leaves the driver as ADR 0171
+describes it, and is the product of two rates of one in tens of millions. The
+watch's park lost together with another thread's is ended in two steps, the
+conductor's of the watch and then the watch's of the thread, about 600 ms in all.
+And a conductor that finds work on every pass looks at the watch on none of them: a
+watch whose park is lost in such a stretch leaves the other four unwatched until
+the conductor next idles.
 
 The watch is on where a timed wait has been seen to outlive its timer, which is
 macOS, and off elsewhere: on Linux 381 million waits showed none, and a thread and

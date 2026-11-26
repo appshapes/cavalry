@@ -43,15 +43,15 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   `reset()` after one that did. A backoff parks its thread, for 1 µs to 1 ms, so a
   loop that another thread stops is stopped by its flag and then an `unpark` of its
   thread, and the stop does not wait on the park's timeout: `Driver::close` does that
-  for each of the driver's five threads (ADR 0171).
+  for every thread of the driver (ADR 0171).
   On macOS the driver has a sixth thread, the watch, for the time before a stop. A
   timed wait there is, about once in 40 million, never ended by its timer, and its
   thread would do no work until something woke it. Each of the five stores when its
   park is due before it parks, and the watch, which parks a tenth of a second at a
   time, unparks one whose park is more than 200 ms overdue and counts it in
   `driver.parks_overdue`. The conductor does the same for the watch. So a lost wake-up
-  costs a stall of at most 300 ms, or of a second and 300 ms for a thread that held
-  nothing to do, and `doctor` names it from the counter (ADR 0176;
+  costs a stall of at most 300 ms past the park's timeout, while the watch's own park
+  is on time, and `doctor` names it from the counter (ADR 0176;
   `docs/how-to/find-a-wait-that-does-not-return.md`). The hook of
   `Driver::start_with_threads` does not run on the watch, which is on no message's
   path. On other systems there is no watch and the five store nothing.

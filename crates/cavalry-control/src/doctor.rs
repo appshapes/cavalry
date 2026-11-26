@@ -5782,7 +5782,7 @@ mod tests {
             found.message
         );
         for words in [
-            "a stall of up to 300 ms",
+            "a stall of up to 300 ms past its timeout",
             "nothing to do",
             "docs/how-to/find-a-wait-that-does-not-return.md",
             "could not run the driver's threads",

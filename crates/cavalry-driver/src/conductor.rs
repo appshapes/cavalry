@@ -1184,12 +1184,18 @@ impl Conductor {
         // watch itself, whose own park this thread ends when it is overdue: each of the
         // two gets the other back (ADR 0176).
         self.idler.watch(due);
+        // The due time of the watch's park last counted: an idle pass can come many
+        // times before the watch has woken and cleared its due time, under busy-spin
+        // every few nanoseconds, and each unparks it and one counts it.
+        let mut counted = 0;
         while !stop.load(Ordering::Acquire) {
             let now = now_nanos();
             if self.duty_cycle(now) == 0 {
                 if let Some((watched, parks_overdue)) = &watch
-                    && watched.rescue(now)
+                    && let Some(due) = watched.rescue(now)
+                    && due != counted
                 {
+                    counted = due;
                     parks_overdue.increment();
                 }
                 self.idler.idle();

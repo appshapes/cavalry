@@ -118,7 +118,7 @@ lost. It was not seen on Linux, or on macOS 26.3 in a virtual machine, in more t
   thread that is the caller's: a client's wait for the driver's answer, or a test's
   own `std::thread::sleep`.
 - **A driver or a client does no work, and no stop was asked for.** On macOS a
-  driver's watch ends a park of one of its five threads within 300 ms of its
+  driver's watch ends a park of one of its five threads within 300 ms past its
   timeout, and counts it: `cavalry doctor` then prints `driver.parks_overdue` with
   the count. A driver thread that stays in one park in every sample of step 1 for
   longer than that is not held by this fault alone. A client's conductor has no

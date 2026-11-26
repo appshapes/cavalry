@@ -48,7 +48,7 @@ pub enum DriverThread {
     Receiver,
 }
 
-/// What each driver thread runs first, once, before its loop. A caller that owns the
+/// What each of the driver's five threads runs first, once, before its loop. A caller that owns the
 /// host's CPUs pins the conductor to a CPU of its own here and leaves the recorder and
 /// the replayer on the housekeeping CPUs, as the bench does under `--pin` (card 136):
 /// the threads are spawned with the caller's affinity otherwise, and a conductor that
@@ -77,6 +77,10 @@ pub struct Driver {
     /// The watch, where the driver has one: the thread that ends a park of the other
     /// five that outlived its timeout (ADR 0176).
     watch: Option<JoinHandle<()>>,
+    /// For a test: where each of the five says when its park is due, in the watch's
+    /// order.
+    #[cfg(test)]
+    dues: Option<[Arc<watch::WakeDue>; 5]>,
     /// The lock on the directory, held from before the directory was read until the
     /// threads have stopped (`spec/client-protocol.md`, "The driver directory"; ADR
     /// 0079).
@@ -183,8 +187,8 @@ impl Driver {
         Self::start_with(dir, log_dir, IdleStrategy::Backoff)
     }
 
-    /// [`Driver::start`] with the idle strategy of every thread chosen: what each does
-    /// on a duty cycle that found no work.
+    /// [`Driver::start`] with the idle strategy of each of the five threads chosen: what
+    /// each does on a duty cycle that found no work.
     pub fn start_with(
         dir: impl AsRef<Path>,
         log_dir: impl AsRef<Path>,
@@ -193,8 +197,8 @@ impl Driver {
         Self::start_with_threads(dir, log_dir, idle, Arc::new(|_| {}))
     }
 
-    /// [`Driver::start_with`] with a hook each thread runs first, once, before its loop,
-    /// named the [`DriverThread`] it is on: where a caller pins the conductor, the
+    /// [`Driver::start_with`] with a hook each of the five threads runs first, once,
+    /// before its loop, named the [`DriverThread`] it is on: where a caller pins the conductor, the
     /// sender and the receiver and places the recorder and the replayer
     /// ([`ThreadStart`]).
     pub fn start_with_threads(
@@ -426,6 +430,8 @@ impl Driver {
         // The watch last: it needs the five threads, and the conductor learns its
         // thread through `watched` once it has started. No hook runs on it: it is on no
         // message's path, and it parks for a tenth of a second at a time.
+        #[cfg(test)]
+        let test_dues = dues.clone();
         let watch_handle = match dues {
             None => None,
             Some(dues) => {
@@ -489,6 +495,8 @@ impl Driver {
             sender: Some(sender_handle),
             receiver: Some(receiver_handle),
             watch: watch_handle,
+            #[cfg(test)]
+            dues: test_dues,
             dir_lock: Some(dir_lock),
         })
     }
@@ -614,12 +622,18 @@ mod tests {
 
     /// A hook that has each thread of `held` park for an hour where it would park for
     /// its timeout, which stands for the park whose timeout never comes, and counts
-    /// the threads that have started.
-    fn holding(held: &'static [DriverThread], started: &Arc<AtomicUsize>) -> ThreadStart {
+    /// the threads that have started. With `once`, the hour is for the thread's first
+    /// park alone, and the thread parks as it should once that park has been ended.
+    fn holding(
+        held: &'static [DriverThread],
+        once: bool,
+        started: &Arc<AtomicUsize>,
+    ) -> ThreadStart {
         let started = Arc::clone(started);
         Arc::new(move |thread| {
             if held.contains(&thread) {
                 idle::tests::PARK_FOR_TEST.set(Some(idle::tests::NEVER));
+                idle::tests::PARK_FOR_TEST_ONCE.set(once);
             }
             started.fetch_add(1, Ordering::AcqRel);
         })
@@ -665,7 +679,7 @@ mod tests {
             &dir,
             dir.join("log"),
             IdleStrategy::Backoff,
-            holding(ALL, &started),
+            holding(ALL, false, &started),
             Watching::Off,
         )
         .expect("starts");
@@ -681,72 +695,103 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Waits for `what`, or panics with `failure` after 20 s.
+    fn wait_for<T>(failure: &str, mut what: impl FnMut() -> Option<T>) -> T {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(found) = what() {
+                return found;
+            }
+            assert!(std::time::Instant::now() < deadline, "{failure}");
+            std::thread::park_timeout(Duration::from_millis(10));
+        }
+    }
+
     /// The watch ends a park that outlived its timeout, of each of the five threads
-    /// (ADR 0176). One driver for each thread, with a watch, in which that thread alone
-    /// parks for an hour where it would park for its timeout. No other thread of it is
-    /// held, so a count in `driver.parks_overdue` is the watch's unpark of that thread:
-    /// 200 ms after a millisecond for the conductor and the recorder, and 200 ms after
-    /// a second for a replayer, a sender and a receiver with nothing to do.
+    /// (ADR 0176). One driver for each thread, with a watch, in which that thread's
+    /// first park lasts an hour where it would last its timeout, a millisecond at most
+    /// for the conductor and the recorder and a second for a replayer, a sender and a
+    /// receiver with nothing to do. The thread says when that park is due, and the due
+    /// time stands in its slot for as long as it is parked. The watch unparks it, the
+    /// thread goes on, and its slot no longer holds that time: a watch that unparked
+    /// another thread for this slot would leave it there for the hour. The park is
+    /// counted.
     #[test]
     fn the_watch_ends_a_park_that_outlived_its_timeout_for_each_thread() {
-        const EACH: [&[DriverThread]; 5] = [
-            &[DriverThread::Conductor],
-            &[DriverThread::Recorder],
-            &[DriverThread::Replayer],
-            &[DriverThread::Sender],
-            &[DriverThread::Receiver],
+        const EACH: [(&[DriverThread], usize); 5] = [
+            (&[DriverThread::Conductor], CONDUCTOR),
+            (&[DriverThread::Recorder], RECORDER),
+            (&[DriverThread::Replayer], REPLAYER),
+            (&[DriverThread::Sender], SENDER),
+            (&[DriverThread::Receiver], RECEIVER),
         ];
-        for held in EACH {
+        for (held, slot) in EACH {
             let dir = test_dir(&format!("watch-{:?}", held[0]));
             let started = Arc::new(AtomicUsize::new(0));
             let driver = Driver::start_watched(
                 &dir,
                 dir.join("log"),
                 IdleStrategy::Backoff,
-                holding(held, &started),
+                holding(held, true, &started),
                 Watching::On,
             )
             .expect("starts");
-            let deadline = std::time::Instant::now() + Duration::from_secs(20);
-            while parks_overdue(&dir) < 1 {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "the watch did not end the park of the {:?}",
+            let due = Arc::clone(&driver.dues.as_ref().expect("a watch")[slot]);
+            // The first park's due time: the first one the slot holds.
+            let held_due = wait_for(&format!("the {:?} did not park", held[0]), || {
+                Some(due.raw()).filter(|due| *due != 0)
+            });
+            wait_for(
+                &format!(
+                    "the watch did not end the park of the {:?}: it is still parked",
                     held[0]
-                );
-                std::thread::park_timeout(Duration::from_millis(20));
-            }
+                ),
+                || (due.raw() != held_due).then_some(()),
+            );
+            assert!(
+                parks_overdue(&dir) >= 1,
+                "the park of the {:?} was not counted",
+                held[0]
+            );
             close_within_bound(driver, "close returned");
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
 
-    /// The conductor ends the watch's own park when it outlived its timeout (ADR 0176).
-    /// The watch's first park lasts an hour here. No other thread is held, and a watch
-    /// that is parked counts nothing, so a count in `driver.parks_overdue` is the
-    /// conductor's unpark of the watch.
+    /// The conductor ends the watch's own park when it outlived its timeout, and
+    /// counts it once (ADR 0176). The watch's first park lasts an hour here. No other
+    /// thread is held, and a watch that is parked counts nothing, so a count in
+    /// `driver.parks_overdue` is the conductor's unpark of the watch. Under busy-spin
+    /// the conductor's idle passes come every few nanoseconds, and many of them see
+    /// the watch overdue before it has woken: each unparks it, and one counts it.
     #[test]
-    fn the_conductor_ends_the_watchs_park_when_it_outlived_its_timeout() {
-        let dir = test_dir("watch-held");
-        let started = Arc::new(AtomicUsize::new(0));
-        let driver = Driver::start_watched(
-            &dir,
-            dir.join("log"),
-            IdleStrategy::Backoff,
-            holding(&[], &started),
-            Watching::OnAndHeld,
-        )
-        .expect("starts");
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        while parks_overdue(&dir) < 1 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the conductor did not end the watch's park"
+    fn the_conductor_ends_the_watchs_park_and_counts_it_once() {
+        for idle in [IdleStrategy::Backoff, IdleStrategy::BusySpin] {
+            let dir = test_dir(&format!("watch-held-{}", idle.name()));
+            let started = Arc::new(AtomicUsize::new(0));
+            let driver = Driver::start_watched(
+                &dir,
+                dir.join("log"),
+                idle,
+                holding(&[], false, &started),
+                Watching::OnAndHeld,
+            )
+            .expect("starts");
+            wait_for("the conductor did not end the watch's park", || {
+                (parks_overdue(&dir) >= 1).then_some(())
+            });
+            // Long enough for a watch that was counted at every pass to be counted
+            // again, and for the watch to have parked and woken several times since.
+            std::thread::park_timeout(Duration::from_millis(500));
+            assert_eq!(
+                parks_overdue(&dir),
+                1,
+                "one park of the watch, under {}",
+                idle.name()
             );
-            std::thread::park_timeout(Duration::from_millis(20));
+            close_within_bound(driver, "close returned");
+            let _ = std::fs::remove_dir_all(&dir);
         }
-        close_within_bound(driver, "close returned");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A driver without a watch counts nothing and starts no sixth thread: where no
@@ -760,7 +805,7 @@ mod tests {
             &dir,
             dir.join("log"),
             IdleStrategy::Backoff,
-            holding(&[DriverThread::Recorder], &started),
+            holding(&[DriverThread::Recorder], false, &started),
             Watching::Off,
         )
         .expect("starts");

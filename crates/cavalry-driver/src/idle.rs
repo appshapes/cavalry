@@ -1,6 +1,6 @@
 //! What a thread does on a duty cycle that found no work (CLAUDE.md, "Data plane":
 //! busy-spin, yield and backoff, backoff the default): [`IdleStrategy`] names the three,
-//! and [`Idler`] is one of them with its state, which each of the driver's threads
+//! and [`Idler`] is one of them with its state, which each of the driver's five threads
 //! holds and a program's own duty cycle beside the driver can.
 
 use std::sync::Arc;
@@ -152,7 +152,13 @@ impl Idler {
     /// the same watch: for a loop that holds nothing to do and waits to be unparked.
     pub(crate) fn park_for(&self, park: Duration) {
         #[cfg(test)]
-        let actual = tests::PARK_FOR_TEST.get().unwrap_or(park);
+        let actual = {
+            let held = tests::PARK_FOR_TEST.get();
+            if tests::PARK_FOR_TEST_ONCE.get() {
+                tests::PARK_FOR_TEST.set(None);
+            }
+            held.unwrap_or(park)
+        };
         #[cfg(not(test))]
         let actual = park;
         match &self.due {
@@ -221,6 +227,12 @@ pub(crate) mod tests {
         /// An hour stands for the park whose timeout never comes, so that a test passes
         /// only when something unparks the thread.
         pub(crate) static PARK_FOR_TEST: Cell<Option<Duration>> = const { Cell::new(None) };
+    }
+
+    thread_local! {
+        /// For a test: [`PARK_FOR_TEST`] is for this thread's next park alone, so that
+        /// the thread parks as it should once that park has been ended.
+        pub(crate) static PARK_FOR_TEST_ONCE: Cell<bool> = const { Cell::new(false) };
     }
 
     /// A park that would last an hour.

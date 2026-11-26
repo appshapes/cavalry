@@ -11,8 +11,10 @@
 //! [`OVERDUE`] past due, counting each in `driver.parks_overdue`. The watch's own park
 //! can be lost as any other can, so it stores its due time too, and the conductor looks
 //! at it on each idle pass and unparks the watch the same way. A lost wake-up then
-//! costs its thread a stall of at most the period and the grace, 300 ms, and both lost at once
-//! is the product of two rates of one in tens of millions.
+//! costs its thread a stall of at most the period and the grace, 300 ms past its
+//! timeout, while the watch's own park is on time. Only the conductor's and the
+//! watch's lost together are not ended: the product of two rates of one in tens of
+//! millions.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -61,12 +63,20 @@ impl WakeDue {
         self.0.store(NOT_PARKED, Ordering::Release);
     }
 
-    /// Whether the thread is parked and its park was due more than [`OVERDUE`] before
-    /// `now`.
-    pub(crate) fn overdue(&self, now: i64) -> bool {
+    /// The due time of the thread's park, when it is parked and that time is more than
+    /// [`OVERDUE`] before `now`: the park's own name, by which whoever ends it counts
+    /// it once, however many looks it takes to end.
+    pub(crate) fn overdue(&self, now: i64) -> Option<i64> {
         let due = self.0.load(Ordering::Acquire);
-        due != NOT_PARKED
-            && now.saturating_sub(due) > i64::try_from(OVERDUE.as_nanos()).unwrap_or(i64::MAX)
+        (due != NOT_PARKED
+            && now.saturating_sub(due) > i64::try_from(OVERDUE.as_nanos()).unwrap_or(i64::MAX))
+        .then_some(due)
+    }
+
+    /// What the slot holds, for a test: a due time, or 0 for not parked.
+    #[cfg(test)]
+    pub(crate) fn raw(&self) -> i64 {
+        self.0.load(Ordering::Acquire)
     }
 }
 
@@ -85,19 +95,15 @@ pub(crate) struct Watched {
 }
 
 impl Watched {
-    /// Unparks the watch when its park is overdue; returns whether it did. The
-    /// conductor calls it on an idle pass: one load and one compare.
-    pub(crate) fn rescue(&self, now: i64) -> bool {
-        if !self.due.overdue(now) {
-            return false;
-        }
-        match self.thread.get() {
-            Some(thread) => {
-                thread.unpark();
-                true
-            }
-            None => false,
-        }
+    /// Unparks the watch when its park is overdue, and returns that park's due time.
+    /// The conductor calls it on an idle pass, one load and one compare, and may
+    /// call it many times before the watch has woken and cleared its due time: it
+    /// counts the park when the due time is one it has not counted.
+    pub(crate) fn rescue(&self, now: i64) -> Option<i64> {
+        let due = self.due.overdue(now)?;
+        let thread = self.thread.get()?;
+        thread.unpark();
+        Some(due)
     }
 }
 
@@ -119,6 +125,10 @@ impl Watch {
     pub(crate) fn run(self, stop: &AtomicBool) {
         #[cfg(test)]
         let mut first_park = self.first_park;
+        // The due time of the last park counted for each thread: a thread that has
+        // been unparked and has not yet cleared its due time is unparked again at the
+        // next look, and counted once.
+        let mut counted = vec![NOT_PARKED; self.threads.len()];
         while !stop.load(Ordering::Acquire) {
             let park = WATCH_PERIOD;
             #[cfg(test)]
@@ -127,13 +137,16 @@ impl Watch {
             std::thread::park_timeout(park);
             self.own.due.woke();
             let now = now_nanos();
-            for (thread, due) in &self.threads {
-                if due.overdue(now) {
+            for ((thread, due), counted) in self.threads.iter().zip(&mut counted) {
+                if let Some(due) = due.overdue(now) {
                     // The thread reads its work and its stop flag as it wakes. A thread
                     // that woke by itself between the load and this leaves a token, and
                     // its next park returns at once: one duty cycle.
                     thread.unpark();
-                    self.parks_overdue.increment();
+                    if *counted != due {
+                        *counted = due;
+                        self.parks_overdue.increment();
+                    }
                 }
             }
         }
@@ -148,16 +161,16 @@ mod tests {
     fn a_park_is_overdue_only_past_its_due_time_and_the_grace_and_only_while_parked() {
         let due = WakeDue::new();
         let grace = i64::try_from(OVERDUE.as_nanos()).expect("a grace in nanoseconds");
-        assert!(!due.overdue(i64::MAX), "not parked");
+        assert_eq!(due.overdue(i64::MAX), None, "not parked");
         due.parking(1_000, Duration::from_millis(1));
         let at = 1_000 + 1_000_000;
-        assert!(!due.overdue(at), "due now");
-        assert!(!due.overdue(at + grace), "at the grace");
-        assert!(due.overdue(at + grace + 1), "past the grace");
+        assert_eq!(due.overdue(at), None, "due now");
+        assert_eq!(due.overdue(at + grace), None, "at the grace");
+        assert_eq!(due.overdue(at + grace + 1), Some(at), "past the grace");
         due.woke();
-        assert!(!due.overdue(i64::MAX), "woken");
+        assert_eq!(due.overdue(i64::MAX), None, "woken");
         // A park at the clock's start is still a park.
         due.parking(0, Duration::ZERO);
-        assert!(due.overdue(grace + 2));
+        assert_eq!(due.overdue(grace + 2), Some(1));
     }
 }
