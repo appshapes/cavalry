@@ -297,13 +297,22 @@ doctor:
 # `cavalry:ipc` log's 192 MiB, as a container's default /dev/shm of 64 MiB is. A driver
 # whose directory is under it is asked five times for such a log: each ask is error
 # code 12, no log file is left, and the filesystem has afterwards the room it had. It
-# is Linux's failure: making a log's pages resident fails there on a filesystem that
-# cannot back them. A test cannot mount a small filesystem for itself, so `just test`
-# passes this one over, CI's Linux job mounts 64 MiB and runs this, and the test's
-# comment in crates/cavalry-client/tests/publication.rs has the container to run it in
-# by hand.
+# is Linux's failure, on a kernel that has the populate advice, 5.14 and later: making
+# a log's pages resident fails there on a filesystem that cannot back them. On an
+# earlier kernel the driver is killed by a bus error there (work item 497), and so is
+# this test; on macOS no page is refused at the map, and on a directory with room the
+# test fails and says that the directory has room. A test cannot mount a small
+# filesystem for itself, so `just test` passes this one over, CI's Linux job mounts 64
+# MiB and runs this, and the test's comment in
+# crates/cavalry-client/tests/publication.rs has the container to run it in by hand.
+# The recipe fails unless that one test ran and passed: a filter that matches no test
+# passes with nothing run.
 shm-exhaustion dir:
-    CAVALRY_CLIENT_TEST_FULL_DIR={{dir}}/cavalry cargo test -p cavalry-client --test publication a_driver_whose_directory_has_no_room -- --ignored --nocapture
+    #!/usr/bin/env bash
+    set -euo pipefail
+    said=$(CAVALRY_CLIENT_TEST_FULL_DIR={{dir}}/cavalry cargo test -p cavalry-client --test publication a_driver_whose_directory_has_no_room_leaves_no_log_file -- --exact --ignored --nocapture 2>&1) || { echo "$said"; exit 1; }
+    echo "$said"
+    grep -q "^test result: ok. 1 passed" <<<"$said" || { echo "shm-exhaustion: the test of a driver whose directory has no room did not run; its name is in the justfile's recipe" >&2; exit 1; }
 
 # Miri on the unsafe crate: the layout, cell and conformance tests, which run on plain
 # memory. Miri has no file-backed mapping, so the file tests carry

@@ -62,9 +62,10 @@
 //!   child starts. A slot's lock is such a socket too, taken at a choice: at the first,
 //!   and at the one that spends a slot. Both programs choose fewer ports than a slot
 //!   holds, all before their first child, so they take their one lock first too.
-//!   `crates/cavalry-client/tests/publication.rs` takes this file too and starts one
-//!   child, itself, for one test: the parent test chooses no port, and the child runs
-//!   that one test on one thread, which chooses its one port after it has started.
+//!   A third, `crates/cavalry-client/tests/publication.rs`, takes this file and starts
+//!   one child, itself, for one test: no test in the parent process chooses a port, and
+//!   the child runs that one test on one thread, which chooses its one port after it
+//!   has started.
 //!   `crates/cavalry/tests/cli.rs` starts children from tests that run on several
 //!   threads, and has a rule of its own for that reason: `loopback_ports`, from 10000
 //!   to 19999, counted out and never tried.

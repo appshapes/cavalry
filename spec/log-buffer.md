@@ -48,8 +48,11 @@ of its own (ADR 0172). Two files stay. One that is already at the path fails the
 creation, is not the driver's to remove, and is whose it was: a replay's
 correlation id that is a live publication's leaves that publication its log. And
 one that the driver cannot remove either, as in a directory made read-only after
-the file was created, stays until the driver's next start, which removes whatever
-its directory held.
+the file was created, stays until the driver's next start in that directory, which
+removes whatever the directory held. On Linux the step that fails where a
+filesystem has no room is the making of the pages resident, by the kernel's populate
+advice, which a kernel from 5.14 has; this paragraph is of a driver on such a
+kernel.
 
 ## Header
 

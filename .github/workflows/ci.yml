@@ -133,8 +133,11 @@ jobs:
       # resident fails on a filesystem that cannot back them, after the file exists.
       # The runner mounts the small filesystem, 64 MiB as a container's default
       # /dev/shm is, since a test cannot.
+      # The kernel's release is printed because the failure needs its populate advice,
+      # 5.14 and later: on an earlier one the test dies of a bus error (work item 497).
       - if: runner.os == 'Linux'
         run: |
+          uname -r
           sudo mkdir -p /mnt/cavalry-no-room
           sudo mount -t tmpfs -o size=64m,mode=1777 tmpfs /mnt/cavalry-no-room
           just shm-exhaustion /mnt/cavalry-no-room

@@ -24,10 +24,12 @@ that a sender's setups asked for ten times a second: 50 files after 5 s, 149 aft
 15 s and 249 after 25 s, the first holding the 8,172 KiB the filesystem had left
 and the others nothing, all still there after the driver closed. ADR 0168 made it
 pressing: every cluster service now asks its driver for a `cavalry:ipc` log of 192
-MiB at its start, and again once a second while it is refused.
+MiB when it first opens its member's log, and again once a second while it is
+refused.
 
-A replay's path did the opposite, and was wrong the other way. Its undo removed
-the file at the replay's path whether or not the replay had created it. A `start
+A replay's path did the opposite, and could be wrong the other way. Its undo
+removed the file at the replay's path whether or not the replay had created it.
+Where the directory had no room that was the replay's own file. But a `start
 replay` whose correlation id was a live publication's failed its creation on that
 publication's file, and then removed it.
 
@@ -104,10 +106,10 @@ where the replay made one. `spec/log-buffer.md` says both.
   conductor's tests, is the read's probe: the replay is refused with error code
   12 and counted, and the publication's log is there and opens. With the undo as
   it was, the file is gone.
-- **What the gated tests do not hold.** They fail at the sizing, and only the
-  container's test and the CI step reach the touch of the pages. A removal made
-  only where the sizing fails would pass `just test` and fail
-  `just shm-exhaustion`.
+- **What the two in `just test` do not hold.** They fail at the sizing, and only
+  the container's test, which the CI step runs, reaches the touch of the pages. A
+  removal made only where the sizing fails would pass `just test` and fail
+  `just shm-exhaustion`. That recipe fails when its one test did not run.
 
 ## Consequences
 
@@ -117,14 +119,17 @@ where the replay made one. `spec/log-buffer.md` says both.
   clients' READMEs carried for it is taken out.
 - Each refused ask now costs the driver more than the ones after the first did.
   The read measured it in the container, twelve asks for a `cavalry:ipc` log
-  with 57,328 KiB free, in a debug build: with the removal every ask took 16.0
-  to 23.1 ms, since each populates all the room there is and gives it back;
-  without it the first took 16.7 ms and the later ones 0.3 to 0.9 ms, the room
-  being gone. That is on the conductor's thread, which serves every client of
-  the driver: an image asked for ten times a second costs it some 170 to 200 ms
-  of each second for as long as the directory has no room, and the filesystem is
-  full for its other users for the length of each ask. The last alternative
-  above is the way out if that is shown to matter.
+  with 57,328 KiB free: with the removal every ask took 16.0 to 23.1 ms in one
+  run and 15.5 to 18.1 ms in another, debug build and release alike, since each
+  populates all the room there is and gives it back; without it the first took
+  16.7 ms and the later ones 0.3 to 0.9 ms, the room being gone. Twelve asks for
+  a log of an image's length, 48 MiB, with 48,128 KiB free, took 12.5 to 15.3 ms
+  each. That is on the conductor's thread, which serves every client of the
+  driver: an image asked for ten times a second costs it about 125 to 155 ms of
+  each second where nearly a log's room is free, and less with less, for as long
+  as the directory has no room, and the filesystem is full for its other users
+  for the length of each ask. The last alternative above is the way out if that
+  is shown to matter.
 - A log that would fit once another is closed can now be created then: the room
   a closed log gives back is no longer behind a file that failed.
 - What `cavalry doctor` says of `driver.log_create_failed` is true of the
@@ -144,9 +149,18 @@ where the replay made one. `spec/log-buffer.md` says both.
 - The error a client reads where the directory has no room names a `doctor`
   check that says nothing of room, and `doctor` has no check of a driver
   directory's free room: work item 496.
-- CI's Linux job gains a step that mounts a filesystem with `sudo`. The gate's
-  two tests in `just test` need a shell with `ulimit -f` and `trap`, which every
-  system Cavalry builds on has.
+- All of this is of a kernel that has the populate advice, Linux 5.14 and later.
+  On an earlier kernel a driver whose directory has no room is not refused a log
+  but killed by a bus error, and its file stays: the read ran that too, under a
+  seccomp profile that answers the advice as such a kernel does. It was so
+  before this decision, ADR 0027 does not say it, and it is work item 497.
+- A command whose correlation id is in use is still taken by the driver: a
+  replay under a live publication's id now leaves that publication its log, and
+  is refused with a code and a counter that name the wrong cause, and two
+  replays under one id are not this decision's. Work item 498.
+- CI's Linux job gains a step that mounts a filesystem with `sudo` and prints
+  the kernel's release. The gate's two tests in `just test` need a shell with
+  `ulimit -f` and `trap`, which every system Cavalry builds on has.
 - Revisit if a log is ever created outside `LogBuffers::create_at`, and when a
   refusal's cost on the conductor's thread is measured to hold a driver's other
   clients up.
@@ -156,7 +170,8 @@ where the replay made one. `spec/log-buffer.md` says both.
 - Work item 492; GitHub issue 238, which measured it and which this change
   closes; work item 462 and
   [ADR 0168](0168-add-a-services-counters-and-its-publication-to-its-member-when-it-first-opens-its-members-log.md),
-  whose independent read found it again by reading the driver; work item 496.
+  whose independent read found it again by reading the driver; work items 496,
+  497 and 498, found by this change's reads.
 - `spec/log-buffer.md`, "File"; `spec/client-protocol.md`, "Commands"; `spec/udp.md`,
   "The receiver".
 - [ADR 0027](0027-pre-touch-shared-mappings-at-map-time.md).
