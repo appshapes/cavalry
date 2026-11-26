@@ -160,7 +160,12 @@ its services read what it appends in the same way.
   doctor` on the member's directory, with the member's two variables set as
   [Run a cluster of three members](run-a-cluster.md) sets them, prints the member's
   own `commit position` in its `note cluster-member` line. The service's is the same
-  or smaller, never larger, and its `next position` is never past it.
+  or smaller, never larger, and its `next position` is never past it. Beside the
+  member that leads, doctor also prints `note cluster-no-service` while this
+  program runs: the program reads the log and answers no session and schedules no
+  timer, and doctor knows a service by the counters that one which does those
+  things adds ([Run a cluster of three members](run-a-cluster.md), "When it does
+  not work").
 - A second run with `--from` and the `next position` of the first prints no entry the
   first run printed.
 
