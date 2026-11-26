@@ -1215,6 +1215,11 @@ pub struct ClusterService {
     /// When the service last sent its member every pending timer, on its own
     /// monotonic clock.
     refreshed_at_ns: i64,
+    /// When the driver last refused one of the six adds for the member, by the
+    /// monotonic clock: the service asks again at its first poll a timer refresh
+    /// interval after it, and at none between (ADR 0168). `None` while none was
+    /// refused.
+    add_refused_at_ns: Option<i64>,
 }
 
 /// What a service has counted of its timers: the events it passed over and the
@@ -1306,6 +1311,7 @@ impl ClusterService {
             timer_counters: None,
             history_read: false,
             refreshed_at_ns: 0,
+            add_refused_at_ns: None,
         }
     }
 
@@ -1580,10 +1586,10 @@ impl ClusterService {
             self.started = true;
         }
         // The service's counters and its publication to its member, before the
-        // entries of the poll that first opened the log, and again before those of
-        // each poll while one of them is missing (`spec/cluster.md`, "What a service
-        // tells its member"; ADR 0168). A refusal is this poll's error once its
-        // entries are taken.
+        // entries of the poll that first opened the log; where the driver refused
+        // one, again before the entries of the first poll a timer refresh interval
+        // after the refusal (`spec/cluster.md`, "What a service tells its member";
+        // ADR 0168). A refusal is this poll's error once its entries are taken.
         let added = self.add_for_member(client);
         let Self {
             log,
@@ -1862,9 +1868,18 @@ impl ClusterService {
     /// Adds what a service adds for its member where it holds it not yet: its five
     /// counters, and then its publication on the consensus module stream. A service
     /// that has found no member adds nothing. The publication is a `cavalry:ipc`
-    /// log of three terms of 64 MiB, which the driver makes resident as it creates
-    /// it (ADR 0027): that is what a program's first timer waited for when this
-    /// was done at the first thing to tell (work item 462; ADR 0168).
+    /// log of three terms of 64 MiB, every page of which the driver touches as it
+    /// creates it and this client touches again as it maps it (ADR 0027): that is
+    /// what a program's first timer waited for when this was done at the first
+    /// thing to tell (work item 462; ADR 0168).
+    ///
+    /// A refusal is returned, and nothing is asked of the driver again until a
+    /// timer refresh interval, 1 s, has passed: a refused command costs the driver
+    /// an error event to every one of its clients and a counter, and a refused
+    /// publication the making of its log, so a service that polls a thousand times
+    /// a second asks once a second and not a thousand times. A poll between two
+    /// asks reports nothing of it. With all six held this is three compares, and
+    /// reads no clock.
     fn add_for_member(&mut self, client: &mut Cavalry) -> Result<(), ClusterError> {
         let Some(member) = self.member.as_ref() else {
             return Ok(());
@@ -1875,19 +1890,29 @@ impl ClusterService {
         {
             return Ok(());
         }
+        if let Some(refused_at) = self.add_refused_at_ns
+            && nano_time().saturating_sub(refused_at) < TIMER_REFRESH_INTERVAL_NS as i64
+        {
+            return Ok(());
+        }
         // The counters before the publication (`spec/cluster.md`, "A service's
         // snapshot").
-        Self::add_counters(
+        let added = Self::add_counters(
             client,
             member,
             &mut self.snapshot_counters,
             &mut self.timer_counters,
-        )?;
-        if self.member_stream.is_none() {
-            self.member_stream =
-                Some(client.add_exclusive_publication(IPC_CHANNEL, CONSENSUS_MODULE_STREAM_ID)?);
-        }
-        Ok(())
+        )
+        .and_then(|()| {
+            if self.member_stream.is_none() {
+                self.member_stream = Some(
+                    client.add_exclusive_publication(IPC_CHANNEL, CONSENSUS_MODULE_STREAM_ID)?,
+                );
+            }
+            Ok(())
+        });
+        self.add_refused_at_ns = added.is_err().then(nano_time);
+        Ok(added?)
     }
 
     /// Adds the counters a service adds, the two of its snapshots and the three of
