@@ -87,7 +87,7 @@ mod tests {
     #[test]
     fn a_name_carries_the_client_and_the_counters_files_identity() {
         let id = FileId {
-            device: 0x1_0000_04,
+            device: 0x0100_0004,
             number: 0xabcd,
         };
         let path = id.client_file(Path::new("/d"), 41, ".lock");
@@ -99,7 +99,7 @@ mod tests {
         // Another counters file on the same device: no name of the one is a name of
         // the other, for any client id.
         let other = FileId {
-            device: 0x1_0000_04,
+            device: 0x0100_0004,
             number: 0xabce,
         };
         assert_ne!(

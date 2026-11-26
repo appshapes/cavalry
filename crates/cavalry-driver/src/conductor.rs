@@ -20013,10 +20013,17 @@ mod held {
             );
             assert!(!held(&h, records[released]));
         }
-        // And all of them at once.
+        // And all of them at once: a duty cycle looks at 64 words and no more.
         for record in &records {
             writer.release(*record).expect("the word is stored");
         }
+        let before = h.counter(COUNTERS_HELD);
+        let now = h.now;
+        h.conductor.duty_cycle(now);
+        assert_eq!(
+            h.counter(COUNTERS_HELD),
+            before - i64::try_from(HELD_PER_CYCLE).expect("small")
+        );
         for _ in 0..=count.div_ceil(HELD_PER_CYCLE) {
             h.cycle();
         }
@@ -20086,6 +20093,26 @@ mod held {
         h.now += 100 * SECOND;
         h.cycle();
         assert!(held(&h, record));
+    }
+
+    /// A lock file that is there and that nobody holds, at a client's first command:
+    /// the driver's try takes the lock, so the client holds none, as one with no file.
+    #[test]
+    fn a_lock_file_that_nobody_holds_is_a_client_without_a_lock() {
+        let mut h = Harness::new("held-unlocked-file");
+        drop(lock(&h, 7));
+        let record = add(&mut h, 7, 100);
+        assert_eq!(h.counter(CLIENT_WITHOUT_LOCK), 1);
+        assert!(!h.conductor.clients[0].locks);
+        assert!(
+            h.conductor.client_lock_path(7).exists(),
+            "the driver's try removes nothing"
+        );
+        let now = h.now;
+        h.conductor.remove_client(7, now);
+        assert_eq!(h.counter(COUNTERS_RETIRED), 1);
+        assert!(held(&h, record));
+        assert!(h.conductor.gone.is_empty());
     }
 
     /// One command of `client_id`, as the driver reads it from the ring.

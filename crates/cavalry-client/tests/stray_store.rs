@@ -810,6 +810,13 @@ fn what_a_client_without_its_lock_leaves_unreleased_is_out_of_use() {
     let closed_record = closed.id();
     let leaked = add(&mut client, 2);
     let leaked_record = leaked.id();
+    // Two handles that write no record, kept past the client's close.
+    let publication = client
+        .add_publication("cavalry:ipc", STREAM + 6)
+        .expect("a publication");
+    let subscription = client
+        .add_subscription("cavalry:ipc", STREAM + 7)
+        .expect("a subscription");
     // One handle is closed, which stores its release word. The other is never dropped:
     // a handle some thread could still store through.
     closed.close();
@@ -823,9 +830,25 @@ fn what_a_client_without_its_lock_leaves_unreleased_is_out_of_use() {
                 .then_some(())
         },
     );
+    // The driver forgot this client when it went, since it has no lock to wait for,
+    // so a command that named it now would be a new client's first. A handle that is
+    // dropped after its client closed sends none.
+    let without_lock = cavalry_shm::counters::generated::CLIENT_WITHOUT_LOCK;
+    assert_eq!(
+        read(&watcher, without_lock),
+        2,
+        "the watcher and the client"
+    );
+    drop(publication);
+    drop(subscription);
     // After the counter reuse timeout the released record is given out again, and the
     // other never is.
     std::thread::sleep(Duration::from_millis(1_200));
+    assert_eq!(
+        read(&watcher, without_lock),
+        2,
+        "a handle dropped after its client closed registered a client"
+    );
     let mut given = Vec::new();
     for key in 10..26 {
         given.push(add(&mut watcher, key));

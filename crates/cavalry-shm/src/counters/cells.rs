@@ -370,6 +370,11 @@ mod tests {
         cells.reset();
         assert!(!cells.released());
         assert_eq!(cells.get(), 0);
+        // The word is 1 or it is not stored: any other value keeps the record held.
+        for other in [2, -1, i64::MAX] {
+            cells.released.store(other, Ordering::Release);
+            assert!(!cells.released(), "{other}");
+        }
     }
 }
 

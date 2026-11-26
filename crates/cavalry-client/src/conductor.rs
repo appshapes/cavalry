@@ -769,8 +769,7 @@ impl Conductor {
         }
         let event = announced(
             &self.dir,
-            &self.counters,
-            &self.shared,
+            (&self.counters, &self.shared),
             correlation_id,
             session_id,
             position_counter_id,
@@ -814,19 +813,20 @@ impl Conductor {
 /// the event. The image is not added, the conductor stores the record's release word
 /// by its id, the subscription's next poll reports the fault, and the client stays
 /// open. A record that holds another image's counter is treated the same and is
-/// stored into by nobody; the rule above says it is never met. A log that is there and fails a check, or a record id no
-/// counters file has, is the driver saying one thing and the directory another:
-/// corrupt.
+/// stored into by nobody; the rule above says it is never met. A log that is there
+/// and fails a check, or a record id no counters file has, is the driver saying one
+/// thing and the directory another: corrupt. The client closes, and the record is
+/// held until the driver has the client's lock.
 fn announced(
     dir: &Path,
-    counters: &CountersWriter,
-    shared: &Arc<Shared>,
+    owner: (&CountersWriter, &Arc<Shared>),
     correlation_id: i64,
     session_id: i32,
     position_counter_id: i32,
     log_name: (LogDirectory, i64),
     source_identity: String,
 ) -> Result<ImageEvent, Closed> {
+    let (counters, shared) = owner;
     let (directory, log_id) = log_name;
     let log = match LogBuffers::open_named(dir, directory, log_id, false) {
         Ok(log) => Some(log),
@@ -2027,8 +2027,7 @@ mod tests {
         let of = |correlation_id, session_id, record, log| {
             announced(
                 &dir,
-                &counters,
-                &Arc::new(super::Shared::new(0, None)),
+                (&counters, &Arc::new(super::Shared::new(0, None))),
                 correlation_id,
                 session_id,
                 record,
