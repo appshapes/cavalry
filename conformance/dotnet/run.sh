@@ -40,6 +40,13 @@ echo "conformance/dotnet: build the driver and the library"
 cargo build --release -p cavalry --bin cavalry
 cargo build --release -p cavalry-ffi --lib
 
+# The .NET client loads the library at the path in CAVALRY_FFI_LIBRARY when that is set,
+# before it looks in the checkout. A value from the caller's shell, as one left after a
+# packaged library was tried by hand, would have this runner test that library and say
+# ok of it. So the runner names the library it has just built (work item 504).
+case "$(uname -s)" in Darwin) suffix=dylib ;; *) suffix=so ;; esac
+export CAVALRY_FFI_LIBRARY="$PWD/target/release/libcavalry_ffi.$suffix"
+
 # The client as the README builds it, every warning an error (Cavalry.csproj), then the
 # runner and the README's test, which reference the client's project.
 echo "conformance/dotnet: build the client and the runner with .NET SDK $(dotnet --version)"
