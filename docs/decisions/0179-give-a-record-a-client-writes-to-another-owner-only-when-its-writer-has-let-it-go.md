@@ -131,7 +131,8 @@ client until it has taken its lock, has nothing of its left to free, and has rea
 command ring up to where its producers stood when the lock was taken. A client
 writes a command before it lets go of its lock, so every command of a client that has
 gone is read and dropped before the driver forgets the client, by that order and by
-no wait. The driver registers nobody for such a command and answers nothing, and
+no wait. A ring that the driver found corrupt is read no more, and the driver then
+does not wait for it. The driver registers nobody for such a command and answers nothing, and
 `client_protocol.dropped_command` counts it. A first command whose client's lock the
 driver can take is of a client that ended after it wrote the command, and is dropped
 the same way. Until this decision a command of a client the driver had forgotten was
@@ -324,6 +325,14 @@ that name for 2 s.
   `a_client_stopped_in_its_attach_across_a_restart_attaches_to_the_driver_that_runs`
   holds a client at three steps of its attach while the driver is closed and
   another started, and lets it go on.
+- **A fourth, narrow read, of the changes that answer the third.** It checked the
+  order of the late command against the command ring's code: a claim moves the
+  ring's tail before it writes, a claim left by a process that died is padded after
+  its timeout, and a command is handled before the driver can forget its client. It
+  found nothing that touches delivery. It found that a ring the driver had found
+  corrupt would keep every client whose lock was taken, for ever, until the list of
+  256 was full: closed, with
+  `a_client_whose_lock_is_taken_is_forgotten_at_once_when_the_ring_is_read_no_more`.
 - **The upgrade gate** runs a program and the driver it is a client of from one build
   in every round (`conformance/upgrade/run.sh`, "The schedule"), so no round crosses
   this version with a client on one side and its driver on the other. It does run
