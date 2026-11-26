@@ -175,8 +175,10 @@ In Aeron, these are a service's `scheduleTimer` and `cancelTimer`, and its
 ## When it does not work
 
 - **The programs print nothing.** No program runs beside the member that leads, or
-  the cluster has no leader. Run the program beside every member. Then run `cavalry
-  doctor --dir` with a member's directory and its two variables set: a member whose
+  the cluster has no leader. Run `cavalry doctor --dir` with a member's directory
+  and its two variables set. Beside a leader that has no program beside it and
+  was told of no timer, doctor prints `note cluster-no-service`: run the program
+  beside every member. A member whose
   `cluster-member` line says `election closed` has a log, and one in an election
   has none until it has joined its leader's ([Run a cluster of three
   members](run-a-cluster.md)).
@@ -186,10 +188,13 @@ In Aeron, these are a service's `scheduleTimer` and `cancelTimer`, and its
 - **The lines stop in every terminal.** The program beside the member that leads
   has stopped, or the cluster is electing a leader. Timers wait while no member
   leads and while no service runs beside the leader: step 3. Run `cavalry doctor`
-  for each member. Where one of them says `the leader in term` and `election
-  closed`, the cluster has its leader, and the program beside that member is the
-  one that stopped: doctor has no line for a leader with no service beside it. A
-  member that prints `WARN cluster-no-leader` is in an election.
+  for each member. Beside the leader whose program has stopped, doctor prints
+  `WARN cluster-no-service`: the leader holds timers, and
+  `no service runs beside it`. Start the program beside that member, and the lines
+  go on in every terminal. Doctor prints the line as soon as a program that was
+  stopped with Ctrl-C has ended. A program that was killed, with no close, is seen
+  about 10 s later, when the driver has timed its client out. A member that prints
+  `WARN cluster-no-leader` is in an election.
 - **A program prints `ended at position 256: code 102` and ends**, with its own
   position. A poll failed, and the program ends on a poll that fails. Code 102 is
   `CAVALRY_ERR_CLOSED`: the service's client is closed, as it is when the member's
