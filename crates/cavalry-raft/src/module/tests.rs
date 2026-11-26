@@ -4547,6 +4547,153 @@ fn a_message_that_faults_leaves_the_rest_of_its_poll_to_the_core() {
     assert_eq!(module.election_state(), ElectionState::Canvass);
 }
 
+/// Two faults of one duty cycle are both reported, the message's first (work item
+/// 459; invariant 4). The read of the consensus stream can fail after it has handed a
+/// message over, at a later frame, and that message can have faulted in the core. The
+/// read's error alone was returned then, and the core's fault was dropped with it:
+/// whoever read the member's end read the wrong cause.
+///
+/// A member of two canvasses alone, as in the test above. A peer's client sends it
+/// one request for a vote, for a term below the candidate term its `terms` file
+/// holds, which the test raised where the core does not see it: the store the core
+/// asks for is refused, a fault. The test then draws a frame that fails its check
+/// into the image's log, at the position after the request: a length of 16, below a
+/// frame header's 32. So the member's next read hands the request over and then
+/// fails. That cycle returns the core's fault. The next returns the read's, before it
+/// reads anything, and the one after has nothing to return.
+#[test]
+fn a_read_that_fails_after_a_message_faulted_reports_the_cores_fault_and_then_its_own() {
+    use std::os::unix::fs::FileExt;
+
+    let dir = TestDir::new("fault-before-a-failed-read");
+    let driver_dir = dir.0.join("driver");
+    let log_dir = dir.0.join("log");
+    let ports = free_ports(10);
+    let member = |id: usize| {
+        let endpoints: Vec<String> = ports[id * 5..id * 5 + 5]
+            .iter()
+            .map(|port| format!("127.0.0.1:{port}"))
+            .collect();
+        format!("{id},{}", endpoints.join(","))
+    };
+    let members = format!("{}|{}", member(0), member(1));
+    let _driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
+    let mut module =
+        ConsensusModule::start(&driver_dir, &log_dir, &members, 0).expect("the member starts");
+    wait_for("the member canvasses", || {
+        module.do_work().expect("the member's duty cycle");
+        (module.election_state() == ElectionState::Canvass).then_some(())
+    });
+
+    let channel = format!("cavalry:udp?endpoint=127.0.0.1:{}", ports[1]);
+    let mut peer = Cavalry::connect_to(&driver_dir).expect("the peer's client");
+    let mut requests = peer
+        .add_exclusive_publication(&channel, CONSENSUS_STREAM_ID)
+        .expect("the peer publishes to the member");
+    let mut beside = peer
+        .add_subscription(&channel, CONSENSUS_STREAM_ID)
+        .expect("the peer reads the member's stream");
+    // The member's own subscription holds the publication's image before anything is
+    // sent, so that the cycle that reads the request is one the test chooses.
+    let session = requests.session_id();
+    wait_for("the member's subscription holds the image", || {
+        module.do_work().expect("the member's duty cycle");
+        module
+            .consensus
+            .images()
+            .iter()
+            .any(|image| image.session_id() == session)
+            .then_some(())
+    });
+
+    module
+        .io
+        .terms
+        .set_candidate_term(9)
+        .expect("the file takes a higher candidate term");
+    let mut bytes = [0u8; 128];
+    let request = Message::RequestVote {
+        log_leadership_term_id: -1,
+        log_position: 0,
+        candidate_term_id: 5,
+        candidate_member_id: 1,
+        protocol_version: 0,
+    };
+    let length = request.write(&mut bytes).expect("a request vote");
+    wait_for("the request is taken", || {
+        requests.offer(&bytes[..length]).ok()
+    });
+    let mut arrived = 0;
+    wait_for("the request has arrived", || {
+        arrived += beside.poll(|_, _| {}, 16).expect("the peer's poll");
+        (arrived == 1).then_some(())
+    });
+
+    // The frame after the request, drawn into the image's log where the next frame
+    // would begin: the peer's own read of the stream stands there.
+    let after = beside
+        .images()
+        .iter()
+        .find(|image| image.session_id() == session)
+        .expect("the peer reads the same image")
+        .position();
+    let images: Vec<_> =
+        std::fs::read_dir(driver_dir.join(cavalry_shm::log::layout::IMAGE_DIRECTORY))
+            .expect("the driver's images")
+            .map(|entry| entry.expect("an entry").path())
+            .collect();
+    assert_eq!(
+        images.len(),
+        1,
+        "one image, of the one publication: {images:?}"
+    );
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&images[0])
+        .expect("the image's log");
+    // The log's header is at the start of its metadata page, the file's last page.
+    let file_length = file.metadata().expect("the log's length").len();
+    let mut header = [0u8; cavalry_shm::log::layout::HEADER_LENGTH];
+    file.read_exact_at(
+        &mut header,
+        file_length - cavalry_shm::log::layout::META_DATA_LENGTH as u64,
+    )
+    .expect("the log's header");
+    let fields =
+        cavalry_shm::log::layout::parse_header(&header, file_length).expect("a log's header");
+    assert_eq!(
+        fields.session_id(),
+        session,
+        "the image of the peer's publication"
+    );
+    let positions = fields.positions();
+    let offset = fields.term_buffer_offset(positions.partition_of(after))
+        + u64::from(positions.term_offset_of(after));
+    let mut frame = [0xFFu8; 32];
+    frame[..4].copy_from_slice(&16i32.to_le_bytes());
+    file.write_all_at(&frame, offset)
+        .expect("the frame is drawn");
+
+    // One cycle reads the request, which faults in the core, and then the drawn
+    // frame, which fails the read. It returns the core's fault.
+    let first = module.do_work().expect_err("the cycle that reads both");
+    assert!(
+        matches!(first, RaftError::Terms(_)),
+        "the core's fault first: {first}"
+    );
+    // The next returns the read's fault and reads nothing.
+    let second = module.do_work().expect_err("the cycle after it");
+    assert!(
+        matches!(second, RaftError::Poll(_)),
+        "then the read's own: {second}"
+    );
+    assert_eq!(module.messages_rejected, 0, "the request was not rejected");
+    // Each was said once.
+    module.do_work().expect("the member's duty cycle");
+    assert_eq!(module.election_state(), ElectionState::Canvass);
+}
+
 /// What a refusal of the leader's log publication is to the election, and what its
 /// error says. A refusal that waiting mends appends nothing and is no error: the
 /// leader appends the entry again. Every other one is [`RaftError::Append`], whose

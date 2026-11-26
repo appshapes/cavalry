@@ -77,12 +77,13 @@ public final class ClusterRound {
     static final long TIMER_ID = 77; // the timer that is handed over
     static final long CANCELLED_ID = 78; // the timer that is scheduled and cancelled in the same handling
     // How long after the message's entry the timer is due, in the cluster's milliseconds. A
-    // second: a service tells its member of a timer only once the poll that took the entry
-    // has sent the six commands of its first timer, some 25 ms on a laptop and more on a
-    // busy host, so the event of a timer that was wrongly due at once is stamped tens of
-    // milliseconds after the message, 38 to 68 ms in the five clients' rounds as they were
-    // run on a laptop, and a margin of that size would let it pass. The round prints what
-    // it was in its own run.
+    // second: the event of a timer that is due at once is stamped tens of milliseconds
+    // after its message, the time an entry takes to be committed and read by a service on a
+    // laptop, and more on a busy host, so the event of a timer that was wrongly due at once
+    // is stamped that late, and a margin of that size would let it pass. Before ADR 0168 a
+    // service's first timer waited for its publication to its member too, 38 to 68 ms in
+    // the five clients' rounds as they were run on a laptop. The round prints what it was
+    // in its own run.
     static final long TIMER_AFTER_MS = 1000;
     static final long HOUR_MS = 3_600_000; // the deadline its first schedule gives it, which the second replaces
     static final long REFRESH_NANOS = 1_200_000_000L; // a timer refresh interval of spec/cluster.md, "Values", 1 s, and more

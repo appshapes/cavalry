@@ -3080,6 +3080,10 @@ pub struct ConsensusModule {
     io: ClientIo,
     counters: Counters,
     messages_rejected: u64,
+    /// The fault of a read of the consensus stream that a cycle held back, because a
+    /// message the same read had handed over faulted first and that cycle returned the
+    /// message's fault. The next cycle returns this one before it reads (work item 459).
+    held_poll_fault: Option<Fault>,
     /// The duty cycles in which the file of the log's recordings could not be
     /// written, `cluster.log_recordings_unwritten` (ADR 0103).
     log_recordings_unwritten: u64,
@@ -3462,6 +3466,7 @@ impl ConsensusModule {
             },
             counters,
             messages_rejected: 0,
+            held_poll_fault: None,
             log_recordings_unwritten: 0,
             started,
             clock: read_clock(started),
@@ -3477,8 +3482,13 @@ impl ConsensusModule {
     /// whose step faults does not take the rest of its batch with it: every message
     /// the poll read is handed to the core, as it would be on the next cycle, and the
     /// first fault among them is returned once the batch is done, before the log is
-    /// observed. An error of the core's own cycle is returned after the counters are
-    /// stored (ADR 0091). One error is
+    /// observed. When the read of the stream itself fails in the same cycle, after a
+    /// message it had handed over faulted, the member has two faults of one cycle. It
+    /// returns the message's fault from that call, since that is the step the member
+    /// tries again and the cause a reader needs first, and the read's fault,
+    /// [`RaftError::Poll`], from the next call, before it reads anything: neither is
+    /// dropped (work item 459). An error of the core's own cycle is returned after the
+    /// counters are stored (ADR 0091). One error is
     /// not of that kind: [`RaftError::LogRecordings`], a file of the log's recordings
     /// that could not be written, is returned after the core's cycle has run, so the
     /// member has moved on, records and replicates, and names no recording to a
@@ -3486,6 +3496,11 @@ impl ConsensusModule {
     pub fn do_work(&mut self) -> Result<usize, RaftError> {
         self.clock = read_clock(self.started);
         let clock = self.clock;
+        // The fault of the last cycle's read, which that cycle held back behind the
+        // fault of a message the same read had handed over.
+        if let Some(held) = self.held_poll_fault.take() {
+            return Err(RaftError::Poll(held));
+        }
         let Self {
             core,
             consensus,
@@ -3496,6 +3511,7 @@ impl ConsensusModule {
             session_log_position,
             io,
             messages_rejected,
+            held_poll_fault,
             ..
         } = self;
         let mut fault = None;
@@ -3510,50 +3526,55 @@ impl ConsensusModule {
         // ends its image's read, and every fragment the call hands over after it, of
         // any image, is left where it is, to be read once the member has left init
         // (work item 282).
-        let read = if core.election_state() == ElectionState::Init {
-            0
+        let polled = if core.election_state() == ElectionState::Init {
+            Ok(0)
         } else {
-            consensus
-                .controlled_poll(
-                    |body, header| {
-                        if core.election_state() == ElectionState::Init {
-                            return Action::Abort;
-                        }
-                        // A consensus message is one frame; a fragment of something longer
-                        // is none of this page's, and is counted as a message that failed
-                        // its length.
-                        let whole = header.flags().contains(Flags::UNFRAGMENTED);
-                        match Message::parse(Stream::Consensus, body) {
-                            Ok(message) if whole => {
-                                // A message that faults leaves the rest of the poll's
-                                // batch to the core all the same. They are what the next
-                                // cycle would have read, and a message taken from the
-                                // stream and handed to nobody is lost with no count
-                                // (invariant 4). The first fault is the one returned.
-                                // With the session of the frame it came in, which a leader
-                                // names in a floor answer (ADR 0163).
-                                if let Err(error) =
-                                    core.on_message_in(clock, &message, header.session_id(), io)
-                                    && fault.is_none()
-                                {
-                                    fault = Some(error);
-                                }
+            consensus.controlled_poll(
+                |body, header| {
+                    if core.election_state() == ElectionState::Init {
+                        return Action::Abort;
+                    }
+                    // A consensus message is one frame; a fragment of something longer
+                    // is none of this page's, and is counted as a message that failed
+                    // its length.
+                    let whole = header.flags().contains(Flags::UNFRAGMENTED);
+                    match Message::parse(Stream::Consensus, body) {
+                        Ok(message) if whole => {
+                            // A message that faults leaves the rest of the poll's
+                            // batch to the core all the same. They are what the next
+                            // cycle would have read, and a message taken from the
+                            // stream and handed to nobody is lost with no count
+                            // (invariant 4). The first fault is the one returned.
+                            // With the session of the frame it came in, which a leader
+                            // names in a floor answer (ADR 0163).
+                            if let Err(error) =
+                                core.on_message_in(clock, &message, header.session_id(), io)
+                                && fault.is_none()
+                            {
+                                fault = Some(error);
                             }
-                            _ => *messages_rejected += 1,
                         }
-                        if core.election_state() == ElectionState::Init {
-                            Action::Break
-                        } else {
-                            Action::Continue
-                        }
-                    },
-                    CONSENSUS_POLL_LIMIT,
-                )
-                .map_err(RaftError::Poll)?
+                        _ => *messages_rejected += 1,
+                    }
+                    if core.election_state() == ElectionState::Init {
+                        Action::Break
+                    } else {
+                        Action::Continue
+                    }
+                },
+                CONSENSUS_POLL_LIMIT,
+            )
         };
+        // The core's fault before the read's own. A read can fail after it handed a
+        // message over, on a later frame of the same image or on another image, and
+        // that message's fault happened first: returning the read's error alone would
+        // drop it, and whoever reads the member's end would read the wrong cause
+        // (invariant 4). The read's fault is kept for the next call.
         if let Some(error) = fault {
+            *held_poll_fault = polled.err();
             return Err(error);
         }
+        let read = polled.map_err(RaftError::Poll)?;
         io.observe_log()?;
         io.observe_catchup()?;
         // The core's fault is returned after the counters are stored: a member that
