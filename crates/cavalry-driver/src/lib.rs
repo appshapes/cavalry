@@ -326,6 +326,7 @@ impl Driver {
                 replayer_handle.thread().unpark();
                 sender_handle.thread().unpark();
                 receiver_handle.thread().unpark();
+                conductor_handle.thread().unpark();
                 let _ = conductor_handle.join();
                 let _ = replayer_handle.join();
                 let _ = sender_handle.join();
@@ -369,15 +370,23 @@ impl Driver {
 
     fn stop(&mut self) -> Result<(), DriverError> {
         self.stop.store(true, Ordering::Release);
-        // A replayer with no replay, and a sender with nothing to send, are parked until
-        // a request or this; each reads the flag as it wakes.
-        if let Some(handle) = &self.replayer {
-            handle.thread().unpark();
-        }
-        if let Some(handle) = &self.sender {
-            handle.thread().unpark();
-        }
-        if let Some(handle) = &self.receiver {
+        // Every thread is unparked, after the flag is stored, and reads the flag as it
+        // wakes. A replayer with no replay and a sender or a receiver with nothing to do
+        // are parked until a request or this. Each of the five, when its duty cycle found
+        // no work, is parked for at most a millisecond by its idle strategy, and this
+        // stop does not wait on that timeout: on one Mac a wait of 1 ms in about 40
+        // million did not return until its thread was woken, and the join below then
+        // waited for ever (ADR 0171).
+        for handle in [
+            &self.conductor,
+            &self.recorder,
+            &self.replayer,
+            &self.sender,
+            &self.receiver,
+        ]
+        .into_iter()
+        .flatten()
+        {
             handle.thread().unpark();
         }
         let conductor = match self.conductor.take() {
@@ -434,5 +443,55 @@ impl std::fmt::Debug for Driver {
             .field("log_dir", &self.log_dir)
             .field("running", &self.conductor.is_some())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// A stop does not wait on an idling thread's park to time out (ADR 0171). Every
+    /// thread's backoff parks for an hour here, which stands for the park whose timeout
+    /// never comes. The conductor and the recorder idle by their strategy from the
+    /// start, so each is in that park, and `close` returns in time only if the stop
+    /// unparks both. The sender, the receiver and the replayer hold nothing to do in
+    /// this driver and wait in their own park of a second, which would end without an
+    /// unpark: what this test holds of the stop is the conductor's and the recorder's.
+    #[test]
+    fn close_ends_every_thread_though_no_park_would_time_out() {
+        let dir = std::env::temp_dir().join(format!(
+            "cavalry-driver-{}-close-unparks",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let started = Arc::new(AtomicUsize::new(0));
+        let hook: ThreadStart = {
+            let started = Arc::clone(&started);
+            Arc::new(move |_| {
+                idle::tests::PARK_FOR_TEST.set(Some(idle::tests::NEVER));
+                started.fetch_add(1, Ordering::AcqRel);
+            })
+        };
+        let driver = Driver::start_with_threads(&dir, dir.join("log"), IdleStrategy::Backoff, hook)
+            .expect("starts");
+        // Each thread has run its hook, and then long enough for the conductor and the
+        // recorder to spend their spins and yields and park.
+        while started.load(Ordering::Acquire) < 5 {
+            std::thread::yield_now();
+        }
+        std::thread::park_timeout(Duration::from_millis(200));
+        let (closed, close) = mpsc::channel();
+        let closer = std::thread::spawn(move || {
+            let _ = closed.send(driver.close());
+        });
+        let result = close
+            .recv_timeout(Duration::from_secs(20))
+            .expect("close returned: a thread that stays parked was not unparked by the stop");
+        result.expect("closes");
+        closer.join().expect("the closing thread ended");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

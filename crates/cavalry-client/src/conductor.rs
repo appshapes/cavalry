@@ -188,7 +188,13 @@ pub(crate) const fn nanos(duration: Duration) -> i64 {
     }
 }
 
-/// Aeron's backoff: spins, then yields, then sleeps from a microsecond to a millisecond.
+/// Aeron's backoff: spins, then yields, then parks from a microsecond to a millisecond.
+///
+/// The park is [`std::thread::park_timeout`], not a sleep, so that the client's close
+/// can end it: an unpark of the conductor's thread makes the park return at once. The
+/// close stores its reason and then unparks, and does not depend on the park's own
+/// timeout, which is not sure on every machine: on one Mac a wait of 1 ms in about 40
+/// million did not return until its thread was woken (ADR 0171).
 struct Backoff {
     spins: u32,
     yields: u32,
@@ -212,7 +218,11 @@ impl Backoff {
             self.yields += 1;
             std::thread::yield_now();
         } else {
-            std::thread::sleep(self.park);
+            #[cfg(test)]
+            let park = PARK_FOR_TEST.get().unwrap_or(self.park);
+            #[cfg(not(test))]
+            let park = self.park;
+            std::thread::park_timeout(park);
             self.park = (self.park * 2).min(Duration::from_millis(1));
         }
     }
@@ -222,6 +232,16 @@ impl Backoff {
         self.yields = 0;
         self.park = Duration::from_micros(1);
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// For a test: how long this thread's backoff parks, in place of at most 1 ms. A
+    /// client takes the value of the thread that connects it for its conductor's
+    /// thread. An hour stands for the park whose timeout never comes, so that a test
+    /// passes only when something unparks the conductor.
+    pub(crate) static PARK_FOR_TEST: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// The conductor's state: its own producer on the ring, the one receiver on the
@@ -1197,6 +1217,36 @@ mod tests {
     use crate::replay::ReplayEnd;
     use crate::response::Response;
     use crate::subscription::{ImageEvent, Registration, Retired};
+
+    /// A close does not wait on the conductor's park to time out (ADR 0171). The
+    /// conductor's backoff parks for an hour here, which stands for the park whose
+    /// timeout never comes, so `close` returns in time only if it unparks the
+    /// conductor's thread after it stores the closed state.
+    #[test]
+    fn close_ends_the_conductor_though_its_park_would_not_time_out() {
+        let dir = std::env::temp_dir().join(format!(
+            "cavalry-client-conductor-close-unparks-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let driver = cavalry_driver::Driver::start(&dir, dir.join("log")).expect("the driver");
+        super::PARK_FOR_TEST.set(Some(std::time::Duration::from_secs(3600)));
+        let client = crate::Cavalry::connect_to(&dir).expect("connects");
+        super::PARK_FOR_TEST.set(None);
+        // Long enough for the conductor to spend its spins and yields and park.
+        std::thread::park_timeout(std::time::Duration::from_millis(200));
+        let (closed, close) = std::sync::mpsc::channel();
+        let closer = std::thread::spawn(move || {
+            let _ = closed.send(client.close());
+        });
+        let result = close
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("close returned: the conductor stayed parked, so the close did not unpark it");
+        result.expect("closes");
+        closer.join().expect("the closing thread ended");
+        driver.close().expect("the driver closes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// What [`announced`] makes of an `available image`, against a real driver's
     /// directory: the image when its log and its position counter are there; `gone`

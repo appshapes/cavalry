@@ -40,7 +40,10 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   gone: each thread of the driver holds one, and it is public so that a program's own
   duty cycle beside the driver idles the same way with the same figures, as the thread
   of `cavalry run`'s cluster member does. Call `idle()` after a cycle with no work and
-  `reset()` after one that did.
+  `reset()` after one that did. A backoff parks its thread, for 1 µs to 1 ms, so a
+  loop that another thread stops is stopped by its flag and then an `unpark` of its
+  thread, and the stop does not wait on the park's timeout: `Driver::close` does that
+  for each of the driver's five threads (ADR 0171).
   `Driver::start_with_threads` takes a hook each thread runs first, named the thread it
   is on, where a caller that owns the host's CPUs pins the conductor to a CPU of its own
   and leaves the recorder, the replayer, the sender and the receiver on the housekeeping

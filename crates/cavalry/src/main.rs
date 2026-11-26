@@ -823,6 +823,12 @@ fn run(config: &Config) -> ExitCode {
     // The member first: it is a client of the driver, and closes its client while the
     // driver is there to hear it.
     member_stop.store(true, Ordering::Release);
+    if let Some(thread) = &member_thread {
+        // The member's loop idles in a park of at most a millisecond: the unpark, after
+        // the flag, ends it, so the join below does not wait on that park's timeout
+        // (ADR 0171).
+        thread.thread().unpark();
+    }
     if let Some(thread) = member_thread
         && thread.join().is_err()
     {
@@ -887,7 +893,9 @@ fn give_member_up(dir: &Path, error: &str) {
 /// which the cluster has counted the member out anyway.
 const MEMBER_FAILURE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long the member's thread waits after a duty cycle that failed before the next.
+/// How long the member's thread waits after a duty cycle that failed before the next,
+/// at most: the wait is a park, which the member's stop ends and which may end early
+/// by itself (ADR 0171).
 const MEMBER_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
 /// What the thread `cavalry-consensus` runs: a consensus module, or a test's stand-in
@@ -1013,7 +1021,11 @@ fn spawn_member<M: Member>(
                             let _ = stopped.send(Stop::Member(last_error));
                             break;
                         }
-                        std::thread::sleep(MEMBER_RETRY_INTERVAL);
+                        // A park, not a sleep: `run` unparks this thread when it
+                        // stops the member, so its join does not wait this out, nor
+                        // on a timeout that a machine may lose (ADR 0171). The loop
+                        // reads the stop flag before the next cycle.
+                        std::thread::park_timeout(MEMBER_RETRY_INTERVAL);
                     }
                 }
             }
