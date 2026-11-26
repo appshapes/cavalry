@@ -245,8 +245,8 @@ fn a_member_of_a_new_cluster_that_has_heard_every_voter_votes() {
 /// A member that voted holds a candidate term, so it is not held back by work item
 /// 476's rule though its log is empty (ADR 0174). A new cluster's member hears both
 /// voters and votes for member 1 in term 0, storing the term; member 1 leads, and stops
-/// before any other member holds an entry. The member's ballot ends with no leader word,
-/// and in its next election it hears member 0 alone, the leader being gone. It votes for
+/// before its new leadership term reaches the member. Its ballot ends with no leader word,
+/// and it canvasses again and hears member 0, the leader being gone. It votes for
 /// member 0's request in term 1, as before the rule: a member that remembers its vote
 /// cannot vote twice in a term, so it need not wait for the leader that stopped.
 #[test]

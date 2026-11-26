@@ -94,11 +94,15 @@ committed once a quorum, two of three, has it on disk.
    member <id> started`. Start all three. A new cluster elects its first leader only
    once every member has started: three members that have heard one another elect a
    leader within a second, and two that run while the third has not started wait
-   for it, for as long as it takes, since a member of a new cluster votes, before its
-   first vote, only once it has heard every member (work item 476). Once the cluster has its first leader, a
-   member that stops or starts late no longer holds the others back: two of three
-   elect while the third is stopped, and the third catches up from the leader when it
-   starts.
+   for it, for as long as it takes. Before its first vote a member of a new cluster
+   holds nothing, its log empty and no
+   [candidate term](../glossary.md) stored, and it votes only once it has heard
+   every member (work item 476).
+   Once every member has followed the first leader, a member that stops or starts
+   late no longer holds the others back: two of three elect while the third is
+   stopped, and the third catches up from the leader when it starts. If the first
+   leader stops before every member has followed it, the others can wait for it:
+   start it again.
 
 4. Ask each member what it is:
 
@@ -434,11 +438,13 @@ committed once a quorum, two of three, has it on disk.
   `cavalry run` again with the same directories.
 - `WARN cluster-no-leader`: the member is in an election and has no leader to follow.
   The message says which state its election is in and why it began, from
-  `cluster.election_cause`. A leader needs the votes of two of three members. At a
-  new cluster's start, every member waits until it has heard every other member, for
-  as long as that takes: start the member that has not started. Once the cluster has
-  held a log, members that have not heard every other member wait 60 s, the startup
-  canvass timeout, before two of them elect. Run `doctor` on each member's
+  `cluster.election_cause`. A leader needs the votes of two of three members. A
+  member that holds nothing, its log empty and no candidate term stored, as a new
+  cluster's members do before their first vote, waits until it has heard every other
+  member, for as long as that takes: start the member it has not heard, a first
+  leader that stopped among them. At a start, a member that holds a log or a
+  candidate term waits 60 s, the startup canvass timeout, for a member it has not
+  heard, before two of them elect. Run `doctor` on each member's
   host, and check that each host reaches the `consensus` endpoint of every other,
   the second port of each entry in step 1. In canvass the message has one more
   sentence, for a member that has replicated a term it missed: it canvasses again

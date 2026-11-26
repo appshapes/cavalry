@@ -51,14 +51,16 @@ A voter other than C that names a lower term in a stale report names what it hel
   The timer search settles every seed with every member running, so elections end with every member up.
 - **The regression seeds of the other rules, taken again:**
   - ADR 0145's term condition out: 1765, 1961 and 2459 fail;
-  - ADR 0148's rule out: 226, 411, 609, 697, 1145 and 1229 fail.
+  - ADR 0148's rule out: 226, 411, 609, 697, 1145 and 1210 fail.
 
   The default seeds are now lost-log 1, 804, 937, 1765, 1961 and faulted-truncation 1, 226, 411, 609.
 - **On one core**, in `tests/vote_in_one_term.rs`:
   - a member of a new cluster that lost its log withholds while the candidate it may have voted for is unheard;
   - it refuses a second vote in that term once that candidate names it;
   - it votes in the next term;
-  - one that has heard every voter votes.
+  - one that has heard every voter votes;
+  - one that voted holds a candidate term, and votes in a later term without the report of the leader that stopped.
+- **A new cluster's first leader that stops unheard**, in `tests/elected_replication.rs`. When both other members voted in its election and its new leadership term reached neither, the two elect a later term within 5 s, about 2 s at seeds 1 to 5, and commit. When one of them holds nothing and has not heard the leader in its election, it waits: no leader in 120 s and `cluster.voters_unheard` 1, where with this rule taken out the two elect within 2 s. The three elect once the leader runs again.
 - **ADR 0145's accepted case, held:** `two_members_that_lost_their_logs_while_the_third_is_stopped_wait_for_it`. The two elect nothing in 120 s, then the third leads and the two hold everything committed.
 - **The cost:** a new cluster of three in memory, every member up, time to its first settled leader over seeds 1 to 1,000. Before and after, identical: minimum 14 ms, median 121 ms, p99 433 ms, maximum 757 ms (seed 868). With every member up the rule costs nothing. The whole cost is a member that never starts, and then the others wait with no bound.
 - **Eleven tests that held the old start**, the startup canvass timeout electing two of three among them, now hold the new one or keep their point with every voter heard.
@@ -67,7 +69,9 @@ A voter other than C that names a lower term in a stale report names what it hel
 ## Consequences
 
 - A new cluster elects its first leader only once each of its members has run. Before its first vote, every member of a new cluster holds nothing. Two that run while the third has never started wait for it, with no bound. `cavalry doctor`'s `cluster-no-leader` says so, and the how-to says to start every member. In Aeron, a cluster elects at its start with a quorum after the startup canvass timeout. That rests on a member's state being kept. This page keeps the timeout for a member whose log is not empty.
-- A new cluster whose first leader stops before any other member holds an entry still elects again. The members that voted in its election hold a candidate term, so they are not held back, and two of three elect at the startup canvass timeout, as before. An agent review of the first form of this rule found that case: the form held back every member whose log was empty, and two running members then waited for the stopped leader with no bound. Narrowing the rule to a member that holds no candidate term ends it. The double vote needs a member that forgot its vote, and only a member with no candidate term can have.
+- A new cluster whose first leader stops before its new leadership term reaches the other two still elects again when both voted in its election. Each holds a candidate term, so neither is held back, and each heard every voter in that election, so the two elect a later term within seconds, as before. A member that took the leader holds a vote floor and waits for it, as under ADR 0161. An agent review of the first form of this rule found that case: the form held back every member whose log was empty, and two running members then waited for the stopped leader with no bound. Narrowing the rule to a member that holds no candidate term ends it. The double vote needs a member that forgot its vote, and only a member with no candidate term can have.
+- What the narrowed rule still costs a new cluster whose first leader stops early: a member that holds nothing and has not heard that leader in its present election waits for it with no bound, where before it elected with the other within seconds. The leader's frames to it were lost on the way, or it started again after the leader stopped. It cannot tell that it never voted from a vote a lost log directory took with it. A first leader that stops after its word arrived and before its followers joined its live log was already waited for, by the vote floor (ADR 0161). Starting the leader again ends the wait, and `cavalry doctor`'s `cluster-no-leader` says to.
+- Elections still end once every member that has run runs again and reaches the others. A member that holds nothing then hears every voter, and the guarded case lets it vote. The timer search settles every seed with every member up; the tests above end each wait by starting the member waited for.
 - ADR 0145's two accepted cases are now held. Each is two members of three whose logs are empty while the third, which holds the log, is stopped: both lost their logs, or one lost it and the other never caught up. The two used to elect between them, as a new cluster does, and start an empty history. Now each waits for every voter's report, and once the third runs its report holds a log, so they withhold and it leads. If the third never comes back, they wait for it with no bound, where before they lost the cluster's history.
 - Revisit if a member gains a way to know it never ran before: an identity the cluster records (work item 470), for instance.
 

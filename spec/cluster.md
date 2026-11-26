@@ -1379,13 +1379,16 @@ every voter has reported in this election, and it votes then by the one case abo
 whether it withholds or not (work item 476; ADR 0174). A member whose log is empty
 and that holds a candidate term kept its record of terms, and with it the vote it
 cast in that term, so it is not held back so: when a new cluster's first leader stops
-before any other member holds an entry, the two that voted in its election elect at
-the startup canvass timeout, as before. Without it, such a member that voted for one candidate in the
-cluster's first ballot and lost its log before the term's first entry would vote
-for a second candidate of that term, since no log is heard, and the two would lead
-one term. Every report it counts names a term at least the one it voted in, if the
-voter is the candidate it voted for: it read that candidate's request before it lost
-its log, so every frame of that candidate's stream written before the request was
+before its new leadership term reaches the other two, and both voted in its
+election, the two elect again, as before, since each heard every voter in that
+election. A member that holds nothing and has not heard that leader in its present
+election waits for it to run again ("What it costs"). Without the rule, a member
+that voted for one candidate in the cluster's first ballot and lost its log before
+the term's first entry would vote for a second candidate of that term, since no log
+is heard, and the two would lead one term. Under the rule, every report such a
+member counts names a term at least the one it voted in, if the voter is the
+candidate it voted for: it read that candidate's request before it lost its log, so
+every frame of that candidate's stream written before the request was
 sent before it, and of those, a datagram still on its way at the start is dropped
 below the new image ("What the second case rests on"). A frame held back to the new
 image was written after the request, so after the candidate stored the term. The
@@ -1617,7 +1620,12 @@ their logs while the third, which holds the log, is stopped, and two of three th
 hold no log, one that lost it and one that never held a byte of it, as a new
 cluster's member that started late and has not caught up, elect nothing while the
 third is stopped: each waits for every voter's report, and the third's holds a log
-(work item 476). Once the third runs, they withhold and it leads. And a member whose
+(work item 476). Once the third runs, they withhold and it leads. A member that
+holds nothing and has not heard a new cluster's first leader in its present
+election, its frames lost on the way or the member started again since, waits for
+that leader too, when it stops before its new leadership term reaches the member
+that voted for it: the two elect nothing until the leader runs again, where before
+they elected between them (work item 476). And a member whose
 leader's log no longer begins at position 0, its recordings purged below a snapshot,
 cannot replicate what it lacks, and withholds until it is started from a peer's
 snapshot, which this version does not do (work item 365).

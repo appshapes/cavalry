@@ -2251,10 +2251,10 @@ impl Consensus {
             term: request.log_leadership_term_id,
             position: request.log_position,
         };
-        // A member whose log is empty votes by that one case even when it does not
-        // withhold, in a cluster of empty logs once every voter has reported: the term
-        // condition keeps it from a second vote in a term it voted in before it lost its
-        // log (work item 476).
+        // A member that holds nothing, its log empty and no candidate term stored, votes
+        // by that one case even when it does not withhold, in a cluster of empty logs
+        // once every voter has reported: the term condition keeps it from a second vote
+        // in a term it voted in before it lost its log (work item 476; ADR 0174).
         if self.withholds(Some(candidate_log)) || self.holds_nothing() {
             let mut reports = self.reports(self.own_report());
             if let Some(slot) = self

@@ -3,7 +3,8 @@
 //! log holds when a cluster starts together, what a commit needs, what an offer is
 //! refused for, what a lossy and late consensus stream changes, the bound of the
 //! members table and of the stream, a cluster of one, a cold start with a member
-//! missing, a leader that lost its log directory, members parted, and the bound of the
+//! missing, a new cluster's first leader that stops before its word reaches anyone, a
+//! leader that lost its log directory, members parted, and the bound of the
 //! new leadership terms the in-memory cluster holds back. Every test checks, at every
 //! step, that no committed entry is lost, and that the leader commits nothing a quorum
 //! has not synced.
@@ -167,6 +168,168 @@ fn two_of_three_elect_no_leader_until_the_third_starts_and_then_the_three_elect(
     }
     assert_eq!(cluster.leader(), Some(leader), "it led throughout");
     assert_eq!(cluster.counts(leader).expect("the leader").terms_led, 1);
+}
+
+/// Holds back every new leadership term each member of `ids` sends another, runs
+/// `cluster` until a member leads, and cuts that leader off from the other two, so no
+/// word of its term reaches them. Then runs until each of the two has stored the
+/// leader's term, or a later one, as its candidate term, having voted in the election,
+/// and stops the leader. Returns the leader and its term.
+fn first_leader_stops_unheard(
+    cluster: &mut Cluster,
+    safety: &mut Safety,
+    ids: &[i32],
+    voters: impl Fn(i32) -> Vec<i32>,
+) -> (i32, i64) {
+    for &from in ids {
+        for to in followers(ids, from) {
+            cluster.hold_back_new_leadership_term(from, to);
+        }
+    }
+    safety.run_until(cluster, 3_000, "a first leader", |cluster| {
+        cluster.leader().is_some()
+    });
+    let first = cluster.leader().expect("a leader");
+    let term = cluster
+        .member(first)
+        .expect("a member")
+        .leadership_term_id();
+    for id in followers(ids, first) {
+        cluster.cut_one_way(first, id);
+    }
+    let voted = voters(first);
+    safety.run_until(cluster, 1_000, "the voters' candidate terms", |cluster| {
+        voted.iter().all(|&id| {
+            cluster
+                .record_of_terms(id)
+                .is_some_and(|(_, candidate)| candidate >= term)
+        })
+    });
+    cluster.halt(first);
+    for &id in &voted {
+        let member = cluster.member(id).expect("a member");
+        assert_eq!(member.vote_floor(), -1, "member {id} took no leader");
+        assert!(cluster.log(id).is_empty(), "member {id}");
+    }
+    (first, term)
+}
+
+/// A new cluster's first leader that stops before its new leadership term reaches
+/// either member that voted for it is replaced as before work item 476 (ADR 0174). Each
+/// of the two stored the term as its candidate term when it voted, so it remembers its
+/// vote and holds something, and neither took the leader, so neither holds a vote
+/// floor. Their election has not closed, and each heard every voter in it, the stopped
+/// leader's canvass position among them, so each reads `voters_unheard` 0 and neither
+/// waits: one of them leads a later term within 5 s of the stop, about 2 s at seeds 1
+/// to 5, and what it commits is on both.
+#[test]
+fn a_new_clusters_first_leader_that_stops_unheard_is_replaced_by_the_two_that_voted() {
+    let ids = [0, 1, 2];
+    for seed in 1..=5 {
+        let mut cluster = Cluster::with_election(&ids, seed).expect("three members");
+        let mut safety = Safety::new(&ids);
+        let (first, term) = first_leader_stops_unheard(&mut cluster, &mut safety, &ids, |first| {
+            followers(&ids, first)
+        });
+        let two = followers(&ids, first);
+        for &id in &two {
+            let member = cluster.member(id).expect("a member");
+            assert_eq!(member.voters_unheard(), 0, "seed {seed}: member {id}");
+        }
+        safety.run_until(&mut cluster, 5_000, "a leader of a later term", |cluster| {
+            cluster.leader().is_some_and(|leader| {
+                leader != first
+                    && cluster
+                        .member(leader)
+                        .expect("a member")
+                        .leadership_term_id()
+                        > term
+            })
+        });
+        safety.run_until(&mut cluster, 5_000, "the two settle", |cluster| {
+            settled(cluster, &two)
+        });
+        let leader = cluster.leader().expect("a leader");
+        let entry = cluster.offer(b"two of three").expect("the leader appends");
+        safety.run(&mut cluster, 500);
+        for &id in &two {
+            assert_eq!(
+                cluster.commit_position(id),
+                Some(entry),
+                "seed {seed}: member {id}"
+            );
+            assert_eq!(
+                cluster.log(id),
+                cluster.log(leader),
+                "seed {seed}: member {id}"
+            );
+        }
+    }
+}
+
+/// What work item 476's rule costs a new cluster whose first leader stops early (ADR
+/// 0174): a member that holds nothing and has not heard that leader in its present
+/// election waits for it. Member 2 hears neither other member while members 0 and 1
+/// elect, so it neither votes nor stores a term. The leader stops before its new
+/// leadership term reaches the member that voted for it, which holds a candidate term
+/// and no vote floor, and member 2 then hears that member. It has not heard the stopped
+/// leader in this election, and it cannot tell that it never voted for that leader,
+/// since a lost log directory would leave it as it is, so it neither stands nor votes.
+/// For 120 s, twice the startup canvass timeout, no member leads, and `voters_unheard`
+/// reads 1 on member 2, where before the rule the two elected within 2 s. The leader
+/// runs again: member 2 hears every voter, and the three elect and commit.
+#[test]
+fn a_member_that_never_voted_waits_for_a_first_leader_that_stopped_unheard() {
+    let ids = [0, 1, 2];
+    let mut cluster = Cluster::with_election(&ids, 1).expect("three members");
+    let mut safety = Safety::new(&ids);
+    cluster.cut_one_way(0, 2);
+    cluster.cut_one_way(1, 2);
+    let (first, _) =
+        first_leader_stops_unheard(&mut cluster, &mut safety, &ids, |first| vec![1 - first]);
+    assert!(first == 0 || first == 1, "member 2 stood: {first}");
+    let voter = 1 - first;
+    cluster.heal_between(voter, 2);
+    assert_eq!(
+        cluster.record_of_terms(2),
+        Some((vec![], -1)),
+        "member 2 never voted"
+    );
+
+    safety.run(&mut cluster, 120_000);
+    assert_eq!(cluster.leader(), None);
+    let waiting = cluster.member(2).expect("a member");
+    assert_eq!(
+        waiting.voters_unheard(),
+        1,
+        "member 2 waits for the first leader"
+    );
+    let counts = cluster.counts(2).expect("a member");
+    assert_eq!(counts.votes_for, 0, "{counts:?}");
+    assert!(
+        counts.votes_withheld > 0,
+        "the voter stood and asked: {counts:?}"
+    );
+    assert_eq!(
+        cluster.record_of_terms(2),
+        Some((vec![], -1)),
+        "member 2 stood for nothing"
+    );
+
+    // The first leader runs again, and member 2 hears every voter.
+    cluster.heal_between(first, voter);
+    cluster.heal_between(first, 2);
+    cluster.resume(first);
+    safety.run_until(&mut cluster, 70_000, "the three elect", |cluster| {
+        settled(cluster, &ids)
+    });
+    let entry = cluster
+        .offer(b"three of three")
+        .expect("the leader appends");
+    safety.run(&mut cluster, 500);
+    for id in ids {
+        assert_eq!(cluster.commit_position(id), Some(entry), "member {id}");
+    }
 }
 
 /// The leader loses its log directory and starts again on an empty one, which a

@@ -74,7 +74,9 @@ commit path runs per message.
   `Io::log_leadership_term_id`, so that it votes once in a term across a restart and
   canvasses with the log it holds. The term it followed, its leader and the commit
   position it knew are not kept: a leader tells it. Its canvass waits the startup
-  canvass timeout, 60 s, for a member it has not heard, as at any start, and a new
+  canvass timeout, 60 s, for a member it has not heard, as at any start, unless it holds
+  nothing, its log empty and no candidate term stored: then it stands and votes only once
+  it has heard every voter, with no bound (ADR 0174). A new
   leadership term says in `is startup` whether its leader leads it from its first
   election since it started (ADR 0089). The consensus module builds its core so, with a
   seed from the operating system mixed with the member id (ADR 0104).
