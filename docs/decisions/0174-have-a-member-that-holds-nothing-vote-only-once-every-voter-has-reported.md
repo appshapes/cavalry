@@ -79,16 +79,17 @@ The test `a_quorum_that_lost_its_logs_leads_a_term_a_second_time_and_the_check_f
 
 ## Evidence
 
-- **Seed 804 of the lost-log search passes, and seeds 804 and 937 fail with this rule taken out**: two members lead term 0. These are the first of seeds 1 to 3,000 at the search's draws, held streams among them. Both are among `just test`'s default seeds.
-- **The searches under the rule**, one seed a run in a release build:
+- **Seed 804 of the lost-log search passes, and with this rule taken out seeds 762, 804, 937 and 2228 of 1 to 3,000 fail.** Each fails on a second vote of one member id in one term while the run it first voted for could still lead it, the check described above. Seeds 804 and 937 were the first to fail before that check saw votes, on two members leading term 0, and both are among `just test`'s default seeds. The draws include held streams.
+- **The searches under the rule**, one seed a run in a release build, with the checks of votes and terms:
   - lost-log 1 to 3,000: none fails the check of every step;
   - faulted-truncation 1 to 300: none fails;
   - timer 1 to 200: none fails, with 0 members whose election had not closed and 0 seeds with no settled quorum.
 
   The timer search settles every seed with every member running, so elections end with every member up.
+- **The term above each term named alone taken out, and the check at the nomination delay's end alone taken out:** no seed of 1 to 3,000 fails either way. The search holds one stream at a time, and the schedule the term above each term named is needed for holds three. The evidence for each is its test, below.
 - **The regression seeds of the other rules, taken again:**
-  - ADR 0145's term condition out: 1765, 1961 and 2459 fail;
-  - ADR 0148's rule out: 226, 411, 609, 697, 1145 and 1210 fail.
+  - ADR 0145's term condition out: the first six to fail are 408, 780, 1765, 1961, 2459 and 2829. 408 and 780 fail on one term led by two members, which the check of terms now sees.
+  - ADR 0148's rule out: the first six to fail of 1 to 1,500 are 226, 411, 516, 609, 697 and 1145.
 
   The default seeds are now lost-log 1, 804, 937, 1765, 1961 and faulted-truncation 1, 226, 411, 609.
 - **On one core**, in `tests/vote_in_one_term.rs`:

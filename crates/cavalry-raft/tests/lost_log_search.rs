@@ -51,15 +51,19 @@ const IDS: [i32; 3] = [0, 1, 2];
 
 /// The seeds `just test` runs, each of which fails with one rule taken out:
 /// - seed 1;
-/// - seeds 804 and 937, at which the search finds two members leading term 0 with
-///   work item 476's rule taken out, so that a member that lost its log in a new
-///   cluster's first ballot votes again in that term;
-/// - seeds 1765 and 1961, at which it finds two members leading one term with the term
-///   condition of ADR 0145's one case in which a member that withholds votes taken out.
+/// - seeds 804 and 937, at which the search, with work item 476's rule taken out, finds
+///   a member that lost its log in a new cluster's first ballot voting again in term 0,
+///   and two members leading it;
+/// - seeds 1765 and 1961, at which it finds a second vote in one term, and two members
+///   leading it, with the term condition of ADR 0145's one case in which a member that
+///   withholds votes taken out.
 ///
-/// These are the first of seeds 1 to 3,000 that fail each way, at the search's draws of
-/// work item 476 (2459 fails without the term condition too). Seeds 779, 1573 and 2983
-/// did so until the stalls and held frames of work item 467 moved the search's paths.
+/// Of seeds 1 to 3,000, with the check of votes and terms of work item 476, seeds 762,
+/// 804, 937 and 2228 fail with work item 476's rule taken out, and the first six to
+/// fail with the term condition taken out are 408, 780, 1765, 1961, 2459 and 2829;
+/// 804, 937, 1765 and 1961 are the first that failed each way before that check saw
+/// votes. Seeds 779, 1573 and 2983 did so until the stalls and held frames of work
+/// item 467 moved the search's paths.
 const SEEDS: [u64; 5] = [1, 804, 937, 1765, 1961];
 
 /// A xorshift generator: the search is the seed's alone.
