@@ -33,6 +33,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -50,6 +51,7 @@ use cavalry_shm::spsc::{Consumer, Producer};
 use crate::conductor::now_nanos;
 use crate::idle::{IdleStrategy, Idler};
 use crate::spec;
+use crate::watch::WakeDue;
 
 const DOC: &str = "docs/reference/client-protocol.md#error-codes";
 
@@ -498,7 +500,9 @@ impl Replayer {
     /// The replayer's loop: duty cycles until `stop`, idling with the strategy while
     /// a replay is live and parked while none is. A replay dies with the driver;
     /// nothing of it is on disk.
-    pub(crate) fn run(mut self, stop: &AtomicBool) {
+    pub(crate) fn run(mut self, stop: &AtomicBool, due: Option<Arc<WakeDue>>) {
+        // Where this thread says when each park is due, for the driver's watch (ADR 0176).
+        self.idler.watch(due);
         while !stop.load(Ordering::Acquire) {
             let now = now_nanos();
             if self.duty_cycle(now) != 0 {
@@ -508,7 +512,7 @@ impl Replayer {
                 // unparks this thread when it does; an unpark that came before this
                 // park is a token the park consumes at once, so no request waits for
                 // the timeout. `Driver::close` unparks it too, after storing `stop`.
-                std::thread::park_timeout(IDLE_PARK);
+                self.idler.park_for(IDLE_PARK);
                 self.idler.reset();
             } else {
                 self.idler.idle();

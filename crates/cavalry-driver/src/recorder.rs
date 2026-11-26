@@ -25,6 +25,7 @@
 //! them leaves behind what the interval was holding back.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cavalry_log::catalog::CatalogError;
@@ -40,6 +41,7 @@ use crate::clock::EpochClock;
 use crate::conductor::now_nanos;
 use crate::idle::{IdleStrategy, Idler};
 use crate::spec;
+use crate::watch::WakeDue;
 
 /// How many replies the recorder holds back when the reply queue is full: one per live
 /// recording, which may stop on its own, and one per request handled in a cycle. With
@@ -420,7 +422,9 @@ impl Recorder {
     /// open has nothing to repair, except a recording one of whose syncs failed or
     /// whose stop's own writes or syncs fail, which is announced at the position last
     /// synced and whose slot the next open repairs (ADR 0064, ADR 0065).
-    pub(crate) fn run(mut self, stop: &AtomicBool) {
+    pub(crate) fn run(mut self, stop: &AtomicBool, due: Option<Arc<WakeDue>>) {
+        // Where this thread says when each park is due, for the driver's watch (ADR 0176).
+        self.idler.watch(due);
         while !stop.load(Ordering::Acquire) {
             let now = now_nanos();
             if self.duty_cycle(now) == 0 {

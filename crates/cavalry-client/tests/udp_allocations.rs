@@ -1,5 +1,5 @@
 //! The allocation gate over the UDP send path (CLAUDE.md, invariant 2 and gate 2; ADR
-//! 0041): the publisher, the driver's five threads and a receiver by hand in this
+//! 0041): the publisher, the driver's threads and a receiver by hand in this
 //! process, under `stats_alloc`, with ten thousand messages crossing the loopback and
 //! no allocation and no reallocation at all. `stats_alloc` counts a `realloc`, a buffer
 //! grown past a capacity it already had, apart from an allocation, so the test adds the
@@ -254,7 +254,7 @@ fn status_message(setup: &SetupFrame, offset: i32, window: i32, flags: u8) -> St
 }
 
 /// Nothing on the send path allocates (CLAUDE.md, invariant 2): with the publisher, the
-/// driver's five threads and the receiver in this process, ten thousand messages cross
+/// driver's threads and the receiver in this process, ten thousand messages cross
 /// the loopback under the counting allocator with no allocation and no reallocation at
 /// all.
 #[test]

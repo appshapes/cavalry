@@ -1,9 +1,13 @@
 //! What a thread does on a duty cycle that found no work (CLAUDE.md, "Data plane":
 //! busy-spin, yield and backoff, backoff the default): [`IdleStrategy`] names the three,
-//! and [`Idler`] is one of them with its state, which each of the driver's threads
+//! and [`Idler`] is one of them with its state, which each of the driver's five threads
 //! holds and a program's own duty cycle beside the driver can.
 
+use std::sync::Arc;
 use std::time::Duration;
+
+use crate::conductor::now_nanos;
+use crate::watch::WakeDue;
 
 /// The conductor's idle strategy. In Aeron, these are `BusySpinIdleStrategy`,
 /// `YieldingIdleStrategy` and `BackoffIdleStrategy` (`docs/glossary.md`).
@@ -119,6 +123,9 @@ pub struct Idler {
     spins: u32,
     yields: u32,
     park: Duration,
+    /// Where this thread says when its park is due, for the driver's watch (ADR 0176);
+    /// none for an idler nobody watches.
+    due: Option<Arc<WakeDue>>,
 }
 
 impl Idler {
@@ -129,6 +136,40 @@ impl Idler {
             spins: 0,
             yields: 0,
             park: MIN_PARK,
+            due: None,
+        }
+    }
+
+    /// Names where this thread says when its park is due, for the driver's watch: before
+    /// each park the thread stores in `due` when the park is to end, and clears it
+    /// after, so that the watch can end a park that outlived its timeout (ADR 0176).
+    /// Two stores and a read of the clock for each park, on the idle path alone.
+    pub(crate) fn watch(&mut self, due: Option<Arc<WakeDue>>) {
+        self.due = due;
+    }
+
+    /// Parks this thread for `park` at most, as [`Idler::idle`]'s backoff does and under
+    /// the same watch: for a loop that holds nothing to do and waits to be unparked.
+    pub(crate) fn park_for(&self, park: Duration) {
+        #[cfg(test)]
+        let actual = {
+            let held = tests::PARK_FOR_TEST.get();
+            if tests::PARK_FOR_TEST_ONCE.get() {
+                tests::PARK_FOR_TEST.set(None);
+            }
+            held.unwrap_or(park)
+        };
+        #[cfg(not(test))]
+        let actual = park;
+        match &self.due {
+            Some(due) => {
+                // What was asked, not what a test makes of it: the watch ends a park
+                // that outlived the timeout it was given.
+                due.parking(now_nanos(), park);
+                std::thread::park_timeout(actual);
+                due.woke();
+            }
+            None => std::thread::park_timeout(actual),
         }
     }
 
@@ -159,11 +200,7 @@ impl Idler {
                     self.yields += 1;
                     std::thread::yield_now();
                 } else {
-                    #[cfg(test)]
-                    let park = tests::PARK_FOR_TEST.get().unwrap_or(self.park);
-                    #[cfg(not(test))]
-                    let park = self.park;
-                    std::thread::park_timeout(park);
+                    self.park_for(self.park);
                     self.park = (self.park * 2).min(MAX_PARK);
                 }
             }
@@ -190,6 +227,12 @@ pub(crate) mod tests {
         /// An hour stands for the park whose timeout never comes, so that a test passes
         /// only when something unparks the thread.
         pub(crate) static PARK_FOR_TEST: Cell<Option<Duration>> = const { Cell::new(None) };
+    }
+
+    thread_local! {
+        /// For a test: [`PARK_FOR_TEST`] is for this thread's next park alone, so that
+        /// the thread parks as it should once that park has been ended.
+        pub(crate) static PARK_FOR_TEST_ONCE: Cell<bool> = const { Cell::new(false) };
     }
 
     /// A park that would last an hour.

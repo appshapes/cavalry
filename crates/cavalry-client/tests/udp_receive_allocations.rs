@@ -1,6 +1,6 @@
 //! The allocation gate over the UDP receive path (CLAUDE.md, invariant 2 and gate 2; ADR
 //! 0042): a publisher and a subscriber on one driver's `cavalry:udp` loopback, the
-//! driver's five threads in this process, under `stats_alloc`, with ten thousand
+//! driver's threads in this process, under `stats_alloc`, with ten thousand
 //! messages crossing the wire into an image and out to the subscriber and no allocation
 //! and no reallocation at all. `stats_alloc` counts a `realloc`, a buffer grown past a
 //! capacity it already had, apart from an allocation, so the test adds the two: it
@@ -155,7 +155,7 @@ fn drain(subscription: &mut Subscription, first: u64, count: u64, read: Read) {
 }
 
 /// Nothing on the receive path allocates (CLAUDE.md, invariant 2): with the publisher,
-/// the driver's five threads and the subscriber in this process, ten thousand messages
+/// the driver's threads and the subscriber in this process, ten thousand messages
 /// cross the loopback into an image under the counting allocator with no allocation
 /// and no reallocation at all.
 #[test]
