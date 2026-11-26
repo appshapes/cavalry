@@ -98,14 +98,23 @@ hosts, and no run's number is a bound.
   longest poll of a service's run where the poll of the first schedule was.
 - Every service holds the five counters and the publication from its first open
   of the log, a program that schedules no timer and takes no snapshot included,
-  which held none before. That is six of the 256 counters a driver gives its
-  clients, and a log of 192 MiB that the driver has made resident. Each service's
-  replay of its member's log is a log of that size already. Work item 478 is to
-  let the stream name a small one.
-- A driver that refuses one of the six fails the read of every program now, at
-  its start, where it failed the read of a program with timers at its first
-  schedule. The read's entries are taken first, as before, and each read after it
-  tries again and reports the refusal while it lasts.
+  which held none before. That is five more of the 256 counters a driver gives
+  its clients, and one more default `cavalry:ipc` log in the driver's directory,
+  3 × 64 MiB + 4 KiB, 192 MiB, every page of it resident. Each service's replay
+  of its member's log is a log of that size already, and so is the member's own
+  replay of it. Work item 478 is to let the stream name a small one.
+- On a host whose driver directory has no room for that log, `/dev/shm` on
+  Linux, the driver refuses the publication with error code 12 and counts it in
+  `driver.log_create_failed`, which `cavalry doctor` prints with what the log
+  needs and what to free. The service's read that first opened the log returns
+  that refusal as its error, once its entries are taken, and each read after it
+  asks again and returns it again while it lasts (ADR 0159): the program reads
+  its log, is told of the error at every read, and its member is told of no
+  timer until the publication is there. Before this decision that was the case
+  from a program's first schedule or snapshot; now it is from a service's start,
+  for every program.
+- A driver that refuses a counter, its 256 in use, is the same error of the same
+  reads, error code 10, counted in `driver.registry_full`.
 - A service's gauge `cluster.service_timers` is in the counters file while the
   service reads its history, which it was not unless a snapshot had added it. So
   `cavalry doctor`'s finding for a leader that holds no timer beside a service
