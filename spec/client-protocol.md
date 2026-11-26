@@ -91,7 +91,8 @@ otherwise, where `<tmp>` is the system's temporary directory (`/tmp` on macOS) a
 | `publications/<registration id>.logbuffer` | `spec/log-buffer.md` | when a publication is added, named by the publication's registration id; when a replay starts, named by the replay session id |
 | `images/<registration id>.logbuffer` | `spec/log-buffer.md`, type 2 | when a setup frame creates an image over UDP (`spec/udp.md`, "The receiver"), named by the image's own registration id, taken from the correlation id counter as a publication's is |
 | `clients/` | "The records a client writes" | when the driver starts, empty |
-| `clients/<client id>.lock` | "The records a client writes" | by a client, before its first command; empty, and locked by that client for as long as it has anything that can store into a counter; the driver removes it when it has taken the lock of a client that has gone |
+| `clients/<client id>.lock` | "The records a client writes" | by a client, before its first command; empty, and locked by that client for as long as it has anything that can store into a counter; the client removes it when it lets go of the lock |
+| `clients/<client id>.gone` | "The records a client writes" | by the driver, which gives this name to the lock file of a client that closed or was timed out; the driver removes it when it has taken the lock |
 | `log-recordings-<member id>` | `spec/cluster.md`, "The log's recordings" | by a cluster member's consensus module, a client of the driver and not the driver, each time the member names a recording of its log, written as `log-recordings-<member id>.tmp` and renamed; the driver neither reads nor writes it, and removes it with the rest when it starts (ADR 0103) |
 
 A driver holds the directory by an exclusive advisory lock of the operating system on
@@ -1067,10 +1068,15 @@ them is dropped, and when the process ends, however it ends, and a process that 
 stopped still holds it. A process that the client's process forked holds it too, with
 the mapping, for as long as it lives.
 
-For a client that has closed or was timed out and for which it still holds a record,
-the driver tries the lock once every lock check interval, without waiting. When it
-takes the lock, nothing of that client can store: it lets every record held for the
-client go, removes the file and lets go of the lock.
+When a client closes or is timed out, the driver renames its lock file to
+`clients/<client id>.gone`. The lock is on the file and goes with it, and the name is
+how `cavalry doctor` tells a client that has gone from one that runs. A client that
+has already let go of its lock removed its file as it did, so the driver finds none to
+rename: nothing of that client can store, and the driver lets every record held for
+it go. Otherwise the driver tries the lock on the renamed file once every lock check
+interval, without waiting. When it takes the lock, nothing of that client can store:
+it lets every record held for the client go, removes the file and lets go of the
+lock.
 
 **A client that holds no lock.** A directory may refuse the lock, or the file. Such a
 client attaches all the same. The driver tries the lock at the client's first command
