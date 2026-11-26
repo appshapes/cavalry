@@ -600,8 +600,12 @@ impl Cavalry {
     /// response timeout. The channel is `cavalry:ipc`, or a `cavalry:udp` channel, on
     /// which the driver binds the endpoint and an image arrives with the sender's setup
     /// frame, its source identity the sender's address (`spec/udp.md`, "The receiver";
-    /// ADR 0042). A client that already holds the driver's bound of subscriptions is
-    /// [`ClientError::SubscriptionsFull`], and the new one is removed again.
+    /// ADR 0042). An add past the driver's bound on subscriptions, 1,024 of every client
+    /// together, is [`ClientError::Refused`] with error code 10. A subscription dropped
+    /// just before leaves its place to the add, whether or not the driver has answered
+    /// its removal yet. [`ClientError::SubscriptionsFull`] is a driver that answered
+    /// past its own bound: the client cannot hand the new subscription its images, and
+    /// removes it again.
     pub fn add_subscription(
         &mut self,
         channel: &str,

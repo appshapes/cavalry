@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use cavalry_client::{Action, Cavalry, Fault, Offer};
+use cavalry_client::{Action, Cavalry, ClientError, Fault, Offer};
 use cavalry_driver::{Driver, spec};
 
 /// A directory of its own per test, removed when the guard drops.
@@ -735,4 +735,43 @@ fn a_refused_channel_is_refused_and_a_closed_clients_subscription_refuses_to_pol
     let refusal = Fault::Closed.to_string();
     assert!(refusal.contains("client is closed"), "{refusal}");
     assert!(format!("{subscription:?}").contains("closed: true"));
+}
+
+/// A client at the driver's bound of subscriptions, 1,024 of every client together, is
+/// refused the next by the driver, with error code 10. One that drops a subscription
+/// and adds another at once is not refused, though its conductor may admit the add
+/// before it has read the driver's answer to the removal, while it keeps the removed
+/// subscription's registration for that answer (`spec/client-protocol.md`, "Sizes" and
+/// "The records a client writes"). The swap is made many times, so that the conductor
+/// meets the add at each of the places it can in its cycle.
+#[test]
+fn a_client_at_the_bound_that_drops_a_subscription_adds_the_next_at_once() {
+    let dir = TestDir::new("at-the-bound");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
+    let mut client = Cavalry::connect_to(dir.path()).expect("connects");
+    let mut held = std::collections::VecDeque::with_capacity(spec::MAX_SUBSCRIPTIONS);
+    for n in 0..spec::MAX_SUBSCRIPTIONS {
+        held.push_back(
+            client
+                .add_subscription("cavalry:ipc", 2005)
+                .unwrap_or_else(|error| panic!("subscription {n}, under the bound: {error}")),
+        );
+    }
+    match client.add_subscription("cavalry:ipc", 2005) {
+        Err(ClientError::Refused { raw_code: 10, .. }) => {}
+        other => panic!("one past the bound is the driver's code 10, not {other:?}"),
+    }
+    for round in 0..256 {
+        drop(held.pop_front());
+        held.push_back(
+            client
+                .add_subscription("cavalry:ipc", 2005)
+                .unwrap_or_else(|error| panic!("round {round}, one dropped just before: {error}")),
+        );
+    }
+    assert_eq!(held.len(), spec::MAX_SUBSCRIPTIONS);
+    assert!(!client.is_closed());
+    drop(held);
+    client.close().expect("the client closes");
+    driver.close().expect("the driver closes");
 }
