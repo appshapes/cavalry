@@ -2373,8 +2373,8 @@ fn member_findings(
             Some(held) => (
                 Level::Warn,
                 format!(
-                    "the leader, member {id}, holds {}, its cluster.timers, each told to \
-                     it by a service, and no service runs beside it: {none}. The program \
+                    "the leader, member {id}, holds {} that a service told it of, its \
+                     cluster.timers, and no service runs beside it: {none}. The program \
                      beside this member has stopped; one that was killed is seen here \
                      once its client has timed out, about 10 s later. \
                      While it is stopped, the member is told of no timer and appends one \
@@ -8084,8 +8084,8 @@ mod tests {
                 "cluster-no-service",
                 Level::Warn,
                 format!(
-                    "the leader, member 1, holds {timers}, its cluster.timers, each told to \
-                     it by a service, and no service runs beside it: {none}. The program \
+                    "the leader, member 1, holds {timers} that a service told it of, its \
+                     cluster.timers, and no service runs beside it: {none}. The program \
                      beside this member has stopped; one that was killed is seen here once \
                      its client has timed out, about 10 s later. While it is stopped, the \
                      member is told of no timer and appends one event at the most for each \

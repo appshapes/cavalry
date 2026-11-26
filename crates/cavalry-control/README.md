@@ -72,7 +72,10 @@ is allowed here.
   that has not taken it yet and as a warning beside a member that does not lead,
   which names the leader or the election, or beside a leader of a build that takes
   none
-  (`cluster.control_toggle`; ADR 0147); a leader that lost its quorum (`cluster-quorum-lost`); a
+  (`cluster.control_toggle`; ADR 0147); a leader beside which no service runs, by
+  the counters a service adds for its member, as a warning when the leader holds
+  timers, which a service that has stopped told it of, and as a note when it holds
+  none (`cluster-no-service`; ADR 0167); a leader that lost its quorum (`cluster-quorum-lost`); a
   commit position behind the leader's own append position (`cluster-commit-waits`);
   and, with each counter's own doctor sentence from `counters.toml`, consensus messages
   the member rejected, as from a member of another version
