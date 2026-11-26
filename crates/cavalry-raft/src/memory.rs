@@ -91,9 +91,9 @@ const REPLAY_CONNECT_TIMEOUT_NS: u64 = 5_000_000_000;
 pub const MAX_HELD_BACK: usize = 8;
 
 /// The most consensus messages the in-memory cluster holds in held streams at once
-/// ([`Cluster::hold_stream`]): one sent while that many are held is lost, as a frame a
-/// full log buffer has no room for is refused to its writer, who sends again at its
-/// interval.
+/// ([`Cluster::hold_stream`]): one sent while that many are held is lost, as a datagram
+/// the network drops is, and counted in [`Cluster::held_stream_losses`]. Its sender
+/// takes it as sent.
 pub const MAX_HELD_STREAM: usize = 1_024;
 
 /// The most votes the in-memory cluster records for [`Cluster::votes_cast`]: one cast
@@ -393,7 +393,10 @@ struct World {
     /// The messages a held stream lost: sent while [`MAX_HELD_STREAM`] were held, or
     /// released while the in-flight queue was full.
     stream_losses: u64,
-    /// Every vote cast, in the order written: at most [`MAX_VOTES_CAST`].
+    /// Every vote cast, in the order written: at most [`MAX_VOTES_CAST`]. It grows as
+    /// votes are cast, where the other bounded tables are reserved whole: a search's run
+    /// casts some hundreds, and every cluster a test builds would hold 1.5 MiB for the
+    /// bound it seldom nears. [`Cluster::votes_unrecorded`] counts what it cannot hold.
     votes_cast: Vec<VoteCast>,
     /// The votes cast past [`MAX_VOTES_CAST`], not recorded.
     votes_unrecorded: u64,
@@ -1155,8 +1158,8 @@ impl Cluster {
                 max_delay_ms: 0,
                 random: 0x9E37_79B9_7F4A_7C15,
                 addressed: Vec::new(),
-                held_streams: Vec::new(),
-                stream_queue: Vec::new(),
+                held_streams: Vec::with_capacity(member_ids.len().saturating_mul(member_ids.len())),
+                stream_queue: Vec::with_capacity(MAX_HELD_STREAM),
                 stream_losses: 0,
                 votes_cast: Vec::new(),
                 votes_unrecorded: 0,

@@ -12,7 +12,9 @@
 mod elected_cluster;
 
 use cavalry_proto::cluster::{MAX_MEMBERS, Message, Stream, TimeUnit};
-use cavalry_raft::memory::{Cluster, IN_FLIGHT_CAPACITY, MAX_DELAY_MS, MAX_HELD_BACK};
+use cavalry_raft::memory::{
+    Cluster, IN_FLIGHT_CAPACITY, MAX_DELAY_MS, MAX_HELD_BACK, MAX_HELD_STREAM,
+};
 use cavalry_raft::{
     Consensus, ElectionCause, ElectionState, MembersRefused, NO_SESSION, Refused, Role,
 };
@@ -305,12 +307,15 @@ fn a_member_that_never_voted_waits_for_a_first_leader_that_stopped_unheard() {
         1,
         "member 2 waits for the first leader"
     );
+    assert!(
+        cluster.counts(voter).expect("a member").candidacies > 0,
+        "the voter stood and asked"
+    );
+    // A wait, which `cluster.voters_unheard` shows, and no withheld vote: member 2
+    // answers the voter's requests with nothing and counts none (ADR 0174).
     let counts = cluster.counts(2).expect("a member");
     assert_eq!(counts.votes_for, 0, "{counts:?}");
-    assert!(
-        counts.votes_withheld > 0,
-        "the voter stood and asked: {counts:?}"
-    );
+    assert_eq!(counts.votes_withheld, 0, "{counts:?}");
     assert_eq!(
         cluster.record_of_terms(2),
         Some((vec![], -1)),
@@ -758,6 +763,41 @@ fn the_consensus_stream_in_memory_holds_its_bound_and_loses_what_it_cannot_hold(
     assert_eq!(cluster.set_delivery(0, u64::MAX), MAX_DELAY_MS);
     safety.run(&mut cluster, 100);
     assert!(cluster.in_flight() <= IN_FLIGHT_CAPACITY);
+}
+
+/// A stream the in-memory cluster holds keeps at most `MAX_HELD_STREAM` messages, and
+/// loses the next one sent on it, counted, as a datagram the network drops (work item
+/// 476). The leader's stream to one follower is held: it fills with the leader's
+/// messages to that follower, and once full, each further one is lost and counted while
+/// the held count stays at the bound. Released, the stream is sent whole, holds nothing
+/// more, and the three end behind one leader again.
+#[test]
+fn a_stream_held_in_memory_holds_its_bound() {
+    let ids = [0, 1, 2];
+    let mut safety = Safety::new(&ids);
+    let (mut cluster, leader) = elected(1, &mut safety);
+    let follower = followers(&ids, leader)[0];
+    cluster.hold_stream(leader, follower);
+    safety.run_until(
+        &mut cluster,
+        3_600_000,
+        "the held stream is full",
+        |cluster| cluster.held_stream_count(leader, follower) == MAX_HELD_STREAM,
+    );
+    assert_eq!(cluster.held_stream_losses(), 0);
+    safety.run_until(
+        &mut cluster,
+        60_000,
+        "a message past the bound",
+        |cluster| cluster.held_stream_losses() > 0,
+    );
+    assert_eq!(cluster.held_stream_count(leader, follower), MAX_HELD_STREAM);
+
+    cluster.release_stream(leader, follower);
+    assert_eq!(cluster.held_stream_count(leader, follower), 0);
+    safety.run_until(&mut cluster, 60_000, "one leader again", |cluster| {
+        settled(cluster, &ids)
+    });
 }
 
 /// The new leadership terms the in-memory cluster holds back are bounded (invariant 3;

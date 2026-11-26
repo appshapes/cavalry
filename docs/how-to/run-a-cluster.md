@@ -91,7 +91,9 @@ committed once a quorum, two of three, has it on disk.
    ```
 
    Each prints `cavalry run: driver started on ...` and then `cavalry run: cluster
-   member <id> started`. Start all three. A new cluster elects its first leader only
+   member <id> started`. Start all three, from one build of `cavalry`: a build from
+   before work item 476 votes at a new cluster's start as this one does not, and
+   nothing tells the two apart. A new cluster elects its first leader only
    once every member has started: three members that have heard one another elect a
    leader within a second, and two that run while the third has not started wait
    for it, for as long as it takes. Before its first vote a member of a new cluster

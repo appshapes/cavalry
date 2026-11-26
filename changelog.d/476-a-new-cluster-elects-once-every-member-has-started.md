@@ -6,5 +6,6 @@
   that lost its log directory during the cluster's first ballot can no longer vote a
   second time in that term and leave two leaders of one term. Start every member of
   a new cluster. The gauge `cluster.voters_unheard` counts the members such a member
-  waits for, and `cavalry doctor`'s `cluster-no-leader` names them.
+  waits for, and `cavalry doctor`'s `cluster-no-leader` says how many there are and
+  to start them.
   [Run a cluster of three members](docs/how-to/run-a-cluster.md), step 3.

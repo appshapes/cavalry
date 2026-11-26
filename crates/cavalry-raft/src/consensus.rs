@@ -658,10 +658,12 @@ pub struct Counts {
     pub standby_vote_requests: u64,
     /// `cluster.votes_withheld`: a request vote the member answered with nothing
     /// because it withholds its vote, its log empty beside a member that holds one, or
-    /// holding nothing, its log empty and no candidate term stored, whether a voter is
-    /// unheard in its election or not (work item 476), or a vote floor held, and not
-    /// every voter had reported a log the candidate's is at least, or a voter other than
-    /// the candidate had named the request's term or a later one (ADR 0145, ADR 0161).
+    /// holding nothing, its log empty and no candidate term stored (work item 476), or a
+    /// vote floor held, and not every voter had reported a log the candidate's is at
+    /// least, or a voter other than the candidate had named the request's term or a
+    /// later one (ADR 0145, ADR 0161). A member that holds nothing and answers with
+    /// nothing only because a voter has not reported, no log heard and no floor held,
+    /// counts nothing here: `cluster.voters_unheard` shows that wait (ADR 0174).
     pub votes_withheld: u64,
     /// `cluster.leaders_withheld`: a new leadership term the member, a voter with its
     /// log empty, ignored where it would otherwise have taken the sender as its leader:
@@ -2278,7 +2280,18 @@ impl Consensus {
                 )
             });
             if !withheld_vote(self.count, &reports, candidate_log) || !fresh {
-                count(&mut self.counts.votes_withheld);
+                // A member that holds nothing and waits for a voter it has not heard,
+                // with no log heard and no floor held, answers with nothing and counts
+                // nothing: `cluster.voters_unheard` shows that wait, and
+                // `cluster.votes_withheld` the refusals that keep a committed entry, or
+                // one vote to a term (ADR 0174).
+                let waiting = self.holds_nothing()
+                    && self.vote_floor < 0
+                    && self.unheard_voters() > 0
+                    && !self.log_heard(Some(candidate_log));
+                if !waiting {
+                    count(&mut self.counts.votes_withheld);
+                }
                 return Ok(());
             }
         }
@@ -2689,6 +2702,24 @@ impl Consensus {
     /// floor and at or past a floor answer (ADR 0161, ADR 0163). A member that holds
     /// nothing votes by the one guarded case whether it withholds or not.
     fn withholds(&self, candidate: Option<LogReport>) -> bool {
+        let log_heard = self.log_heard(candidate);
+        // Every other voter of the members string has reported in this election: until
+        // then a member that holds nothing, its log empty and no candidate term stored,
+        // withholds too, since a candidate it voted for before it lost its log names
+        // that term only in a report (work item 476).
+        withholds(
+            self.own_report(),
+            self.vote_floor,
+            log_heard,
+            self.unheard_voters() == 0,
+            self.candidate_term,
+        )
+    }
+
+    /// Whether a member's report in this election, or `candidate`, the log of a request
+    /// this member answers, holds a log: log leadership term id 0 or more, or a position
+    /// above 0.
+    fn log_heard(&self, candidate: Option<LogReport>) -> bool {
         let holds = |log: &LogReport| log.term >= 0 || log.position > 0;
         let reported = self
             .peers
@@ -2702,18 +2733,7 @@ impl Consensus {
                     position: peer.position,
                 })
             });
-        let log_heard = reported || candidate.as_ref().is_some_and(holds);
-        // Every other voter of the members string has reported in this election: until
-        // then a member that holds nothing, its log empty and no candidate term stored,
-        // withholds too, since a candidate it voted for before it lost its log names
-        // that term only in a report (work item 476).
-        withholds(
-            self.own_report(),
-            self.vote_floor,
-            log_heard,
-            self.unheard_voters() == 0,
-            self.candidate_term,
-        )
+        reported || candidate.as_ref().is_some_and(holds)
     }
 
     /// The lowest log position of the floor answers this member took since it last

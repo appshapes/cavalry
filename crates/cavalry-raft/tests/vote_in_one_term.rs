@@ -176,9 +176,10 @@ fn empty_request(candidate: i32, term: i64) -> Message<'static> {
 ///
 /// The member has heard member 0 and not member 1, the candidate it may have voted
 /// for in term 0 before it lost its log, which says nothing while its ballot runs. It
-/// withholds: member 0's request for term 0 gets no vote, no term is stored, and the
-/// request is counted. Member 1 then reports, naming term 0, and member 0's request for
-/// term 0 again gets nothing: the term condition. Its request for term 1, a term no
+/// withholds: member 0's request for term 0 gets no vote and no term is stored. That is
+/// a wait, which `cluster.voters_unheard` shows, and no withheld vote is counted. Member
+/// 1 then reports, naming term 0, and member 0's request for term 0 again gets nothing:
+/// the term condition, a withheld vote, counted. Its request for term 1, a term no
 /// other voter named, gets the member's vote.
 #[test]
 fn a_member_of_a_new_cluster_that_lost_its_log_votes_only_once_it_has_heard_every_voter() {
@@ -201,7 +202,11 @@ fn a_member_of_a_new_cluster_that_lost_its_log_votes_only_once_it_has_heard_ever
         io.count(|call| matches!(call, Call::StoreCandidateTerm(_))),
         0
     );
-    assert_eq!(member.counts().votes_withheld, 1);
+    assert_eq!(
+        member.counts().votes_withheld,
+        0,
+        "a wait, not a withheld vote"
+    );
 
     // Member 1 reports: it stood in term 0, and names it.
     member
@@ -213,7 +218,7 @@ fn a_member_of_a_new_cluster_that_lost_its_log_votes_only_once_it_has_heard_ever
         .on_message(at(5), &empty_request(0, 0), &mut io)
         .expect("no fault");
     assert_eq!(votes_to(&io, 0), 0, "no second vote in term 0");
-    assert_eq!(member.counts().votes_withheld, 2);
+    assert_eq!(member.counts().votes_withheld, 1);
 
     // A term no other voter named: the member votes.
     io.clear();

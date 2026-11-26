@@ -44,15 +44,18 @@ consensus session. No layout of version 2 changes and every header's version sta
 0. It adds a use for a reserved bit of a `flags` field to what a version of a major
 may add ("Versions and the upgrade"). A member and a client of version 3 write 768.
 
-Version 3 is amended once, with no version moved (work item 476; ADR 0174): a member
+Version 3 is amended once, with no version moved (work item 476; ADR 0174). A member
 that holds nothing, its log empty and no candidate term stored, beside members whose
 logs are empty too, stands and votes only once every voter of its members string has
 reported in its election, and then by the one case in which a member that withholds
-votes ("A member that lost its log"). It changes no message and no layout. Only a
-cluster whose logs are all empty behaves differently: a new cluster's start, and a
-cluster each of whose members lost its log. A member built
-before the amendment votes there as it did, so a new cluster is started with members
-of one build.
+votes ("A member that lost its log"). It stands in the term above each term a member
+named, and a member that withholds when its nomination delay ends goes back to
+canvass (state 2). It changes no message and no layout. A cluster whose logs are all
+empty behaves differently: a new cluster's start, and a cluster each of whose members
+lost its log. So does a member whose log is empty that hears a log only during its
+nomination delay. A member built before the amendment votes and stands there as it
+did, and nothing a member sends tells the two builds apart, so a new cluster is started
+with members of one build.
 
 ## Members and streams
 
@@ -1406,8 +1409,8 @@ lead the term while only this member has lost its log. A vote that named the run
 answers would make the argument unneeded (work item 500). The
 cost is the start of a new cluster: it elects its first leader only once each of its
 members has run, and two members that run while the third has never started wait
-for it, with no bound (`cluster-no-leader` in `cavalry doctor` names the voter not
-yet heard). In Aeron, a cluster elects at its start with a quorum once the startup
+for it, with no bound (`cluster-no-leader` in `cavalry doctor` says how many voters
+the member has not heard, from `cluster.voters_unheard`, and to start them). In Aeron, a cluster elects at its start with a quorum once the startup
 canvass timeout passes, which rests on a member's state being kept; this page keeps
 the startup canvass timeout for a member whose log is not empty.
 
@@ -2642,7 +2645,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.log_images_lost` | a follower whose image of its leader's log was no longer available, so that it held an election |
 | `cluster.elections_failed` | an election that failed in a state and began again at init |
 | `cluster.elections_closed` | an election that closed: leader ready to closed, the term's first entry appended, or follower ready to closed, the append position sent |
-| `cluster.election_steps` | a step of an election from one state to the next that neither begins it, fails it, closes it nor makes the member a leader: canvass to follower replay, follower replay to follower log init, follower log init to follower log await, follower log await to follower ready, leader log replication to leader replay, leader replay to leader init and leader init to leader ready; and canvass to nominate, and nominate, candidate ballot and follower ballot to follower replay, a candidate's step to follower replay also moving `cluster.role` from candidate to follower (ADR 0081); and canvass, nominate, candidate ballot and follower ballot to follower log replication, a candidate's step there moving `cluster.role` as its step to follower replay does, and follower log replication to canvass (ADR 0086); and follower replay to follower catch-up init, follower catch-up init to follower catch-up await, follower catch-up await to follower catch-up, follower catch-up to follower log init, and follower log init to follower ready for a member the catch-up left subscribed (ADR 0088) |
+| `cluster.election_steps` | a step of an election from one state to the next that neither begins it, fails it, closes it nor makes the member a leader: canvass to follower replay, follower replay to follower log init, follower log init to follower log await, follower log await to follower ready, leader log replication to leader replay, leader replay to leader init and leader init to leader ready; and canvass to nominate, and nominate, candidate ballot and follower ballot to follower replay, a candidate's step to follower replay also moving `cluster.role` from candidate to follower (ADR 0081); and canvass, nominate, candidate ballot and follower ballot to follower log replication, a candidate's step there moving `cluster.role` as its step to follower replay does, and follower log replication to canvass (ADR 0086); and nominate to canvass, for a member that withholds when its delay ends (ADR 0174); and follower replay to follower catch-up init, follower catch-up init to follower catch-up await, follower catch-up await to follower catch-up, follower catch-up to follower log init, and follower log init to follower ready for a member the catch-up left subscribed (ADR 0088) |
 | `cluster.leader_heartbeat_timeouts` | a follower that held an election for want of a leader's heartbeat |
 | `cluster.leader_step_downs` | a leader whose election had closed that held an election on a canvass position with either term, a request vote whose candidate term id or a commit position whose leadership term id above its own term |
 | `cluster.higher_terms_seen` | a follower whose election had closed that held an election on a request vote whose candidate term id or a commit position whose leadership term id above its own term: a term the cluster began without it (ADR 0082) |
@@ -2661,7 +2664,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.floor_answers_ignored` | from version 3, a floor answer the member read and did not take: one that named another member, came from a member that is not its leader or for a term not its leader's, or named a session other than its own consensus publication's to that leader, as an answer to its earlier run does ("The floor answer"; ADR 0163) |
 | `cluster.floor_answer` | a gauge, from version 3: the lowest log position of the floor answers the member took since it stored its vote floor, in this run, −1 for none; the clear's third condition reads it ("The floor answer"; ADR 0163) |
 | `cluster.standby_vote_requests` | a request vote that the member read as a standby and answered with nothing: the candidate's string gives this member a vote, and the member's own does not ("Standbys", "Changing a standby's mark") |
-| `cluster.votes_withheld` | a request vote that the member answered with nothing because it withholds its vote, its log empty while a member that holds one is heard, or holding nothing, its log empty and no candidate term stored, with or without a voter unheard in this election, or a vote floor held, and not every voter had reported a log the candidate's is at least, or a voter other than the candidate had named the request's term or a later one ("A member that lost its log"; ADR 0145, ADR 0174) |
+| `cluster.votes_withheld` | a request vote that the member answered with nothing because it withholds its vote, its log empty while a member that holds one is heard, or holding nothing, its log empty and no candidate term stored, or a vote floor held, and not every voter had reported a log the candidate's is at least, or a voter other than the candidate had named the request's term or a later one ("A member that lost its log"; ADR 0145, ADR 0174); not one that a member holding nothing answered with nothing only because a voter has not reported, no log heard and no floor held, a wait that `cluster.voters_unheard` shows |
 | `cluster.voters_unheard` | a gauge: while the member holds nothing, its log empty and no candidate term stored, the voters of its members string, other than itself, that it has not heard report in its present election, and 0 once each has and for any other member; such a member, beside members whose logs are empty too, stands and votes only once it is 0 ("A member that lost its log"; ADR 0174) |
 | `cluster.leaders_withheld` | a new leadership term that a voter whose log is empty ignored, where it would otherwise have taken the sender as its leader: it had not voted that leader in, and had not heard each other voter in this election name a term at most the leader's ("A member that lost its log", "Taking a leader"; ADR 0145) |
 | `cluster.protocol_version` | a gauge: the member's own version of this page in semantic form, 256 for version 1. It does not change while the member runs. A member of a build older than this counter has none: every member of version 0, and one of the first build of version 1 ("Versions and the upgrade"; ADR 0137) |

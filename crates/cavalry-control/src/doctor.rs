@@ -1970,12 +1970,12 @@ fn no_leader_message(member: &MemberCounters, state: i64, cluster: Option<&Clust
     // 0 for any other member. A standby casts no vote and stands for nothing anyway.
     let unheard = match member.voters_unheard {
         Some(unheard) if unheard > 0 && member.standby != Some(1) => format!(
-            " It holds nothing, its log empty and no candidate term stored, as every \
-             member of a new cluster does before its first vote, and it has not heard \
-             {unheard} of the other {who}s in this election: such a member neither stands \
-             nor votes until it has heard every {who}, so a new cluster elects no leader \
-             until each of its members has started. Start or restart the {who} it has not \
-             heard."
+            " It holds nothing, its log empty and no candidate term stored, as a new \
+             cluster's members do before their first vote and as a lost log directory \
+             leaves a member, and it has not heard {unheard} of the other {who}s in this \
+             election: such a member neither stands nor votes until it has heard every \
+             {who}, so a new cluster elects no leader until each of its members has \
+             started. Start or restart the {who}s it has not heard."
         ),
         _ => String::new(),
     };
@@ -6919,15 +6919,16 @@ mod tests {
         let message = &no_leader(findings);
         assert!(
             message.contains(
-                "It holds nothing, its log empty and no candidate term stored, as every \
-                 member of a new cluster does before its first vote, and it has not heard 1 \
-                 of the other members in this election: such a member neither stands nor \
-                 votes until it has heard every member"
+                "It holds nothing, its log empty and no candidate term stored, as a new \
+                 cluster's members do before their first vote and as a lost log directory \
+                 leaves a member, and it has not heard 1 of the other members in this \
+                 election: such a member neither stands nor votes until it has heard every \
+                 member"
             ),
             "{message}"
         );
         assert!(
-            message.contains("Start or restart the member it has not heard."),
+            message.contains("Start or restart the members it has not heard."),
             "{message}"
         );
         let (_, findings) =
