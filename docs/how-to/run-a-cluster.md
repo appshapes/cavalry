@@ -94,8 +94,8 @@ committed once a quorum, two of three, has it on disk.
    member <id> started`. Start all three. A new cluster elects its first leader only
    once every member has started: three members that have heard one another elect a
    leader within a second, and two that run while the third has not started wait
-   for it, for as long as it takes, since a member of a new cluster votes only once it
-   has heard every member (work item 476). Once the cluster has its first leader, a
+   for it, for as long as it takes, since a member of a new cluster votes, before its
+   first vote, only once it has heard every member (work item 476). Once the cluster has its first leader, a
    member that stops or starts late no longer holds the others back: two of three
    elect while the third is stopped, and the third catches up from the leader when it
    starts.

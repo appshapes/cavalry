@@ -1963,16 +1963,18 @@ fn no_leader_message(member: &MemberCounters, state: i64, cluster: Option<&Clust
     } else {
         ""
     };
-    // A member whose log is empty in a cluster of empty logs, as a new cluster's
-    // members are, neither stands nor votes until it has heard every voter (work item
-    // 476): the voter it has not heard is the one to start.
-    let unheard = match (member.voters_unheard, member.append_position) {
-        (Some(unheard), Some(0)) if unheard > 0 => format!(
-            " Its log is empty and it has not heard {unheard} of the other {who}s in this \
-             election: a member whose log is empty, as every member's is in a new \
-             cluster, neither stands nor votes until it has heard every {who}, so a new \
-             cluster elects no leader until each of its members has started. Start the \
-             {who} that has not started."
+    // A member that holds nothing, its log empty and no candidate term stored, as a new
+    // cluster's members before their first vote, neither stands nor votes until it has
+    // heard every voter (work item 476), and the gauge counts the voters it waits for:
+    // 0 for any other member. A standby casts no vote and stands for nothing anyway.
+    let unheard = match member.voters_unheard {
+        Some(unheard) if unheard > 0 && member.standby != Some(1) => format!(
+            " It holds nothing, its log empty and no candidate term stored, as every \
+             member of a new cluster does before its first vote, and it has not heard \
+             {unheard} of the other {who}s in this election: such a member neither stands \
+             nor votes until it has heard every {who}, so a new cluster elects no leader \
+             until each of its members has started. Start or restart the {who} it has not \
+             heard."
         ),
         _ => String::new(),
     };
@@ -6882,20 +6884,16 @@ mod tests {
                                  |1,127.0.0.1:9010,127.0.0.1:9011,127.0.0.1:9012,127.0.0.1:9013,127.0.0.1:9014\
                                  |2,127.0.0.1:9020,127.0.0.1:9021,127.0.0.1:9022,127.0.0.1:9023,127.0.0.1:9024";
 
-    /// A member that has no leader is told where its election stands, why it began,
-    /// from its gauge, and what elects a leader, and never that a member leads without
-    /// a vote or to start the cluster again (ADR 0100, ADR 0102). In canvass it is told
-    /// what a canvass after a replication waits for. The elections it has failed are
-    /// counted against the three counters that each name a rule, and those the three
-    /// do not hold are counted out, with what else fails an election.
-    /// A member of a new cluster whose log is empty and that has not heard every voter
-    /// is told it neither stands nor votes until it has, and to start the voter that has
-    /// not started (work item 476). A member whose log holds entries is told nothing of
-    /// it, since it stands at the startup canvass timeout with a quorum.
+    /// A member of a new cluster that holds nothing, its log empty and no candidate term
+    /// stored, and that has not heard every voter, is told it neither stands nor votes
+    /// until it has, and to start or restart the voter it has not heard (work item 476).
+    /// The core counts the voters it waits for only for such a member: one whose gauge
+    /// reads 0, as a member that holds a log reads, is told nothing of it, and nor is a
+    /// standby, which casts no vote.
     #[test]
     fn a_new_clusters_member_that_has_not_heard_every_voter_is_told_to_start_it() {
         let cluster = Cluster::of(Some(THREE_MEMBERS)).expect("the members string parses");
-        let waiting = |append: i64| {
+        let waiting = |append: i64, unheard: i64| {
             [
                 (CLUSTER_ROLE, 0),
                 (CLUSTER_ELECTION_STATE, 1),
@@ -6904,7 +6902,7 @@ mod tests {
                 (CLUSTER_ELECTION_CAUSE, 0),
                 (CLUSTER_PROTOCOL_VERSION, 768),
                 (CLUSTER_APPEND_POSITION, append),
-                (CLUSTER_VOTERS_UNHEARD, 1),
+                (CLUSTER_VOTERS_UNHEARD, unheard),
             ]
         };
         let no_leader = |findings: Vec<Finding>| {
@@ -6915,26 +6913,38 @@ mod tests {
                 .message
         };
         let (_, findings) =
-            cluster_findings_in("new-cluster-waits", 0, Some(&cluster), &waiting(0));
+            cluster_findings_in("new-cluster-waits", 0, Some(&cluster), &waiting(0, 1));
         let message = &no_leader(findings);
         assert!(
             message.contains(
-                "Its log is empty and it has not heard 1 of the other members in this \
-                 election: a member whose log is empty, as every member's is in a new \
-                 cluster, neither stands nor votes until it has heard every member"
+                "It holds nothing, its log empty and no candidate term stored, as every \
+                 member of a new cluster does before its first vote, and it has not heard 1 \
+                 of the other members in this election: such a member neither stands nor \
+                 votes until it has heard every member"
             ),
             "{message}"
         );
         assert!(
-            message.contains("Start the member that has not started."),
+            message.contains("Start or restart the member it has not heard."),
             "{message}"
         );
         let (_, findings) =
-            cluster_findings_in("holds-a-log-waits", 0, Some(&cluster), &waiting(4096));
+            cluster_findings_in("holds-a-log-waits", 0, Some(&cluster), &waiting(4096, 0));
         let message = &no_leader(findings);
-        assert!(!message.contains("Its log is empty"), "{message}");
+        assert!(!message.contains("It holds nothing"), "{message}");
+        let mut standby = waiting(0, 1).to_vec();
+        standby.push((CLUSTER_STANDBY, 1));
+        let (_, findings) = cluster_findings_in("standby-waits", 0, Some(&cluster), &standby);
+        let message = &no_leader(findings);
+        assert!(!message.contains("It holds nothing"), "{message}");
     }
 
+    /// A member that has no leader is told where its election stands, why it began,
+    /// from its gauge, and what elects a leader, and never that a member leads without
+    /// a vote or to start the cluster again (ADR 0100, ADR 0102). In canvass it is told
+    /// what a canvass after a replication waits for. The elections it has failed are
+    /// counted against the three counters that each name a rule, and those the three
+    /// do not hold are counted out, with what else fails an election.
     #[test]
     fn a_member_that_elects_and_has_no_leader_is_told_why_its_election_began() {
         let cluster = Cluster::of(Some(THREE_MEMBERS)).expect("the members string parses");

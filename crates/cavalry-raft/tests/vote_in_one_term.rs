@@ -14,8 +14,9 @@
 //! In a new cluster every log is empty and no log is heard, so a member did not
 //! withhold there, and the case was never asked. A member that lost its log in the
 //! cluster's first ballot then voted a second time in that term (work item 476, lost-log
-//! search seed 804). Now a member whose log is empty withholds too until every voter has
-//! reported, and votes by the case whether it withholds or not.
+//! search seed 804). Now a member that holds nothing, its log empty and no candidate
+//! term stored, withholds too until every voter has reported, and votes by the case
+//! whether it withholds or not (ADR 0174).
 //!
 //! [`Io`]: cavalry_raft::Io
 
@@ -239,4 +240,50 @@ fn a_member_of_a_new_cluster_that_has_heard_every_voter_votes() {
         .expect("no fault");
     assert_eq!(votes_to(&io, 0), 1);
     assert_eq!(member.counts().votes_withheld, 0);
+}
+
+/// A member that voted holds a candidate term, so it is not held back by work item
+/// 476's rule though its log is empty (ADR 0174). A new cluster's member hears both
+/// voters and votes for member 1 in term 0, storing the term; member 1 leads, and stops
+/// before any other member holds an entry. The member's ballot ends with no leader word,
+/// and in its next election it hears member 0 alone, the leader being gone. It votes for
+/// member 0's request in term 1, as before the rule: a member that remembers its vote
+/// cannot vote twice in a term, so it need not wait for the leader that stopped.
+#[test]
+fn a_member_that_voted_holds_a_candidate_term_and_votes_without_the_stopped_leaders_report() {
+    let mut io = Stub::new();
+    let mut member = wiped(3, &mut io);
+    for voter in [0, 1] {
+        member
+            .on_message(at(2), &empty_canvass(voter, -1), &mut io)
+            .expect("no fault");
+    }
+    member
+        .on_message(at(3), &empty_request(1, 0), &mut io)
+        .expect("no fault");
+    assert_eq!(votes_to(&io, 1), 1, "a vote for member 1 in term 0");
+    assert_eq!(
+        io.count(|call| matches!(call, Call::StoreCandidateTerm(0))),
+        1
+    );
+    // Member 1 is gone: no word from it, and the member's election begins again.
+    let mut ms = 4;
+    while member.election_state() != cavalry_raft::ElectionState::Canvass || ms < 100 {
+        ms += 100;
+        member.do_work(at(ms), &mut io).expect("no fault");
+        assert!(ms < 120_000, "the member canvasses again");
+    }
+    member
+        .on_message(at(ms + 1), &empty_canvass(0, 0), &mut io)
+        .expect("no fault");
+    assert_eq!(
+        member.voters_unheard(),
+        0,
+        "it holds a candidate term: it waits for none"
+    );
+    io.clear();
+    member
+        .on_message(at(ms + 2), &empty_request(0, 1), &mut io)
+        .expect("no fault");
+    assert_eq!(votes_to(&io, 0), 1, "a vote for member 0 in term 1");
 }

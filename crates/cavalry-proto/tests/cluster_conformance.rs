@@ -705,7 +705,13 @@ fn arithmetic_vector(name: &str, vector: &Value) {
             };
             let heard = inputs["log_heard"].as_bool().expect("log_heard");
             let reported = inputs["all_reported"].as_bool().expect("all_reported");
-            json!({"withholds": withholds(own, int(inputs, "vote_floor"), heard, reported)})
+            json!({"withholds": withholds(
+                own,
+                int(inputs, "vote_floor"),
+                heard,
+                reported,
+                int(inputs, "candidate_term"),
+            )})
         }
         "clears-vote-floor" => {
             let joined = inputs["joined"].as_bool().expect("joined");

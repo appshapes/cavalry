@@ -44,12 +44,13 @@ consensus session. No layout of version 2 changes and every header's version sta
 0. It adds a use for a reserved bit of a `flags` field to what a version of a major
 may add ("Versions and the upgrade"). A member and a client of version 3 write 768.
 
-Version 3 is amended once, with no version moved (work item 476): a member whose log
-is empty, beside members whose logs are empty too, stands and votes only once every
-voter of its members string has reported in its election, and then by the one case
-in which a member that withholds votes ("A member that lost its log"). It changes no
-message and no layout. Only a cluster whose logs are all empty behaves differently: a
-new cluster's start, and a cluster each of whose members lost its log. A member built
+Version 3 is amended once, with no version moved (work item 476; ADR 0174): a member
+that holds nothing, its log empty and no candidate term stored, beside members whose
+logs are empty too, stands and votes only once every voter of its members string has
+reported in its election, and then by the one case in which a member that withholds
+votes ("A member that lost its log"). It changes no message and no layout. Only a
+cluster whose logs are all empty behaves differently: a new cluster's start, and a
+cluster each of whose members lost its log. A member built
 before the amendment votes there as it did, so a new cluster is started with members
 of one build.
 
@@ -1366,15 +1367,20 @@ which the `withheld-vote` and `votes-in-term` vectors pin, the voters alone give
 
 - Its log is empty, log leadership term id −1 at position 0, while a member's report
   in this election, or the request it answers, holds a log, log leadership term id 0
-  or more or a position above 0; or while a voter of its members string other than
-  itself has not reported in this election.
+  or more or a position above 0; or, while its record of terms holds no candidate
+  term either, while a voter of its members string other than itself has not reported
+  in this election.
 - It holds a vote floor.
 
-So a member whose log is empty beside members whose logs are empty too, a member of a
-new cluster or one that lost its log in the new cluster's first ballot, stands and
-votes only once every voter has reported in this election, and it votes then by the
-one case above, as every member whose log is empty does, whether it withholds or not
-(work item 476). Without it, such a member that voted for one candidate in the
+So a member that holds nothing, its log empty and no candidate term stored, beside
+members whose logs are empty too, a member of a new cluster before its first vote or
+one that lost its log in the new cluster's first ballot, stands and votes only once
+every voter has reported in this election, and it votes then by the one case above,
+whether it withholds or not (work item 476; ADR 0174). A member whose log is empty
+and that holds a candidate term kept its record of terms, and with it the vote it
+cast in that term, so it is not held back so: when a new cluster's first leader stops
+before any other member holds an entry, the two that voted in its election elect at
+the startup canvass timeout, as before. Without it, such a member that voted for one candidate in the
 cluster's first ballot and lost its log before the term's first entry would vote
 for a second candidate of that term, since no log is heard, and the two would lead
 one term. Every report it counts names a term at least the one it voted in, if the
@@ -2625,8 +2631,8 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.floor_answers_ignored` | from version 3, a floor answer the member read and did not take: one that named another member, came from a member that is not its leader or for a term not its leader's, or named a session other than its own consensus publication's to that leader, as an answer to its earlier run does ("The floor answer"; ADR 0163) |
 | `cluster.floor_answer` | a gauge, from version 3: the lowest log position of the floor answers the member took since it stored its vote floor, in this run, −1 for none; the clear's third condition reads it ("The floor answer"; ADR 0163) |
 | `cluster.standby_vote_requests` | a request vote that the member read as a standby and answered with nothing: the candidate's string gives this member a vote, and the member's own does not ("Standbys", "Changing a standby's mark") |
-| `cluster.votes_withheld` | a request vote that the member answered with nothing because it withholds its vote, its log empty while a member that holds one is heard, while a voter has not reported in this election, or with no log heard, or a vote floor held, and not every voter had reported a log the candidate's is at least, or a voter other than the candidate had named the request's term or a later one ("A member that lost its log"; ADR 0145, work item 476) |
-| `cluster.voters_unheard` | a gauge: the voters of the member's members string, other than itself, that it has not heard report in its present election, 0 once each has; a member whose log is empty, beside members whose logs are empty too, stands and votes only once it is 0 ("A member that lost its log"; work item 476) |
+| `cluster.votes_withheld` | a request vote that the member answered with nothing because it withholds its vote, its log empty while a member that holds one is heard, or holding nothing, its log empty and no candidate term stored, with or without a voter unheard in this election, or a vote floor held, and not every voter had reported a log the candidate's is at least, or a voter other than the candidate had named the request's term or a later one ("A member that lost its log"; ADR 0145, ADR 0174) |
+| `cluster.voters_unheard` | a gauge: while the member holds nothing, its log empty and no candidate term stored, the voters of its members string, other than itself, that it has not heard report in its present election, and 0 once each has and for any other member; such a member, beside members whose logs are empty too, stands and votes only once it is 0 ("A member that lost its log"; ADR 0174) |
 | `cluster.leaders_withheld` | a new leadership term that a voter whose log is empty ignored, where it would otherwise have taken the sender as its leader: it had not voted that leader in, and had not heard each other voter in this election name a term at most the leader's ("A member that lost its log", "Taking a leader"; ADR 0145) |
 | `cluster.protocol_version` | a gauge: the member's own version of this page in semantic form, 256 for version 1. It does not change while the member runs. A member of a build older than this counter has none: every member of version 0, and one of the first build of version 1 ("Versions and the upgrade"; ADR 0137) |
 | `cluster.sessions` | a gauge: open sessions, on every member, as the snapshot it started from and its log's committed session open and close events since left them |

@@ -640,13 +640,14 @@ def new_leadership_term_action(log_term, append, msg, candidate_term, in_canvass
     return dict(none, action="replay", truncate_to=truncate_to, records=records)
 
 
-def withholds(own, vote_floor, log_heard, all_reported):
-    """spec/cluster.md, "A member that lost its log" (ADR 0145, ADR 0161, work item 476):
-    whether a member withholds its vote and its candidacy: its log `[term, position]` empty,
-    term −1 at position 0, while a log is heard or while not every other voter has reported in
-    this election, or a vote floor held, 0 or more, −1 for none."""
+def withholds(own, vote_floor, log_heard, all_reported, candidate_term):
+    """spec/cluster.md, "A member that lost its log" (ADR 0145, ADR 0161, ADR 0174): whether a
+    member withholds its vote and its candidacy: its log `[term, position]` empty, term −1 at
+    position 0, while a log is heard, or while it holds no candidate term, −1, and not every
+    other voter has reported in this election; or a vote floor held, 0 or more, −1 for none."""
     empty = own[0] < 0 and own[1] == 0
-    return {"withholds": (empty and (log_heard or not all_reported)) or vote_floor >= 0}
+    return {"withholds": (empty and (log_heard or (candidate_term < 0 and not all_reported)))
+            or vote_floor >= 0}
 
 
 def clears_vote_floor(vote_floor, joined, append_position, answered):
@@ -923,18 +924,21 @@ VECTORS += [
                {"members": 3, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}],
                 "heard": [0, 1], "timeout_passed": False}, {"leader": False, "unanimous": False, "lost": False}),
     *[arithmetic(name, "withholds",
-                 {"own": own, "vote_floor": floor, "log_heard": heard, "all_reported": reported},
-                 withholds(own, floor, heard, reported))
-      for name, own, floor, heard, reported in [
-          ("withholds-not-a-new-clusters-member-once-every-voter-reported", [-1, 0], -1, False, True),
-          ("withholds-a-new-clusters-member-until-every-voter-reported", [-1, 0], -1, False, False),
-          ("withholds-an-empty-log-beside-a-log", [-1, 0], -1, True, True),
-          ("withholds-below-its-floor", [3, 4096], 8192, False, True),
-          ("withholds-at-its-floor-while-it-holds-it", [3, 8192], 8192, True, True),
-          ("withholds-a-log-with-no-floor-not", [3, 4096], -1, True, True),
-          ("withholds-a-log-with-no-floor-not-before-every-voter-reported", [3, 4096], -1, False, False),
-          ("withholds-past-its-floor-while-it-holds-it", [3, 12288], 8192, False, True),
-          ("withholds-with-a-floor-of-0", [0, 4096], 0, False, True),
+                 {"own": own, "vote_floor": floor, "log_heard": heard, "all_reported": reported,
+                  "candidate_term": candidate},
+                 withholds(own, floor, heard, reported, candidate))
+      for name, own, floor, heard, reported, candidate in [
+          ("withholds-not-a-new-clusters-member-once-every-voter-reported", [-1, 0], -1, False, True, -1),
+          ("withholds-a-new-clusters-member-until-every-voter-reported", [-1, 0], -1, False, False, -1),
+          ("withholds-not-a-new-clusters-member-that-holds-a-candidate-term", [-1, 0], -1, False, False, 0),
+          ("withholds-an-empty-log-beside-a-log", [-1, 0], -1, True, True, -1),
+          ("withholds-an-empty-log-beside-a-log-whatever-its-candidate-term", [-1, 0], -1, True, True, 2),
+          ("withholds-below-its-floor", [3, 4096], 8192, False, True, 3),
+          ("withholds-at-its-floor-while-it-holds-it", [3, 8192], 8192, True, True, 3),
+          ("withholds-a-log-with-no-floor-not", [3, 4096], -1, True, True, 3),
+          ("withholds-a-log-with-no-floor-not-before-every-voter-reported", [3, 4096], -1, False, False, -1),
+          ("withholds-past-its-floor-while-it-holds-it", [3, 12288], 8192, False, True, 3),
+          ("withholds-with-a-floor-of-0", [0, 4096], 0, False, True, 0),
       ]],
     *[arithmetic(name, "clears-vote-floor",
                  {"vote_floor": floor, "joined": joined, "append_position": append, "answered": answered},

@@ -370,6 +370,9 @@ struct World {
     /// sent: at most [`MAX_HELD_STREAM`].
     held_streams: Vec<(usize, usize)>,
     stream_queue: Vec<Flight>,
+    /// The messages a held stream lost: sent while [`MAX_HELD_STREAM`] were held, or
+    /// released while the in-flight queue was full.
+    stream_losses: u64,
 }
 
 impl World {
@@ -468,6 +471,8 @@ impl Io for MemberIo<'_> {
                     run,
                     session,
                 });
+            } else {
+                self.world.stream_losses = self.world.stream_losses.saturating_add(1);
             }
             return true;
         }
@@ -1081,6 +1086,7 @@ impl Cluster {
                 addressed: Vec::new(),
                 held_streams: Vec::new(),
                 stream_queue: Vec::new(),
+                stream_losses: 0,
             },
         })
     }
@@ -2330,9 +2336,19 @@ impl Cluster {
             } else if flight.run == run && self.world.net.len() < IN_FLIGHT_CAPACITY {
                 flight.deliver_at_ns = now_ns.saturating_add(STEP_NS);
                 self.world.net.push_back(flight);
+            } else if flight.run == run {
+                self.world.stream_losses = self.world.stream_losses.saturating_add(1);
             }
         }
         self.world.stream_queue = kept;
+    }
+
+    /// The messages held streams lost: one sent while [`MAX_HELD_STREAM`] were held, or
+    /// one released while the in-flight queue held [`IN_FLIGHT_CAPACITY`]. A message an
+    /// earlier run of its sender wrote, which goes with that run, is no loss of this
+    /// count's.
+    pub fn held_stream_losses(&self) -> u64 {
+        self.world.stream_losses
     }
 
     /// Holds back the next floor answer member `from` sends to member `to`: it is

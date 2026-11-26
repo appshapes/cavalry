@@ -3175,7 +3175,8 @@
         ],
         "vote_floor": -1,
         "log_heard": false,
-        "all_reported": true
+        "all_reported": true,
+        "candidate_term": -1
       },
       "fields": {
         "withholds": false
@@ -3192,10 +3193,29 @@
         ],
         "vote_floor": -1,
         "log_heard": false,
-        "all_reported": false
+        "all_reported": false,
+        "candidate_term": -1
       },
       "fields": {
         "withholds": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "withholds-not-a-new-clusters-member-that-holds-a-candidate-term",
+      "rule": "withholds",
+      "inputs": {
+        "own": [
+          -1,
+          0
+        ],
+        "vote_floor": -1,
+        "log_heard": false,
+        "all_reported": false,
+        "candidate_term": 0
+      },
+      "fields": {
+        "withholds": false
       }
     },
     {
@@ -3209,7 +3229,26 @@
         ],
         "vote_floor": -1,
         "log_heard": true,
-        "all_reported": true
+        "all_reported": true,
+        "candidate_term": -1
+      },
+      "fields": {
+        "withholds": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "withholds-an-empty-log-beside-a-log-whatever-its-candidate-term",
+      "rule": "withholds",
+      "inputs": {
+        "own": [
+          -1,
+          0
+        ],
+        "vote_floor": -1,
+        "log_heard": true,
+        "all_reported": true,
+        "candidate_term": 2
       },
       "fields": {
         "withholds": true
@@ -3226,7 +3265,8 @@
         ],
         "vote_floor": 8192,
         "log_heard": false,
-        "all_reported": true
+        "all_reported": true,
+        "candidate_term": 3
       },
       "fields": {
         "withholds": true
@@ -3243,7 +3283,8 @@
         ],
         "vote_floor": 8192,
         "log_heard": true,
-        "all_reported": true
+        "all_reported": true,
+        "candidate_term": 3
       },
       "fields": {
         "withholds": true
@@ -3260,7 +3301,8 @@
         ],
         "vote_floor": -1,
         "log_heard": true,
-        "all_reported": true
+        "all_reported": true,
+        "candidate_term": 3
       },
       "fields": {
         "withholds": false
@@ -3277,7 +3319,8 @@
         ],
         "vote_floor": -1,
         "log_heard": false,
-        "all_reported": false
+        "all_reported": false,
+        "candidate_term": -1
       },
       "fields": {
         "withholds": false
@@ -3294,7 +3337,8 @@
         ],
         "vote_floor": 8192,
         "log_heard": false,
-        "all_reported": true
+        "all_reported": true,
+        "candidate_term": 3
       },
       "fields": {
         "withholds": true
@@ -3311,7 +3355,8 @@
         ],
         "vote_floor": 0,
         "log_heard": false,
-        "all_reported": true
+        "all_reported": true,
+        "candidate_term": 0
       },
       "fields": {
         "withholds": true

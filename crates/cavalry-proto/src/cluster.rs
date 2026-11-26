@@ -2883,20 +2883,24 @@ pub fn candidate(
 /// them the record of its votes. It does too for as long as it holds a vote floor,
 /// `vote_floor` 0 or more, −1 for none: the floor it stored when it took a leader with
 /// its log empty, which it holds until [`clears_vote_floor`] says it has caught up. A
-/// member whose log is empty while no member holds a log is one of a new cluster, and
-/// it withholds too until `all_reported`: every other voter of its members string has
-/// reported in this election. One that lost its log in the cluster's first ballot may
-/// have voted there, and a candidate it voted for names the term only in a report
-/// (work item 476). Once every voter has reported, it votes by the one case in which a
-/// member that withholds votes ([`withheld_vote`], [`votes_in_term`]).
+/// member whose log is empty while no member holds a log is one of a new cluster. If it
+/// holds no candidate term either, `candidate_term` −1, as a member whose log directory
+/// was lost holds none, it withholds too until `all_reported`: every other voter of its
+/// members string has reported in this election. One that lost its log in the
+/// cluster's first ballot may have voted there, and a candidate it voted for names the
+/// term only in a report (work item 476). Once every voter has reported, it votes by
+/// the one case in which a member that withholds votes ([`withheld_vote`],
+/// [`votes_in_term`]). A member that holds a candidate term remembers the vote it cast
+/// in it, so it is not held back so.
 pub const fn withholds(
     own: LogReport,
     vote_floor: i64,
     log_heard: bool,
     all_reported: bool,
+    candidate_term: i64,
 ) -> bool {
     let empty = own.term < 0 && own.position == 0;
-    (empty && (log_heard || !all_reported)) || vote_floor >= 0
+    (empty && (log_heard || (candidate_term < 0 && !all_reported))) || vote_floor >= 0
 }
 
 /// Whether a member clears its vote floor (`spec/cluster.md`, "A member that lost its

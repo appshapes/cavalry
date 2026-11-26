@@ -106,6 +106,9 @@ struct Drawn {
     frames_held: u64,
     streams_held: u64,
     streams_across_a_wipe: u64,
+    /// Messages the held streams lost, which would make a held stream reach its receiver
+    /// with less than its sender wrote.
+    stream_losses: u64,
 }
 
 /// Runs `seed` for `length_ms`, the check of every step failing the test where it
@@ -302,6 +305,7 @@ fn search(seed: u64, length_ms: u64) -> Drawn {
         }
         safety.run(&mut cluster, 1);
     }
+    drawn.stream_losses = cluster.held_stream_losses();
     drawn
 }
 
@@ -328,6 +332,7 @@ fn no_committed_entry_is_lost_across_lost_log_directories() {
         all.frames_held += drawn.frames_held;
         all.streams_held += drawn.streams_held;
         all.streams_across_a_wipe += drawn.streams_across_a_wipe;
+        all.stream_losses += drawn.stream_losses;
     }
     let Drawn {
         wipes,
@@ -338,6 +343,7 @@ fn no_committed_entry_is_lost_across_lost_log_directories() {
         frames_held,
         streams_held,
         streams_across_a_wipe,
+        stream_losses,
     } = all;
     assert!(wipes > 0, "seeds {seeds:?} wiped no member");
     assert!(
@@ -352,6 +358,10 @@ fn no_committed_entry_is_lost_across_lost_log_directories() {
         streams_held > 0 && streams_across_a_wipe > 0,
         "seeds {seeds:?} held {streams_held} streams, {streams_across_a_wipe} of them to a \
          member wiped while they were held"
+    );
+    assert_eq!(
+        stream_losses, 0,
+        "seeds {seeds:?}: a held stream lost messages"
     );
     assert!(
         caught_up > 0,
