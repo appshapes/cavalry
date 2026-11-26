@@ -85,7 +85,9 @@ CANCELLED_ID = 78          # the timer that is scheduled and cancelled in the sa
 TIMER_AFTER_MS = 1000
 HOUR_MS = 3_600_000        # the deadline its first schedule gives it, which the second replaces
 LATER_MESSAGE = b"later"   # the prefix of a message at which each program schedules one more timer, due at once
-LATER = 200                # how many of them the round sends, one at a time
+# How many of them the round sends, one at a time: 200, some four seconds of the gate.
+# CAVALRY_LATER_TIMERS names another count for a measurement, 10,000 for a p99.99.
+LATER = int(os.environ.get("CAVALRY_LATER_TIMERS", "200"))
 LATER_ID = 1000            # the id of the first of their timers; the others count on from it
 INT64_MIN, INT64_MAX = -(2 ** 63), 2 ** 63 - 1
 REFRESH_SECONDS = 1.2      # a timer refresh interval of spec/cluster.md, "Values", 1 s, and more
@@ -614,7 +616,7 @@ def main():
     # One message at a time, and the next when every service has been handed the
     # timer of the last, so that each is measured alone.
     for n in range(LATER):
-        offer(session, LATER_MESSAGE + b"%03d" % n, served, answered)
+        offer(session, LATER_MESSAGE + b"%d" % n, served, answered)
         wait(f"each service is handed the timer of later message {n}",
              lambda n=n: all(LATER_ID + n in s.later for s in served), served, answered)
     ids = range(LATER_ID, LATER_ID + LATER)
@@ -633,13 +635,18 @@ def main():
     stamped = sorted(served[0].later[i][1] - served[0].later_scheduled[i][0] for i in ids)
     counts = ", ".join(f"{ms} ms: {stamped.count(ms)}" for ms in sorted(set(stamped)))
     waited = sorted((leader.later[i][2] - leader.later_scheduled[i][1]) // 1000 for i in ids)
-    quantile = lambda q: waited[min(len(waited) - 1, int(q * len(waited)))]  # noqa: E731
-    print(f"conformance/python: cluster round: {LATER} later timers, each due at once at a message of its own and "
-          f"handed to three services once: stamped by the leader after their message's time, {counts}; the "
-          f"service beside the leader was handed each {quantile(0.5):,} us after it scheduled it at the p50, "
-          f"{quantile(0.99):,} us at the p99 and {waited[-1]:,} us at the most, of {LATER}, where its first timers "
-          f"of this run took {leader.first_took // 1000:,} us and were stamped {at_once} ms after their message "
-          f"(not gated)")
+
+    def rank(sample, q):
+        """The nearest rank of `q` in a sorted sample: the least value that `q` of it is at or below."""
+        return sample[max(0, min(len(sample) - 1, int(-(-len(sample) * q // 1)) - 1))]
+
+    print(f"conformance/python: cluster round: {LATER:,} later timers, each due at once at a message of its own and "
+          f"handed to three services once: stamped by the leader after their message's time, nearest rank, p50 "
+          f"{rank(stamped, 0.5)} ms, p99 {rank(stamped, 0.99)} ms, p99.99 {rank(stamped, 0.9999)} ms, max "
+          f"{stamped[-1]} ms, as {counts}; the service beside the leader was handed each, after it scheduled it, "
+          f"p50 {rank(waited, 0.5):,} us, p99 {rank(waited, 0.99):,} us, p99.99 {rank(waited, 0.9999):,} us, max "
+          f"{waited[-1]:,} us; its first timers of this run took {leader.first_took // 1000:,} us and were stamped "
+          f"{at_once} ms after their message (not gated; a p99.99 of fewer than 10,000 is the max)")
 
     # 10. The session before its client. Its close is an entry every service is handed,
     # after which the log holds no session open.
