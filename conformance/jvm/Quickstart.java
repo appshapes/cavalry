@@ -402,10 +402,26 @@ public final class Quickstart {
         List<Integer> outer = new ArrayList<>();
         List<int[]> nested = new ArrayList<>();
         FragmentHandler nestedHandler = (body, header) -> fail("a poll from inside a handler of the same subscription delivered a fragment");
+        // The subscription's images, asked for from inside its own handler, after the poll from
+        // inside it, so that the thread's last error is that poll's: the ABI refuses the count
+        // there, and the list and the image at an index are each that refusal, with the
+        // count's own message. The list threw IllegalArgumentException there for a capacity
+        // of -1, and the image at an index was null (work item 468).
+        List<String> listed = new ArrayList<>();
+        List<java.util.function.Supplier<Object>> asks = List.of(() -> subscription.images(), () -> subscription.imageAt(0));
         FragmentHandler outerHandler = (body, header) -> {
             outer.add(indexOf(body));
             int count = subscription.poll(nestedHandler, 10);
             nested.add(new int[] {count, Abi.errcode()});
+            for (java.util.function.Supplier<Object> ask : asks) {
+                try {
+                    Object answered = ask.get(); // asked before the count, whose own refusal would set the same error
+                    listed.add(subscription.imageCount() + " answered " + answered);
+                } catch (CavalryException refusedList) {
+                    listed.add(subscription.imageCount() + " " + refusedList.function() + " " + refusedList.code() + " "
+                        + refusedList.abiMessage().startsWith("cavalry_subscription_image_count refused (polling)"));
+                }
+            }
         };
         until = deadline();
         while (outer.size() < 3) {
@@ -417,6 +433,17 @@ public final class Quickstart {
         if (!outer.equals(List.of(13, 14, 15)) || !refusedEach) {
             fail(name + ": the outer handler saw " + outer + " and the polls from inside it returned " + nested.size()
                 + " results; expected messages 13 to 15, and -1 with ERR_POLLING (" + Abi.ERR_POLLING + ") each time");
+        }
+        String refusedList = "-1 cavalry_subscription_image_count " + Abi.ERR_POLLING + " true";
+        if (!listed.equals(java.util.Collections.nCopies(6, refusedList))) {
+            fail(name + ": the image count, the list of images and the image at index 0, asked for from inside the handler,"
+                + " gave " + listed + "; expected -1 and a CavalryException of cavalry_subscription_image_count with"
+                + " ERR_POLLING and that call's own message, twice in each of the three handler calls");
+        }
+        if (subscription.images().size() != subscription.imageCount() || subscription.imageCount() < 1
+            || subscription.imageAt(0) == null || subscription.imageAt(subscription.imageCount()) != null) {
+            fail(name + ": after the poll the subscription lists " + subscription.images().size() + " images and counts "
+                + subscription.imageCount() + ", with an image at index 0 and none past the count expected");
         }
 
         position = claimOrFail(name, publication, 16);
@@ -511,7 +538,9 @@ public final class Quickstart {
                 + " with error " + commitAfterCloseCode + "; expected -1 and ERROR with ERR_NULL (" + Abi.ERR_NULL
                 + "), and -1 with ERR_NO_CLAIM (" + Abi.ERR_NO_CLAIM + ")");
         }
-        say(name + ": a poll from inside a handler of its own subscription returned -1 with ERR_POLLING and the outer handler saw"
+        say(name + ": a poll from inside a handler of its own subscription returned -1 with ERR_POLLING, the image count there"
+            + " was -1 and the list of images and the image at an index each threw CavalryException with that code, and the"
+            + " outer handler saw"
             + " messages 13 to 15; a tryClaim with a claim outstanding returned ERROR with ERR_CLAIM_OUTSTANDING, the claim stayed"
             + " the first segment and its commit set it to null; a close with a claim outstanding set the claim to null, and the"
             + " claim's commit, abort and reserved value after it returned -1 with ERR_NO_CLAIM; a close"

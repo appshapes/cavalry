@@ -450,7 +450,13 @@ beside three members.
 - Never read a refusal as an answer. A `Poll` from inside a handler of the same
   subscription returns −1 with `ErrPolling` in `Err`, or with `ErrNegative` for a
   fragment limit below zero, which the client refuses first, and the poll in progress
-  goes on. A committed log's handler is held to the same rule. From inside it, a `Poll` of
+  goes on. `subscription.ImageCount()` returns −1 there, and `subscription.Images()`
+  and `subscription.ImageAt(i)` return the ABI's `*Error` with `ErrPolling`, and no
+  slice and no image, where `Images` panicked on a capacity of −1 and `ImageAt`
+  returned no image and no error: the ABI answers no image for a refusal as for an
+  index past the count, so the client asks the count, and the count's refusal is the
+  answer. The three answer the same way after the subscription's own `Close`, with
+  `ErrNull`. A committed log's handler is held to the same rule. From inside it, a `Poll` of
   the same log, `log.Position()` and `log.CommitPosition()` return −1, `log.IsEnded()`
   is `false`, `log.FailedAt()`, `log.WithdrawnAt()` and `log.Faulted()` are zeros and
   `false`, and `log.Fault()` and `log.Close()` return an `*Error`, each with
@@ -645,7 +651,7 @@ last. A read of the error in a second cgo call, after the call that failed, coul
 read another thread's failure, or none. The client never reads the error that way:
 
 - A call that is not a message (`NewClient`, an add, a command, a close, `Fault`,
-  `ImageAt`) holds the goroutine to its OS thread with `runtime.LockOSThread` from
+  `ImageAt`, `Images`) holds the goroutine to its OS thread with `runtime.LockOSThread` from
   before its first ABI call until it returns. The `*Error` it returns is read on the
   thread of the call that failed. The lock nests, so it holds inside a fragment
   handler too. `clients/lint.py` fails a function of `cavalry.go` that reads the

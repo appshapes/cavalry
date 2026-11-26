@@ -393,6 +393,85 @@ class Package(unittest.TestCase):
                      "cavalry_cluster_service_action"):
             self.assertIn(name, gen.PER_MESSAGE)
 
+    def test_the_images_are_a_refusal_where_the_abi_refuses_them(self):
+        """Work item 468. The ABI refuses a subscription's image count, and its image at an
+        index, from inside a handler of the subscription's own poll, with the code for a
+        call during a poll, and after the subscription's own close, when the client hands
+        it a null handle. It answers -1 for the count and no image for the index, which is
+        also its answer for an index past the count, and a success clears no error.
+        The list read that -1 as a count and returned an empty list, and the image at an
+        index was None.
+        Now the list and the image at an index are each the refusal the client gives for
+        a call the ABI refused: `CavalryError` with the ABI's function, code and message. The image at an
+        index asks the count when the ABI hands back no image, and the count's refusal
+        is the answer. The count itself still returns -1."""
+        cavalry = load_package()
+
+        class Abi:
+            """A subscription's ABI: a count the test sets, an image at each index below
+            `present` and none past it, and a thread's error with the code for a call
+            during a poll and a message of this stand-in's own, with a real anchor."""
+
+            def __init__(self):
+                self.count = 2
+                self.present = 0
+                self.asked = []
+                self.counted = 0
+
+            def cavalry_subscription_constants(self, handle, constants):
+                constants._obj.channel = b"cavalry:ipc"
+                return 0
+
+            def cavalry_subscription_image_count(self, handle):
+                self.counted += 1
+                return self.count
+
+            def cavalry_subscription_image_at_index(self, handle, index):
+                self.asked.append(index)
+                return 1000 + index if index < self.present else 0
+
+            def cavalry_image_constants(self, pointer, constants):
+                constants._obj.source_identity = b"127.0.0.1:40123"
+                constants._obj.session_id = pointer
+                return 0
+
+            def cavalry_errcode(self):
+                return cavalry.CAVALRY_ERR_POLLING
+
+            def cavalry_errmsg(self):
+                return b"refused during a poll; see docs/reference/c-abi.md#calls-during-a-claim-or-a-poll"
+
+        abi = Abi()
+        subscription = cavalry.Subscription(abi, 3)
+        # Two images that are there: the list asks the count once and each image once,
+        # and no count is asked for an image the ABI handed over.
+        abi.present = 2
+        self.assertEqual([image.session_id for image in subscription.images()], [1000, 1001])
+        self.assertEqual((abi.asked, abi.counted), ([0, 1], 1))
+        self.assertEqual(subscription.image_at_index(1).session_id, 1001)
+        self.assertEqual(abi.counted, 1)
+        # No image at an index: the count is asked, and a count from zero means the index
+        # is past it, None and no refusal. The stand-in's list then has None entries, which
+        # the ABI's own count and images do not give outside a poll.
+        self.assertIsNone(subscription.image_at_index(7))
+        self.assertEqual(abi.counted, 2)
+        abi.present, abi.asked = 0, []
+        self.assertEqual(subscription.images(), [None, None])
+        self.assertEqual(abi.asked, [0, 1])
+        abi.count = 0
+        self.assertEqual(subscription.images(), [])
+        for refused in (-1, -2):
+            for ask, asked in ((subscription.images, []), (lambda: subscription.image_at_index(0), [0])):
+                abi.count, abi.asked = refused, []
+                self.assertEqual(subscription.image_count(), refused)
+                with self.assertRaises(cavalry.CavalryError) as raised:
+                    ask()
+                error = raised.exception
+                self.assertEqual((error.function, error.code),
+                                 ("cavalry_subscription_image_count", cavalry.CAVALRY_ERR_POLLING))
+                self.assertTrue(error.message.endswith("#calls-during-a-claim-or-a-poll"), error.message)
+                self.assertEqual(abi.asked, asked)  # the list asks for no image after the count's refusal
+
     def test_every_integer_argument_of_a_command_or_an_add_is_refused_outside_its_range(self):
         """Work item 460 (ADR 0162). ctypes passes a Python int that a parameter cannot hold
         as its low bits, another value, with nothing said: a truncate at 2 ** 64 + 5 was a
@@ -2480,6 +2559,35 @@ class NodePackage(unittest.TestCase):
         # A cluster service's poll holds the JS service the same way, for the call alone.
         self.assertIn("s->self = argv[5];", addon)
 
+    def test_the_images_are_a_refusal_where_the_abi_refuses_them(self):
+        """Work item 468. The ABI refuses a subscription's image count, and its image at an
+        index, from inside a handler of the subscription's own poll, with the code for a
+        call during a poll, and after the subscription's own close, when the client hands
+        it a null handle. It answers -1 for the count and no image for the index, which is
+        also its answer for an index past the count, and a success clears no error.
+        The list looped up to that -1 and returned an empty array, and the image at an
+        index was null.
+        Now the list and the image at an index are each the refusal the client gives for
+        a call the ABI refused: `CavalryError` for the count's function. The image at an
+        index asks the count when the ABI hands back no image, and the count's refusal
+        is the answer. The count itself still returns -1."""
+        index = gen_node.write_node(self.header)["index.js"]
+        self.assertIn("  images() {\n"
+                      "    const count = this.imageCount();\n"
+                      "    if (count < 0) throw error(\"cavalry_subscription_image_count\");\n"
+                      "    const images = [];\n"
+                      "    for (let i = 0; i < count; i++) images.push(this.imageAtIndex(i));\n"
+                      "    return images;\n"
+                      "  }\n", index)
+        self.assertIn("  imageAtIndex(index) {\n"
+                      "    const pointer = addon.cavalry_subscription_image_at_index(this.handle, index);\n"
+                      "    if (pointer !== null) return new Image(pointer);\n"
+                      "    if (this.imageCount() < 0) throw error(\"cavalry_subscription_image_count\");\n"
+                      "    return null;\n"
+                      "  }\n", index)
+        self.assertIn("  imageCount() { return addon.cavalry_subscription_image_count(this.handle); }\n", index)
+        self.assertEqual(index.count("this.imageCount()"), 2)
+
     def test_every_integer_argument_is_read_exactly_or_refused_before_the_abi_is_called(self):
         """Work item 460. N-API's own conversions change a number that is no integer its
         parameter holds, and say nothing: `napi_get_value_int64` drops a fraction, reads a
@@ -3150,6 +3258,44 @@ class GoPackage(unittest.TestCase):
         with open(os.path.join(gen.ROOT, "spec", "c-abi.md"), encoding="utf-8") as f:
             self.assertIn("No code is below zero, in this version or a later one.", f.read().replace("\n", " "))
         self.assertIn("#define CAVALRY_GO_ERR_NEGATIVE (-1)\n", gen_go.write_go(self.header)["shim.h"])
+
+    def test_the_images_are_a_refusal_where_the_abi_refuses_them(self):
+        """Work item 468. The ABI refuses a subscription's image count, and its image at an
+        index, from inside a handler of the subscription's own poll, with the code for a
+        call during a poll, and after the subscription's own close, when the client hands
+        it a null handle. It answers -1 for the count and no image for the index, which is
+        also its answer for an index past the count, and a success clears no error.
+        `Images` gave that -1 to `make` as a capacity and panicked, and `ImageAt` returned no
+        image and no error.
+        Now the list and the image at an index are each the refusal the client gives for
+        a call the ABI refused: the ABI's `*Error` for the count's function, read on
+        the OS thread the count was asked on, with no slice and no image. The image at an
+        index asks the count when the ABI hands back no image, and the count's refusal
+        is the answer. The count itself still returns -1."""
+        code = gen_go.write_go(self.header)["cavalry.go"]
+        body = code.split("func (s *Subscription) Images() ([]*Image, error) {\n", 1)[1].split("\n}\n", 1)[0]
+        self.assertTrue(body.startswith("\truntime.LockOSThread()\n"
+                                        "\tdefer runtime.UnlockOSThread()\n"
+                                        "\tcount := int(C.cavalry_subscription_image_count(s.handle))\n"
+                                        "\tif count < 0 {\n"
+                                        "\t\treturn nil, lastError(\"cavalry_subscription_image_count\")\n"
+                                        "\t}\n"
+                                        "\timages := make([]*Image, 0, count)\n"), body)
+        self.assertEqual(code.count("make([]*Image, 0, "), 1)
+        at = code.split("func (s *Subscription) ImageAt(index int) (*Image, error) {\n", 1)[1].split("\n}\n", 1)[0]
+        self.assertLess(at.index("\truntime.LockOSThread()\n"), at.index("C.cavalry_subscription_image_at_index("))
+        refusal = ("\tif ptr == nil {\n"
+                   "\t\t// The ABI answers a refusal and an index past the count alike, with no image, and a\n"
+                   "\t\t// success clears no error: the count is asked, and its refusal is the answer.\n"
+                   "\t\tif C.cavalry_subscription_image_count(s.handle) < 0 {\n"
+                   "\t\t\treturn nil, lastError(\"cavalry_subscription_image_count\")\n"
+                   "\t\t}\n"
+                   "\t\treturn nil, nil\n"
+                   "\t}\n")
+        self.assertIn(refusal, at)
+        self.assertEqual(at.count("return nil, nil"), 1)
+        self.assertIn("func (s *Subscription) ImageCount() int { return int(C.cavalry_subscription_image_count(s.handle)) }\n",
+                      code)
 
     def test_a_count_below_zero_is_refused_in_the_shim_before_the_abi_is_called(self):
         """Work item 465 (ADR 0164). The ABI takes a count as a size_t, and a Go int below
@@ -3939,6 +4085,38 @@ class JvmPackage(unittest.TestCase):
         self.assertEqual(sorted(os.path.basename(name) for name in lint.RULES["jvm"]["files"]),
                          sorted(os.path.basename(name) for name in files))
 
+    def test_the_images_are_a_refusal_where_the_abi_refuses_them(self):
+        """Work item 468. The ABI refuses a subscription's image count, and its image at an
+        index, from inside a handler of the subscription's own poll, with the code for a
+        call during a poll, and after the subscription's own close, when the client hands
+        it a null handle. It answers -1 for the count and no image for the index, which is
+        also its answer for an index past the count, and a success clears no error.
+        `images()` gave that -1 to `ArrayList` as a capacity, which threw
+        IllegalArgumentException, and `imageAt` returned null.
+        Now the list and the image at an index are each the refusal the client gives for
+        a call the ABI refused: `CavalryException` for the count's function. The image at an
+        index asks the count when the ABI hands back no image, and the count's refusal
+        is the answer. The count itself still returns -1."""
+        source = gen_jvm.write_jvm(self.header)[self.BASE + "Subscription.java"]
+        body = source.split("    public List<Image> images() {\n", 1)[1].split("\n    }\n", 1)[0]
+        self.assertTrue(body.startswith("        int count = imageCount();\n"
+                                        "        if (count < 0) {\n"
+                                        "            throw Abi.lastError(\"cavalry_subscription_image_count\");\n"
+                                        "        }\n"
+                                        "        List<Image> images = new ArrayList<>(count);\n"), body)
+        self.assertEqual(source.count("new ArrayList<>("), 1)
+        at = source.split("    public Image imageAt(int index) {\n", 1)[1].split("\n    }\n", 1)[0]
+        self.assertTrue(at.endswith("        if (pointer.address() != 0) {\n"
+                                    "            return new Image(pointer);\n"
+                                    "        }\n"
+                                    "        if (imageCount() < 0) {\n"
+                                    "            throw Abi.lastError(\"cavalry_subscription_image_count\");\n"
+                                    "        }\n"
+                                    "        return null;"), at)
+        count = source.split("    public int imageCount() {\n", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("            return (int) Abi.cavalry_subscription_image_count.invokeExact(handle);\n", count)
+        self.assertNotIn("Math.", count)
+
     def test_a_count_below_zero_is_refused_before_the_abi_is_called(self):
         """Work item 465 (ADR 0164). The ABI takes a count as a size_t, and a Java int
         below zero cast for it is a count near 2 ** 64. The claim, each of the four polls
@@ -4306,6 +4484,40 @@ class DotnetPackage(unittest.TestCase):
                       files["Abi.cs"])
         self.assertEqual(sorted(gen_dotnet.PER_MESSAGE_DOTNET), sorted(lint.RULES["dotnet"]["functions"]))
         self.assertEqual(sorted(lint.RULES["dotnet"]["files"]), sorted(name for name in files if name.endswith(".cs")))
+
+    def test_the_images_are_a_refusal_where_the_abi_refuses_them(self):
+        """Work item 468. The ABI refuses a subscription's image count, and its image at an
+        index, from inside a handler of the subscription's own poll, with the code for a
+        call during a poll, and after the subscription's own close, when the client hands
+        it a null handle. It answers -1 for the count and no image for the index, which is
+        also its answer for an index past the count, and a success clears no error.
+        `Images()` gave that -1 to `List` as a capacity, which threw
+        ArgumentOutOfRangeException, and `ImageAt` returned null.
+        Now the list and the image at an index are each the refusal the client gives for
+        a call the ABI refused: `CavalryException` for the count's function. The image at an
+        index asks the count when the ABI hands back no image, and the count's refusal
+        is the answer. The count itself still returns -1."""
+        source = gen_dotnet.write_dotnet(self.header)["Subscription.cs"]
+        body = source.split("    public List<Image> Images()\n    {\n", 1)[1].split("\n    }\n", 1)[0]
+        self.assertTrue(body.startswith("        int count = ImageCount();\n"
+                                        "        if (count < 0)\n"
+                                        "        {\n"
+                                        "            throw Abi.LastError(\"cavalry_subscription_image_count\");\n"
+                                        "        }\n"
+                                        "        List<Image> images = new(count);\n"), body)
+        self.assertEqual(source.count("List<Image> images = new("), 1)
+        at = source.split("    public Image? ImageAt(int index)\n    {\n", 1)[1].split("\n    }\n", 1)[0]
+        self.assertTrue(at.endswith("        if (pointer != 0)\n"
+                                    "        {\n"
+                                    "            return new Image(pointer);\n"
+                                    "        }\n"
+                                    "        if (ImageCount() < 0)\n"
+                                    "        {\n"
+                                    "            throw Abi.LastError(\"cavalry_subscription_image_count\");\n"
+                                    "        }\n"
+                                    "        return null;"), at)
+        count = source.split("    public int ImageCount()\n    {\n", 1)[1].split("\n    }\n", 1)[0]
+        self.assertEqual(count, "        return Abi.cavalry_subscription_image_count(handle);")
 
     def test_a_count_below_zero_is_refused_before_the_abi_is_called(self):
         """Work item 465 (ADR 0164). The ABI takes a count as a size_t, and a C# int below

@@ -806,14 +806,30 @@ class Subscription {
     check("cavalry_subscription_fault", addon.cavalry_subscription_fault(this.handle, f.buffer));
     return { code: f.int32("code"), sessionId: f.int32("session_id"), position: f.int64("position") };
   }
+  /** How many images the subscription has, or -1 where the ABI refuses the call: from inside
+   * a handler of this subscription's own poll, with CAVALRY_ERR_POLLING as the thread's
+   * error, and after this subscription's own `close()`, with CAVALRY_ERR_NULL. */
   imageCount() { return addon.cavalry_subscription_image_count(this.handle); }
+  /** The image at `index`, or null for an index past the count. Where the ABI refuses the
+   * call, from inside a handler of this subscription's own poll or after this subscription's
+   * own `close()`, it throws `CavalryError`, as `images` does. The ABI answers a refusal and
+   * an index past the count alike, with no image, and a success clears no error, so the
+   * count is asked: its refusal is the answer. */
   imageAtIndex(index) {
     const pointer = addon.cavalry_subscription_image_at_index(this.handle, index);
-    return pointer === null ? null : new Image(pointer);
+    if (pointer !== null) return new Image(pointer);
+    if (this.imageCount() < 0) throw error("cavalry_subscription_image_count");
+    return null;
   }
+  /** Every image, valid until the next poll or close. Where the ABI refuses the count, from
+   * inside a handler of this subscription's own poll or after this subscription's own
+   * `close()`, it throws `CavalryError` with the ABI's code, CAVALRY_ERR_POLLING or
+   * CAVALRY_ERR_NULL: a refusal is no empty array (README, "What it must never do"). */
   images() {
+    const count = this.imageCount();
+    if (count < 0) throw error("cavalry_subscription_image_count");
     const images = [];
-    for (let i = 0; i < this.imageCount(); i++) images.push(this.imageAtIndex(i));
+    for (let i = 0; i < count; i++) images.push(this.imageAtIndex(i));
     return images;
   }
   get isConnected() { return addon.cavalry_subscription_is_connected(this.handle); }
