@@ -45,6 +45,8 @@ lost. It was not seen on Linux, or on macOS 26.3 in a virtual machine, in more t
    parks a tenth of a second at a time: it is the thread that ends a park of the
    other five that outlived its timeout
    ([ADR 0176](../decisions/0176-watch-the-drivers-parks-and-end-one-that-outlived-its-timeout.md)).
+   A client there has `cavalry-client-watch` beside its conductor, for the same
+   purpose.
 
 3. Read that thread's stack in both files.
 
@@ -121,6 +123,10 @@ lost. It was not seen on Linux, or on macOS 26.3 in a virtual machine, in more t
   driver's watch ends a park of one of its five threads within 300 ms past its
   timeout, and counts it: `cavalry doctor` then prints `driver.parks_overdue` with
   the count. A driver thread that stays in one park in every sample of step 1 for
-  longer than that is not held by this fault alone. A client's conductor has no
-  watch yet: one that is held sends no keepalive, and its driver times the client
-  out after 10 s and counts it in `client.timed_out`.
+  longer than that is not held by this fault alone. A client's watch does the same
+  for the client's conductor, and `cavalry doctor` prints
+  `client.conductor_parks_overdue` with the client's id and the count
+  ([ADR 0177](../decisions/0177-watch-a-clients-conductor-and-count-its-overdue-parks-in-a-counter-the-client-adds.md)).
+  On another system a client has no watch: a conductor that is held sends no
+  keepalive, and its driver times the client out after 10 s and counts it in
+  `client.timed_out`.

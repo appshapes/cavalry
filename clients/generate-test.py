@@ -2596,6 +2596,31 @@ class NodePackage(unittest.TestCase):
         self.assertIn("  imageCount() { return addon.cavalry_subscription_image_count(this.handle); }\n", index)
         self.assertEqual(index.count("this.imageCount()"), 2)
 
+    def test_the_declarations_say_where_the_three_image_methods_answer_minus_one_or_throw(self):
+        """Work item 477. `index.js` says where a subscription's image count answers -1 and
+        where its list of images and its image at an index throw, and `index.d.ts`
+        declared the three with no comment, so a TypeScript reader, whose editor shows the
+        declarations' comments, saw a count, an array and `Image | null` and nothing of a
+        refusal. Each declaration now has a doc comment that names both places where the
+        ABI refuses the call, a handler of the subscription's own poll and after its own
+        close, with the ABI's code for each, and says which of -1 and a `CavalryError`
+        the method answers with."""
+        types = gen_node.write_node(self.header)["index.d.ts"]
+        declared = types.split("export class Subscription {\n", 1)[1].split("\n}\n", 1)[0]
+        for declaration, answer in (("  imageCount(): number;\n", "or -1 where the ABI refuses the call"),
+                                    ("  imageAtIndex(index: number | bigint): Image | null;\n", "it throws `CavalryError`"),
+                                    ("  images(): Image[];\n", "it throws `CavalryError`")):
+            self.assertEqual(declared.count(declaration), 1, declaration)
+            before = declared.split(declaration, 1)[0]
+            self.assertTrue(before.endswith(" */\n"), declaration)
+            comment = " ".join(before.rsplit("  /** ", 1)[1].replace("\n   * ", " ").split())
+            self.assertIn(answer, comment, declaration)
+            self.assertIn("a handler of this subscription's own poll", comment, declaration)
+            self.assertIn("after this subscription's own `close()`", comment, declaration)
+            self.assertIn("CAVALRY_ERR_POLLING", comment, declaration)
+            self.assertIn("CAVALRY_ERR_NULL", comment, declaration)
+            self.assertEqual("It does not throw." in comment, declaration.startswith("  imageCount"), declaration)
+
     def test_every_integer_argument_is_read_exactly_or_refused_before_the_abi_is_called(self):
         """Work item 460. N-API's own conversions change a number that is no integer its
         parameter holds, and say nothing: `napi_get_value_int64` drops a fraction, reads a

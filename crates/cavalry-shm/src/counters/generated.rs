@@ -623,6 +623,9 @@ pub const CLUSTER_VOTERS_UNHEARD: CounterId = CounterId(205);
 /// `driver.parks_overdue`, a static counter: Parks of a driver thread that ran more than 200 ms past their timeout and that the driver then ended, by unparking the thread: the driver's watch for the conductor, the recorder, the replayer, the sender and the receiver, and the conductor for the watch. Under the backoff idle strategy a thread parks for at most 1 ms when its duty cycle found no work, and a sender, a receiver or a replayer that holds nothing to do parks for 1 s; each is due back by that timeout. A park is counted once, however many looks it takes to end. The watch runs where a timed wait can outlive its timer, which is macOS (ADR 0171, ADR 0176); elsewhere the counter stays 0.
 pub const DRIVER_PARKS_OVERDUE: CounterId = CounterId(206);
 
+/// `client.conductor_parks_overdue`, a client counter: Parks of one client's conductor thread, or of the client's watch, that ran more than 200 ms past their timeout and that the other of the two then ended, by unparking it (ADR 0177). A client's conductor parks for at most 1 ms when its duty cycle found no work, and its watch for 100 ms. The client has a watch where a timed wait can outlive its timer, which is macOS (ADR 0171); its conductor adds this counter at the first such park and not before, so most clients have none, and stores the count with a release store; key: client id (i64), little-endian. A park is counted once, however many looks it takes to end. The driver frees the counter when the client closes or is timed out.
+pub const CLIENT_CONDUCTOR_PARKS_OVERDUE: CounterId = CounterId(207);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -2272,5 +2275,13 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Static,
         doc: "Parks of a driver thread that ran more than 200 ms past their timeout and that the driver then ended, by unparking the thread: the driver's watch for the conductor, the recorder, the replayer, the sender and the receiver, and the conductor for the watch. Under the backoff idle strategy a thread parks for at most 1 ms when its duty cycle found no work, and a sender, a receiver or a replayer that holds nothing to do parks for 1 s; each is due back by that timeout. A park is counted once, however many looks it takes to end. The watch runs where a timed wait can outlive its timer, which is macOS (ADR 0171, ADR 0176); elsewhere the counter stays 0.",
         doctor: "A thread of this driver did not come back from a timed wait and was woken by the driver's watch, after a stall of up to 300 ms past its timeout each time. On a Mac the system can lose a timer wake-up, about one in 40 million on the machine where it was found, and a few of these a day is that: nothing to do, and docs/how-to/find-a-wait-that-does-not-return.md says how to probe the machine. Many a minute means the host could not run the driver's threads for 200 ms at a time: look for a host under memory pressure or CPU contention, or a process stopped and continued.",
+    },
+    CounterDef {
+        id: CLIENT_CONDUCTOR_PARKS_OVERDUE,
+        name: "client.conductor_parks_overdue",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Parks of one client's conductor thread, or of the client's watch, that ran more than 200 ms past their timeout and that the other of the two then ended, by unparking it (ADR 0177). A client's conductor parks for at most 1 ms when its duty cycle found no work, and its watch for 100 ms. The client has a watch where a timed wait can outlive its timer, which is macOS (ADR 0171); its conductor adds this counter at the first such park and not before, so most clients have none, and stores the count with a release store; key: client id (i64), little-endian. A park is counted once, however many looks it takes to end. The driver frees the counter when the client closes or is timed out.",
+        doctor: "A client's conductor did not come back from a timed wait and was woken by the client's watch, after a stall of up to 300 ms past its timeout each time, in which the client sent no keepalive and took no image. On a Mac the system can lose a timer wake-up, about one in 40 million on the machine where it was found, and a few of these a day is that: nothing to do, and docs/how-to/find-a-wait-that-does-not-return.md says how to probe the machine. Many a minute means the host could not run the client's threads for 200 ms at a time: look for a host under memory pressure or CPU contention, or a process stopped and continued.",
     },
 ];

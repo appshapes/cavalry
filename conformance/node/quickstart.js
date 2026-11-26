@@ -569,6 +569,24 @@ function edges(client) {
   pollOrFail(name, subscription, unexpected, 21, 21); // the close aborted the claim: padding, never a fragment
   subscription.close();
   if (subscription.handle !== null) fail(`${name}: the close after the poll left the handle ${subscription.handle}`);
+  // After its own close the wrapper hands the ABI a null handle, the other place where the
+  // ABI refuses a subscription's images: the count is -1, and the list and the image at an
+  // index each throw that refusal, CAVALRY_ERR_NULL, with no empty array and no null (work
+  // item 468; a runner asks since work item 477).
+  const closed = [subscription.imageCount()];
+  for (const ask of [() => subscription.images(), () => subscription.imageAtIndex(0)]) {
+    try {
+      closed.push(`answered ${JSON.stringify(ask())}`);
+    } catch (refusedClosed) {
+      closed.push(`${refusedClosed.fn} ${refusedClosed.code}`);
+    }
+  }
+  const refusedClosed = `cavalry_subscription_image_count ${constants.CAVALRY_ERR_NULL}`;
+  if (closed.length !== 3 || closed[0] !== -1 || closed[1] !== refusedClosed || closed[2] !== refusedClosed) {
+    fail(`${name}: after the subscription's close its image count, its list of images and its image at an index ` +
+         `gave ${JSON.stringify(closed)}; expected -1, and a CavalryError of cavalry_subscription_image_count with ` +
+         `CAVALRY_ERR_NULL (${constants.CAVALRY_ERR_NULL}) for each of the other two`);
+  }
   say(`${name}: a poll from inside a handler of its own subscription returned -1 with CAVALRY_ERR_POLLING, the ` +
       `image count there was -1 and the list of images and the image at an index each threw CavalryError with ` +
       `that code, and the ` +
@@ -576,7 +594,8 @@ function edges(client) {
       `CAVALRY_ERR_CLAIM_OUTSTANDING, claim stayed the first Buffer and its commit released it; a close from inside a ` +
       `handler of its own subscription was refused with CAVALRY_ERR_POLLING, poll threw HandlerError with that ` +
       `CavalryError as its cause, the subscription stayed open, message 20 still arrived and the close after the poll ` +
-      `closed it; a close with a claim outstanding released its Buffer`);
+      `closed it; a close with a claim outstanding released its Buffer; after the subscription's close its image ` +
+      `count was -1 and the list of images and the image at an index each threw CavalryError with CAVALRY_ERR_NULL`);
 }
 
 /** The reserved value, on stream 1005: any int64 a publisher sets reaches the handler

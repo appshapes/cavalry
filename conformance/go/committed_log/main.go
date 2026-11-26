@@ -35,6 +35,7 @@ import (
 	"time"
 
 	cavalry "github.com/appshapes/cavalry/clients/go"
+	"github.com/appshapes/cavalry/conformance/go/linked"
 )
 
 const (
@@ -98,6 +99,7 @@ type refusal struct {
 }
 
 func main() {
+	linked.Check() // linked with the library run.sh has just built, or it stops here
 	if len(os.Args) != 4 {
 		fail("usage: committed_log <the member's driver directory> <the member's id> <its recording's id>")
 	}

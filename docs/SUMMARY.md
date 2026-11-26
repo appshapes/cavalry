@@ -39,6 +39,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Schedule a timer in a cluster's service](how-to/schedule-a-services-timer.md)
 - [Read the weekly run of the macOS gates](how-to/read-the-weekly-run-of-the-macos-gates.md)
 - [Find a wait that does not return](how-to/find-a-wait-that-does-not-return.md)
+- [Build a native artefact at the floor](how-to/build-a-native-artefact-at-the-floor.md)
 
 # Reference
 
@@ -233,4 +234,6 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0171. Park the idle loops where a stop can wake them, and wake every thread at a stop](decisions/0171-park-the-idle-loops-where-a-stop-can-wake-them-and-wake-every-thread-at-a-stop.md)
 - [0172. Remove the file of a log that could not be created](decisions/0172-remove-the-file-of-a-log-that-could-not-be-created.md)
 - [0176. Watch the driver's parks, and end one that outlived its timeout](decisions/0176-watch-the-drivers-parks-and-end-one-that-outlived-its-timeout.md)
+- [0177. Watch a client's conductor, and count its overdue parks in a counter the client adds](decisions/0177-watch-a-clients-conductor-and-count-its-overdue-parks-in-a-counter-the-client-adds.md)
+- [0178. Build every native artefact for glibc 2.28, in an image of it, and run it there](decisions/0178-build-every-native-artefact-for-glibc-2-28-in-an-image-of-it-and-run-it-there.md)
 - [0174. Have a member that holds nothing vote only once every voter has reported](decisions/0174-have-a-member-that-holds-nothing-vote-only-once-every-voter-has-reported.md)

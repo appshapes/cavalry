@@ -9,8 +9,9 @@ It makes a directory outside the checkout and in it:
    wheel from `clients/python` through the package's own build backend, with nothing
    from a package index, and the wheel must hold the library `cargo` built, byte for
    byte, under the platform tag a second reader gives it: `objdump` for the glibc an ELF
-   library needs, `otool` for the least macOS of a Mach-O one. An ELF library must load
-   no library but those of `NEEDED`, which is what its tag promises. The backend run as
+   library needs, read by `scripts/glibc-floor.py` and never below the floor, glibc 2.28
+   (ADR 0178), and `otool` for the least macOS of a Mach-O one. An ELF library must load
+   no library but those every glibc system has, which is what its tag promises. The backend run as
    a program, the README's first way to build, must write the same wheel, byte for
    byte.
 2. The wheel installed into that environment, and the README's example run with the
@@ -44,13 +45,6 @@ HELP = "see clients/python/README.md#the-package"
 STEP_SECONDS = 300
 
 
-# What a glibc library of this package may load beside glibc's own: the libraries every
-# glibc system has (PEP 600 leaves the list to the manylinux policies; these are in
-# each), and the loader. Any other library is one the tag does not promise.
-NEEDED = {"libc.so.6", "libm.so.6", "libdl.so.2", "librt.so.1", "libpthread.so.0", "libgcc_s.so.1",
-          "ld-linux-x86-64.so.2", "ld-linux-aarch64.so.1"}
-
-
 def fail(what):
     print(f"package: python: {what}", file=sys.stderr)
     sys.exit(1)
@@ -75,13 +69,21 @@ def run(arguments, what, **options):
     return result.stdout
 
 
+def module(name, *path):
+    spec = importlib.util.spec_from_file_location(name, os.path.join(ROOT, *path))
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    return loaded
+
+
 def readme():
     """conformance/python/readme.py, the one reader of the README's example."""
-    path = os.path.join(ROOT, "conformance", "python", "readme.py")
-    spec = importlib.util.spec_from_file_location("cavalry_readme", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return module("cavalry_readme", "conformance", "python", "readme.py")
+
+
+def glibc_floor():
+    """scripts/glibc-floor.py: the floor, and the reading of what `objdump -p` prints."""
+    return module("glibc_floor", "scripts", "glibc-floor.py")
 
 
 def environment(directory):
@@ -118,21 +120,25 @@ def expected_platform():
     if shutil.which("objdump") is None:
         fail("objdump is not installed, and it is the second reader of the glibc version the library needs; "
              f"install binutils and run this again; {HELP}")
-    listing = run(["objdump", "-T", LIBRARY], "objdump's reading of the library's dynamic symbols")
-    # A version with a third number, 2.3.4, is the next a tag can say, 2_4, as in the backend.
-    versions = [(int(a), int(b) + (1 if int(c or 0) else 0))
-                for a, b, c in re.findall(r"GLIBC_(\d+)\.(\d+)(?:\.(\d+))?", listing)]
-    if not versions:
-        fail(f"objdump shows no symbol of a GLIBC version in {LIBRARY}; {HELP}")
-    newest = max(versions)
-    needed = re.findall(r"^\s*NEEDED\s+(\S+)", run(["objdump", "-p", LIBRARY], "objdump's reading of the "
-                                                    "library's dynamic section"), flags=re.M)
-    other = sorted(set(needed) - NEEDED)
+    # The version names the library asks of the libraries it loads, and those libraries.
+    # A name with a third number, 2.3.4, is the next a tag can say, 2_4, as in the
+    # backend; `GLIBC_ABI_DT_RELR` stands for 2.36; and no tag is below the floor.
+    floor = glibc_floor()
+    libraries, versions = floor.read(run(["objdump", "-p", LIBRARY], "objdump's reading of the library's "
+                                                                     "dynamic section and version references"))
+    try:
+        newest = floor.newest(versions)
+    except floor.FloorError as error:
+        fail(f"{LIBRARY}: {error}")
+    if newest is None:
+        fail(f"objdump shows no GLIBC version among those {LIBRARY} asks for; {HELP}")
+    other = sorted(set(libraries) - floor.LIBRARIES)
     if other:
         fail(f"{LIBRARY} loads {', '.join(other)}, and a `manylinux` tag promises a library that loads glibc's "
              f"own libraries and libgcc_s alone: a system may not have that one. Link it statically into "
              f"cavalry-ffi, or carry it in the package beside the library and say so in ADR 0166's successor; "
              f"{HELP}")
+    newest = max(newest, floor.FLOOR)
     return f"manylinux_{newest[0]}_{newest[1]}_{machine}"
 
 
