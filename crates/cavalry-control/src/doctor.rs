@@ -8117,7 +8117,7 @@ mod tests {
             ("service-none-older-build", &[][..]),
         ] {
             let findings = cluster_findings_read_on(name, 1, &member(2, 17, more), &[]);
-            assert_eq!(of(&findings), [note.clone()], "{name}");
+            assert_eq!(of(&findings), std::slice::from_ref(&note), "{name}");
         }
         // Nothing for: a leader beside which a service reads, whatever it holds, a
         // follower, a leader whose election is open.
