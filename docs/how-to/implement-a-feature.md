@@ -181,16 +181,20 @@ feature that followed this page, commit by commit.
   accepted ADRs are immutable. Write a new one that supersedes it.
 - `just docs` fails on the README example: the example is the doctest. Fix the code or
   the example, never mark the block `ignore`.
-- `just docs` ends with a line that begins `decisions-index:` and names your ADR. The
+- `just docs` fails with a line that begins `decisions-index:` and names your ADR. It
+  is the last line, or, when the build of the book itself stopped, the line above
+  mdBook's `ERROR The "decisions-index" preprocessor exited unsuccessfully`. The
   book's search finds a decision through a page that the build makes from its
   Decision section ([Decisions, by what each decided](../reference/decisions.md)), and
   the check holds that page to the decision's own. "has no `## Decision` section" or
   "does not begin with": give the ADR the template's first line and its `## Decision`
   heading, with text under it. "the built book has no page": list the ADR in
-  `docs/SUMMARY.md`. "does not read on ... as it reads on the decision's own page", or
-  "a link ... opens": the Decision section uses something Markdown takes from
-  elsewhere in the file. Write a footnote as a sentence, and every link as
-  `[words](target)`.
+  `docs/SUMMARY.md`. "a line that defines a link's target or a footnote", "does not
+  read on ... as it reads on the decision's own page", or "a link ... opens": the
+  Decision section uses something Markdown takes from elsewhere in the file. Write a
+  footnote as a sentence, and every link as `[words](target)`. "a heading of the
+  second level that is no decision's entry": write a heading inside the Decision
+  section with `###`.
 - `just docs` says the book's search index is `past the early bound of`: nothing is
   wrong with your change. Do the two things the message names, in the same change:
   add the work item, and change the one line of `scripts/decisions-index.py`

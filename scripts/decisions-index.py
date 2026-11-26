@@ -28,11 +28,13 @@ a decision's code block is tested once, on the decision's own page.
 the preprocessor but the pages' names. For every decision under `docs/decisions/` it
 reads the Decision section of the decision's own built page and the decision's entry
 on its generated page, and fails unless the two hold the same text and the same
-links, each link read from the page it is on. It fails unless the generated page is a
-document of the search index with the decision's number and title in it, when a
-decision's own page is in the index, when `docs/reference/decisions.md` is not what
-`--write` gives, and when the index's file passes the early bound, `EARLY_BOUND`
-bytes, which is set well under the size at which mdBook warns and `just docs` fails.
+links, each link read from the page it is on. It fails when a generated page has a
+heading of the second level that is no decision's entry, since what is under one was
+compared with nothing. It fails unless the generated page is a document of the search
+index with the decision's number and title in it, when a decision's own page is in
+the index, when `docs/reference/decisions.md` is not what `--write` gives, and when
+the index's file passes the early bound, `EARLY_BOUND` bytes, which is set well under
+the size at which mdBook warns and `just docs` fails.
 It prints the file's size on every run. Passing the early bound is not a fault of the
 change that passes it: the message says the two things to do, and ADR 0165 why.
 
@@ -107,11 +109,13 @@ def fail(what):
 
 def fenced(lines):
     """For each line, whether it is inside a fenced code block or is a fence's own line:
-    a line that looks like a heading or a link there is neither."""
+    a line that looks like a heading or a link there is neither. A fence is at most
+    three spaces in, is closed by its own character alone, and a line of backticks with
+    another backtick after them is a code span of a paragraph and opens nothing."""
     inside, fence = [], None
     for line in lines:
         if fence is None:
-            opening = re.match(r" {0,3}(`{3,}|~{3,})", line)
+            opening = re.match(r" {0,3}(`{3,}(?!.*`)|~{3,})", line)
             fence = opening.group(1) if opening else None
             inside.append(opening is not None)
         else:
@@ -124,7 +128,11 @@ def fenced(lines):
 def decision_section(text, where):
     """The body of a decision's `## Decision` section, without the heading: from that
     heading to the next heading of the first or second level, neither read from inside
-    a code block."""
+    a code block. The section's own heading is written at the line's start, as the
+    template has it; the heading that ends it is any that Markdown reads as one, up to
+    three spaces in, with a space, a tab or nothing after its `#` or `##`. A line that
+    defines a link's target or a footnote stops the build: the section is shown beside
+    other decisions' sections, where a definition would be every section's."""
     lines = text.split("\n")
     inside = fenced(lines)
     start = end = None
@@ -134,13 +142,20 @@ def decision_section(text, where):
         if start is None:
             if re.fullmatch(r"## Decision[ \t]*", line):
                 start = at + 1
-        elif re.match(r"#{1,2} ", line):
+        elif re.match(r" {0,3}#{1,2}(?:[ \t]|$)", line):
             end = at
             break
     section = "\n".join(lines[start:end]).strip() if start is not None else ""
     if not section:
         fail(f"{where} has no `## Decision` section with text in it, and the book's search finds a decision by "
              f"that section; write it as docs/decisions/0000-template.md has it; {HELP}")
+    for at in range(start, len(lines) if end is None else end):
+        if not inside[at] and re.match(r"[ \t]*\[[^\]\n]+\]:", lines[at]):
+            fail(f"{where} has in its Decision section a line that defines a link's target or a footnote, "
+                 f"`{lines[at].strip()}`. The section is shown on a page with other decisions' sections as well, "
+                 f"where a definition would be every section's. Write the link with its target beside it, "
+                 f"`[words](target)`, and the footnote as a sentence; if the line is code, put it in a block fenced "
+                 f"with ```; {HELP}")
     return section
 
 
@@ -148,9 +163,8 @@ def moved(section, file):
     """A Decision section's text as it reads on a page of `reference/`: a relative link
     is written from the decision's own directory, so it gets that directory in front,
     and a link to a heading of the decision's own page gets the page. The links are the
-    inline ones, images among them, and a link definition's; text inside a code block
-    or a code span is left as it is. A link written another way is not moved, and the
-    check then names it."""
+    inline ones, images among them; text inside a code block or a code span is left as
+    it is. A link written another way is not moved, and the check then names it."""
     def target(link):
         if re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*:|/", link):
             return link
@@ -161,8 +175,7 @@ def moved(section, file):
         return f"{opening}<{target(link[1:-1])}>" if link.startswith("<") else f"{opening}{target(link)}"
 
     def prose(text):
-        text = re.sub(r"(\]\([ \t]*)(<[^>\n]*>|[^)\s]+)", destination, text)
-        return re.sub(r"^( {0,3}\[[^\]\n]+\]:[ \t]*)(<[^>\n]*>|\S+)", destination, text, flags=re.M)
+        return re.sub(r"(\]\([ \t]*)(<[^>\n]*>|[^)\s]+)", destination, text)
 
     def outside_spans(text):
         out, last = [], 0
@@ -394,7 +407,7 @@ def check(book_directory):
         fail(f"the search index holds {len(own)} of the decisions' own pages, {own[0]} among them; book.toml "
              f"leaves the chapters under `decisions` out of the search, under [output.html.search.chapter], "
              f"and the generated pages are how a decision is found; restore that table; {HELP}")
-    pages = {}
+    pages, entries = {}, {}
     count = 0
     for path in sorted(glob.glob(os.path.join(DECISIONS, "[0-9][0-9][0-9][0-9]-*.md"))):
         name = os.path.basename(path)
@@ -423,7 +436,9 @@ def check(book_directory):
                  f"on {url}, and one of each is what the book's index of the decisions is made of; {HELP}")
         if tokens(entry[0]["heading"]) != tokens(heading):
             fail(f"the entry of {where} on {url} is headed `{entry[0]['heading']}`, not `{heading}`, the file's own "
-                 f"heading; {HELP}")
+                 f"heading. The index reads a title as text: write it without HTML, and a name that holds `<` in a "
+                 f"code span; {HELP}")
+        entries.setdefault(url, []).append(entry[0]["heading"])
         text, links = read(decided[0], own_url)
         shown, shown_links = read(entry[0], url, skip_first_paragraph=True)
         if not text:
@@ -444,6 +459,18 @@ def check(book_directory):
             fail(f"the search index has no document for {url} with `{heading}` in it, so the book's search does "
                  f"not find {where}: is the chapter docs/{INDEX_PATH} left out of the search in book.toml? {HELP}")
         count += 1
+    for url, sections in sorted(pages.items()):
+        before = "the page's beginning"
+        for section in sections:
+            if section["heading"] not in entries[url]:
+                fail(f"{url} has a heading of the second level that is no decision's entry, `{section['heading']}`, "
+                     f"after {before}, and what is under it was compared with nothing. Either that decision's "
+                     f"Decision section holds a heading of the second level, a line with `---` under it or an "
+                     f"`<h2>`: write a heading inside the section with `###`. Or the page holds more of the "
+                     f"decision than its Decision section, and scripts/decisions-index.py reads a heading or a "
+                     f"code fence there otherwise than mdBook does: its `decision_section` and `fenced` are what "
+                     f"to correct; {HELP}")
+            before = f"the entry `{section['heading']}`"
     share = 100 * size // MDBOOK_WARNS_AT
     if size > EARLY_BOUND:
         if EARLY_BOUND < RAISED_BOUND:

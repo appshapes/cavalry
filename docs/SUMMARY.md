@@ -52,8 +52,8 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [C ABI](reference/c-abi.md)
 - [Cluster protocol](reference/cluster.md)
 - [Configuration](reference/config.md)
-- [Decisions, by what each decided](reference/decisions.md)
 - [Glossary](glossary.md)
+- [Decisions, by what each decided](reference/decisions.md)
 
 # Decisions
 

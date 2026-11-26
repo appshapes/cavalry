@@ -160,28 +160,66 @@ class Preprocessor(unittest.TestCase):
         for elsewhere in ("What we are doing", "aardvark"):
             self.assertNotIn(elsewhere, content)
 
+    def test_a_fence_is_what_markdown_reads_as_one(self):
+        # Each of these opens no code block, or does not close one, so the heading after
+        # it ends the section, or the heading inside it does not.
+        for section, ends in (("```js`x` is a code span of a paragraph.", True),
+                              ("    ```\n    four spaces in: an indented block, not a fence", True),
+                              ("```\ncode\n~~~\nstill code, as is all that follows", False),
+                              ("~~~\ncode\n```\nstill code, as is all that follows", False),
+                              ("````\ncode\n```\nstill code: a shorter fence closes nothing", False),
+                              ("   ```\ncode\n   ```\nThree spaces in is a fence, opened and closed.", True),
+                              ("~~~ a `tilde` fence's words may hold a backtick\ncode\n~~~", True)):
+            content = pages_of(book(decision(3, "Three", section)))[0]["content"]
+            self.assertEqual("aardvark" not in content, ends, section)
+
     def test_the_section_ends_at_a_heading_of_the_first_or_second_level_or_at_the_files_end(self):
         for rest, kept in (("## Consequences\n\naardvark\n", True), ("# Another title\n\naardvark\n", True),
                            ("### A part of the decision\n\naardvark\n", False), ("", True)):
             content = pages_of(book(decision(3, "Three", "The decision.", rest=rest)))[0]["content"]
             self.assertIn("The decision.", content)
             self.assertEqual("aardvark" not in content, kept, rest)
+        # A heading as Markdown reads one: up to three spaces in, a tab after it, or bare.
+        for rest, kept in ((" ## Alternatives\n\naardvark\n", True), ("   # A title\n\naardvark\n", True),
+                           ("##\tAlternatives\n\naardvark\n", True), ("##\n\naardvark\n", True),
+                           ("    ## Four spaces in: code\n\naardvark\n", False), ("##Alternatives\n\naardvark\n", False),
+                           ("#hashtag\n\naardvark\n", False)):
+            content = pages_of(book(decision(3, "Three", "The decision.", rest=rest)))[0]["content"]
+            self.assertEqual("aardvark" not in content, kept, rest)
         spaced = decision(4, "Four", "A heading with a space after it.")
         spaced["Chapter"]["content"] = spaced["Chapter"]["content"].replace("## Decision\n", "## Decision \t\n")
         self.assertIn("A heading with a space after it.", pages_of(book(spaced))[0]["content"])
+        # Only the heading `Decision` itself opens the section.
+        longer = decision(5, "Five", "The real one.")
+        longer["Chapter"]["content"] = longer["Chapter"]["content"].replace(
+            "## Decision\n", "## Decisions of others\n\nNot this: quokka.\n\n## Decision\n")
+        content = pages_of(book(longer))[0]["content"]
+        self.assertIn("The real one.", content)
+        self.assertNotIn("quokka", content)
 
     def test_a_relative_link_of_a_decision_is_written_from_the_pages_directory(self):
         section = ("See [another](0002-other.md), [a page](../how-to/a.md#steps), [here](#evidence), "
                    "[out](https://example.org/x.md), [mail](mailto:a@example.org) and [root](/x.md).\n"
-                   "A [titled](0003-t.md \"T\") one, an [angled](<0004 a.md>) one, ![a picture](p.png).\n\n"
-                   "[defined]: 0005-defined.md\n[elsewhere]: https://example.org/")
+                   "A [titled](0003-t.md \"T\") one, an [angled](<0004 a.md>) one, ![a picture](p.png).")
         content = pages_of(book(decision(9, "Nine", section)))[0]["content"]
         self.assertIn("See [another](../decisions/0002-other.md), [a page](../decisions/../how-to/a.md#steps), "
                       "[here](../decisions/0009-made-up.md#evidence), [out](https://example.org/x.md), "
                       "[mail](mailto:a@example.org) and [root](/x.md).\n"
                       "A [titled](../decisions/0003-t.md \"T\") one, an [angled](<../decisions/0004 a.md>) one, "
-                      "![a picture](../decisions/p.png).\n\n"
-                      "[defined]: ../decisions/0005-defined.md\n[elsewhere]: https://example.org/", content)
+                      "![a picture](../decisions/p.png).\n", content)
+
+    def test_a_definition_in_the_section_stops_the_build(self):
+        # A link's target or a footnote defined on a line of its own is the whole page's,
+        # so another decision's bracketed words would take it.
+        for line in ("[defined]: 0005-defined.md", "  [elsewhere]: <https://example.org/>", "[^1]: The note of one.",
+                     "- item\n\n      [deep]: x.md"):
+            refused(self, lambda: index.preprocess(book(decision(9, "Nine", f"See [defined] and a note.[^1]\n\n{line}"))),
+                    "docs/decisions/0009-made-up.md has in its Decision section a line that defines a link's target or "
+                    f"a footnote, `{line.split(chr(10))[-1].strip()}`", "`[words](target)`", "the footnote as a sentence")
+        # Not one: inside a fence, or in another section of the decision.
+        kept = decision(9, "Nine", "A fenced one.\n\n```\n[defined]: 0005-defined.md\n```",
+                        rest="## References\n\n[defined]: 0005-defined.md\n")
+        self.assertIn("```\n[defined]: 0005-defined.md\n```", pages_of(book(kept))[0]["content"])
 
     def test_what_looks_like_a_link_inside_code_is_left_as_it_is(self):
         section = ("A span `a](b.md)` and one over a line's\nend `c](d.md)\nmore`, a doubled ``e](f.md) ` ``, then\n\n"
@@ -276,7 +314,8 @@ class Check(unittest.TestCase):
             1: ('<p>The <strong>first</strong> rule, with <code>code</code> &amp; a leader’s answer, as '
                 '<a href="0002-made-up.html">decision 0002</a> and <a href="../how-to/a.html#steps">a how-to</a> '
                 'say, and <a href="#evidence">below</a>.</p>\n' + heading(3, "A part") + "\n<ul><li>one</li>\n<li>two</li></ul>"),
-            2: '<p>Zebrafish stay apart. See <a href="https://example.org/z">the site</a>.</p>',
+            2: ('<p>Zebrafish stay apart. See <a href="https://example.org/z">the site</a> and '
+                '<img src="apart.png" alt="a picture">.</p>'),
             26: "<p>Another page’s decision.</p>\n<pre><code>## not a heading\n</code></pre>",
         }
         self.documents = {
@@ -295,7 +334,8 @@ class Check(unittest.TestCase):
         """A section as it is rendered in its entry: the same text, its links moved."""
         return (section.replace('href="0002-made-up.html"', 'href="../decisions/0002-made-up.html"')
                 .replace('href="../how-to/a.html#steps"', 'href="../decisions/../how-to/a.html#steps"')
-                .replace('href="#evidence"', 'href="../decisions/0001-made-up.html#evidence"'))
+                .replace('href="#evidence"', 'href="../decisions/0001-made-up.html#evidence"')
+                .replace('src="apart.png"', 'src="../decisions/apart.png"'))
 
     def write(self, name="searchindex-0a1b2c3d.js", padding=0):
         """Write the decisions' files, their built pages, the generated pages and the index."""
@@ -376,8 +416,34 @@ class Check(unittest.TestCase):
         refused(self, lambda: index.check(self.book), "opens decisions/0001-made-up.html#evidence on the decision's own "
                 "page and None on")
         self.entries[1] = whole
+        # A picture is a link too.
+        self.entries[2] = self.sections[2]
+        self.write()
+        refused(self, lambda: index.check(self.book), "a link of docs/decisions/0002-made-up.md's Decision section opens "
+                "decisions/apart.png on the decision's own page and reference/apart.png on")
+        self.entries[2] = self.moved(self.sections[2])
         self.write()
         self.check()
+
+    def test_a_heading_of_the_second_level_that_is_no_entry_fails(self):
+        # More of a decision than its section: the text under the heading is compared with nothing.
+        whole = self.entries[1]
+        self.entries[1] = whole + "\n" + heading(2, "Alternatives considered") + '\n<p>Unread. <a href="broken.html">x</a></p>'
+        self.write()
+        refused(self, lambda: index.check(self.book), "reference/decisions-0001-0025.html has a heading of the second "
+                "level that is no decision's entry, `Alternatives considered`, after the entry `0001. Adopt the "
+                "leader's first rule`", "with `###`", "`decision_section` and `fenced`")
+        # The same heading inside the section itself, on both pages.
+        self.sections[1] += "\n" + heading(2, "A heading too high") + "\n<p>Under it.</p>"
+        self.entries[1] = self.moved(self.sections[1])
+        self.write()
+        refused(self, lambda: index.check(self.book), "no decision's entry, `A heading too high`")
+        # Another decision's heading on the page is no entry of it either.
+        self.sections[1], self.entries[1] = self.sections[1].split("\n<h2")[0], whole
+        self.entries[2] = self.moved(self.sections[2]) + "\n" + heading(2, "0026. Start another page") + "\n<p>Astray.</p>"
+        self.write()
+        refused(self, lambda: index.check(self.book), "no decision's entry, `0026. Start another page`, after the entry "
+                "`0002. Keep zebrafish apart`")
 
     def test_a_decision_with_no_entry_no_page_or_another_heading_fails(self):
         self.entries[2] = None
@@ -390,7 +456,8 @@ class Check(unittest.TestCase):
         with open(os.path.join(self.decisions, "0002-made-up.md"), "w", encoding="utf-8") as f:
             f.write("# 0002. Keep `zebrafish` apart\n\n## Decision\n\nx\n")
         refused(self, lambda: index.check(self.book), "the entry of docs/decisions/0002-made-up.md on "
-                "reference/decisions-0001-0025.html is headed `0002. Keep them apart`, not `0002. Keep `zebrafish` apart`")
+                "reference/decisions-0001-0025.html is headed `0002. Keep them apart`, not `0002. Keep `zebrafish` apart`",
+                "write it without HTML")
         self.titles[2] = "Keep `zebrafish` apart"
         self.write()
         os.remove(os.path.join(self.book, "reference", "decisions-0026-0050.html"))
@@ -403,6 +470,9 @@ class Check(unittest.TestCase):
         with open(os.path.join(self.book, "decisions", "0026-made-up.html"), "w", encoding="utf-8") as f:
             f.write(page(heading(1, "0026. Start another page") + "\n" + heading(2, "Context") + "\n<p>No decision.</p>"))
         refused(self, lambda: index.check(self.book), "docs/decisions/0026-made-up.md has 0 sections headed `Decision`")
+        with open(os.path.join(self.book, "decisions", "0026-made-up.html"), "w", encoding="utf-8") as f:
+            f.write(page(heading(2, "Decision") + "\n" + self.sections[26] + "\n" + heading(2, "Decision") + "\n<p>Twice.</p>"))
+        refused(self, lambda: index.check(self.book), "docs/decisions/0026-made-up.md has 2 sections headed `Decision`")
         with open(os.path.join(self.book, "decisions", "0026-made-up.html"), "w", encoding="utf-8") as f:
             f.write(page(heading(2, "Decision") + "\n" + heading(2, "Consequences")))
         refused(self, lambda: index.check(self.book), "docs/decisions/0026-made-up.md's section `Decision` is empty")

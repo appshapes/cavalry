@@ -13,7 +13,7 @@
 
 `just docs` builds the book and denies every warning (ADR 0006), and mdBook warns
 when its search index passes 10,000,000 bytes by its own count. ADR 0120 met that
-warning, set the one setting that shrinks the index, one search document for each
+warning, chose the setting that shrinks the index most, one search document for each
 page, and left the file at 7.3 MB. It is dated 2026-11-13. Twelve days later, on
 `master` at cfe40bc2, the file is 10,006,987 bytes, about 24 KB under the warning by
 mdBook's count. Work item 469's change, with one more ADR, is over it: `search index
@@ -57,7 +57,9 @@ decisions' own pages.**
 - **None of those pages is in the repository.** They are made from the decisions
   each time, so they cannot fall behind one, no pull request has a generated file to
   bring up to date, and two pull requests that each add a decision meet in no new
-  file. A decision with no Decision section stops the build. The page they go below,
+  file. A decision with no Decision section stops the build. So does one whose
+  Decision section has a line that defines a link's target or a footnote: on a page
+  of 25 sections such a line would be every section's. The page they go below,
   `docs/reference/decisions.md`, is in the repository and is generated too, by the
   same script's `--write`: its text does not change with the decisions.
 - **`just docs` checks the built book** with the same script, `--check`, last of its
@@ -66,9 +68,12 @@ decisions' own pages.**
   the same text and the same links as the Decision section of the decision's own
   built page, unless the search index holds a document for that generated page with
   the decision's number and title in it, and when a decision's own page is in the
-  index again. So the faults this change could have fail a gate: a decision that
-  `docs/SUMMARY.md` does not list, a preprocessor that did not run or read the wrong
-  section, a link it did not rewrite, the setting removed.
+  index again. It fails too when a generated page has a heading of the second level
+  that is no decision's entry: what is under one is shown and indexed, and would be
+  compared with nothing. So the faults this change could have fail a gate: a
+  decision that `docs/SUMMARY.md` does not list, a preprocessor that did not run,
+  read another section or read past the section's end, a link it did not rewrite,
+  the setting removed.
 - **The early bound.** The check prints the index file's size on every run and fails
   when it passes 7,000,000 bytes, 3,000,000 under mdBook's warning. The failure says
   that nothing is wrong with the change that met it and names two things to do in
@@ -81,7 +86,7 @@ decisions' own pages.**
 
 - **The first paragraph of each Decision section, not the whole section.** The
   template asks for a decision a reader can stop at in one paragraph. The file is
-  then 3,846,696 bytes where the whole sections give 4,680,740, and a decision adds a
+  then 3,848,331 bytes where the whole sections give 4,682,375, and a decision adds a
   quarter as much. It lost because the decisions as written do not fit a paragraph:
   the sections are 642,592 bytes and their first paragraphs 156,547, so three
   quarters of what was decided would leave the search, the names of the functions,
@@ -92,9 +97,9 @@ decisions' own pages.**
   a file that every pull request with a decision appends to is a file in which they
   all meet, and each would regenerate it after every merge of `master`.
 - **One generated page for all the decisions.** It lost to invariant 3: its HTML
-  would be 0.9 MB today and grow with every decision. With 25 to a page the largest
+  would be 797,833 bytes today and grow with every decision. With 25 to a page the largest
   page is 195,438 bytes. The number of decisions to a page changes the index little:
-  4,874,816 bytes at 10, 4,680,740 at 25, 4,582,067 at 50 and 4,499,980 at 100.
+  4,876,451 bytes at 10, 4,682,375 at 25, 4,583,702 at 50 and 4,501,617 at 100.
 - **A check that reads the Markdown: every word of a decision's Decision section is
   in its page's search document.** It was built first. It lost to an independent
   read, which found that it failed honest Markdown (an HTML entity, emphasis inside a
@@ -119,25 +124,39 @@ decisions' own pages.**
 mdBook 0.5.4 on a macOS laptop, the file `searchindex-<hash>.js` of each build. "This
 change" is its tree without this ADR's own file, so with `master`'s 164 decisions.
 Work item 469's ADR is the file of that work item's commit e6128115, 12,208 bytes,
-whose Decision section is 2,136 bytes.
+whose Decision section is 2,133 bytes.
 
 | Tree | File, bytes |
 | --- | ---: |
 | `master` at cfe40bc2 | 10,006,987 |
-| the same with work item 469's ADR | 10,053,563 |
+| the tree of work item 469's commit e6128115: `master` with its ADR | 10,053,563 |
 | `master`, the decisions out of the search and nothing in their place | 3,365,402 |
-| this change | 4,680,740 |
-| this change with work item 469's ADR | 4,689,063 |
-| this change with first paragraphs in place of whole sections | 3,846,696 |
+| this change | 4,682,375 |
+| this change with work item 469's ADR | 4,690,698 |
+| this change with first paragraphs in place of whole sections | 3,848,331 |
 
 mdBook's own count for this change's index, the JSON before the file's escaping, is
-4,664,717 bytes. One more decision adds 8,323 bytes where it added 46,576: 3.9 bytes
+4,666,345 bytes. One more decision adds 8,323 bytes where it added 46,576: 3.9 bytes
 of index for each byte of its Decision section. The last twenty decisions' sections
 are 3,351 bytes each at the mean, so about 13 KB each.
 
 On that book the check passes for all 164 decisions: each entry's text and links are
 those of its own page's Decision section. The decisions' files are 2,283,509 bytes
 and their Decision sections 642,592, which is 28%.
+
+The check and the preprocessor were read twice by a session that did not write them.
+The second read built 31 made-up books with mdBook, each with one way of writing a
+Decision section. Five passed the check with more of the decision than its section
+on the generated page, and a link there that opened nothing: a heading one space in,
+a heading with a tab after its `##`, a line of three backticks with a code span after
+them, and a heading of the second level inside the section, written with `---`
+under it or as `<h2>`. The first three are now read as mdBook reads them, and the
+last two fail the check, as would any other way of reading past a section's end: a
+heading that is no entry. Two more failed with a message that named the wrong
+remedy, a footnote and a link's target defined inside the section: both now stop
+the build with their own message. The 31 books are the evidence for "the faults this
+change could have fail a gate"; `scripts/decisions-index-test.py` holds each as a
+test.
 
 The preprocessor's interface was read from mdBook 0.5.4 itself, with a made-up book:
 it is given `[context, book]` as JSON, the book's chapters under `items` with each
@@ -161,8 +180,8 @@ built book has none of the generated pages.
   word: mdBook's search splits a text at spaces and hyphens, so a word that a
   section has only inside a path, `spec/vectors/cluster.json`, is found by the path's
   beginning and not by `cluster`. That was so of the decisions' own pages as well.
-- **The room.** The file is 2.3 MB under the early bound: about 180 decisions of the
-  size of the last twenty, seven weeks at four a day. From the early bound to its
+- **The room.** The file is 2.3 MB under the early bound: about 177 decisions of the
+  size of the last twenty, six weeks at four a day. From the early bound to its
   raised value is 1.5 MB, about 115 decisions and four weeks, for the work item it
   asks for. The pages outside the decisions grow too, and count against the same
   room.
@@ -170,10 +189,13 @@ built book has none of the generated pages.
   as a failure of `just docs` with the two steps in it, and by every session before
   that as the size in the gate's last line. That change is stopped for the minutes
   its two steps take.
-- **A Decision section is now shown on two pages**, so it cannot use what Markdown
-  takes from elsewhere in its file: a footnote, or a link whose target is defined
-  outside the section. The check names the decision and says how to write it. No
-  decision uses either today.
+- **A Decision section is now shown on two pages**, one of them beside other
+  decisions' sections. So it cannot use what Markdown takes from elsewhere in its
+  file, a footnote or a link whose target is defined on a line of its own, and it
+  cannot hold a heading of the second level. The build stops at a definition inside
+  the section, and the check fails a link or a footnote whose definition is outside
+  it and a heading of the second level; each names the decision and says how to
+  write it. No decision uses any of them today.
 - We maintain a preprocessor and a reader of the built pages and of the search
   index's file, tied to mdBook 0.5.4's forms, which the `justfile` and CI pin
   together. `mdbook build` and `mdbook serve` need `python3` on the path.
