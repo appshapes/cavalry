@@ -41,7 +41,7 @@ Linux for everything it builds.
    compiler, the Python and the kernel the command runs with:
 
    ```text
-   floor: glibc 2.28, rustc 1.100.0 (0ef1bc386 2026-11-09), cc (GCC) 14.2.1 20250110 (Red Hat 14.2.1-11), Python 3.12.16, kernel 6.8.0-1021-azure
+   floor: glibc 2.28, rustc 1.100.0 (0ef1bc386 2026-11-09), cc (GCC) 14.2.1 20250110 (Red Hat 14.2.1-11), Python 3.12.16, kernel 6.6.141
    ldd (GNU libc) 2.28
    ```
 
@@ -103,8 +103,8 @@ Linux for everything it builds.
   package: python: installed into a new environment outside the checkout; the README's example printed `1000 messages over cavalry:ipc, position 64000`; ...
   ```
 
-- A file from `target/floor/` starts on your own system, whose glibc is newer:
-  `target/floor/release/cavalry doctor` prints its report.
+- On Linux, a file from `target/floor/` starts on your own system, whose glibc is
+  newer: `target/floor/release/cavalry doctor` prints its report.
 
 ## When it does not work
 

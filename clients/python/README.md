@@ -555,8 +555,9 @@ and run on
 ([ADR 0178](../../docs/decisions/0178-build-every-native-artefact-for-glibc-2-28-in-an-image-of-it-and-run-it-there.md)).
 RHEL 8 and its rebuilds, Debian 10, Ubuntu 20.04 and every later release of the three
 have it or a newer one. Amazon Linux 2, RHEL 7 and Ubuntu 18.04 have an older one, and
-there the library does not load: the loader says `version 'GLIBC_2.28' not found`,
-and pip says the wheel `is not a supported wheel on this platform`. Alpine Linux has
+nothing of Cavalry is built for them: the driver does not start there, with the
+loader's message ``version `GLIBC_2.28' not found``, and pip says the wheel `is not
+a supported wheel on this platform`. Alpine Linux has
 another C library, musl, and no wheel is built for it. Linux on 64-bit ARM is built
 and run at the same floor from a checkout, tagged `manylinux_2_28_aarch64`, and CI
 does not run it.
