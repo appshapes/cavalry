@@ -13,7 +13,9 @@
 //! What the seed draws against the rule: a service that reads its log late, so that
 //! its leader appends events for timers that are cancelled or scheduled again
 //! already; a handler that does not take its entry; a consensus module stream that
-//! takes no message for a while; a service that stops, and starts again from the
+//! takes no message for a while; a member's consensus module that stands still while
+//! its driver and its services run on, the leader's half the time (`Cluster::stall`;
+//! work item 467); a service that stops, and starts again from the
 //! snapshot it took or from position 0, beside a member that kept what the service
 //! before it had told it, and reads its history before it tells that member
 //! anything, in half of the seeds, and in the other half no service that stops, so
@@ -288,6 +290,8 @@ struct Drawn {
     service_starts: u64,
     member_starts: u64,
     stale_leader_events: u64,
+    stalls: u64,
+    leaders_stalled: u64,
     unsettled_members: u64,
     unsettled_clusters: u64,
     leader_cuts: u64,
@@ -582,6 +586,7 @@ fn search(seed: u64, length_ms: u64) -> Drawn {
     let mut halted: Option<(i32, u64)> = None;
     let mut cut: Option<(i32, i32, u64)> = None;
     let mut cut_off: Option<(i32, u64)> = None;
+    let mut stalled: Option<(i32, u64)> = None;
     let total = length_ms + SETTLE_MS;
     for ms in 0..total {
         let searching = ms < length_ms;
@@ -602,6 +607,12 @@ fn search(seed: u64, length_ms: u64) -> Drawn {
         {
             cluster.heal(member);
             cut_off = None;
+        }
+        if let Some((member, until)) = stalled
+            && (ms >= until || !searching)
+        {
+            cluster.unstall(member);
+            stalled = None;
         }
         if !searching {
             // Settling: nothing is lost or late, and every service runs, reads and tells.
@@ -640,8 +651,10 @@ fn search(seed: u64, length_ms: u64) -> Drawn {
             match draw.below(2_500) {
                 0 if halted.is_none() => {
                     let member = draw.pick(&IDS);
-                    cluster.halt(member);
-                    halted = Some((member, ms + 300 + draw.below(15_000)));
+                    if stalled.is_none_or(|(stalled, _)| stalled != member) {
+                        cluster.halt(member);
+                        halted = Some((member, ms + 300 + draw.below(15_000)));
+                    }
                 }
                 1 if cut.is_none() => {
                     let a = draw.pick(&IDS);
@@ -660,6 +673,10 @@ fn search(seed: u64, length_ms: u64) -> Drawn {
                     let member = draw.pick(&IDS);
                     if halted.is_none_or(|(halted, _)| halted != member) {
                         safety.restart(&mut cluster, member);
+                        // A start ends a stall: the process that stood still is gone.
+                        if stalled.is_some_and(|(stalled, _)| stalled == member) {
+                            stalled = None;
+                        }
                         let beside = &mut besides[usize::try_from(member).expect("an id")];
                         beside.member.clear();
                         beside.stream.clear();
@@ -705,6 +722,27 @@ fn search(seed: u64, length_ms: u64) -> Drawn {
                         cut_off = Some((leader, ms + 9_000 + draw.below(20_000)));
                     }
                 }
+                // A module that stands still while its driver runs on (work item 467):
+                // the leader's half the time, so that it stalls with entries appended
+                // after its duty cycle read its append position. Its recording syncs, its
+                // replays and its sender go on, its services run, and what is sent to it
+                // and what its services tell it wait, for 1 ms to 20 s: within a
+                // heartbeat interval, or long enough that the others elect without it.
+                15 if stalled.is_none() => {
+                    let member = match cluster.leader() {
+                        Some(leader) if draw.below(2) == 0 => leader,
+                        _ => draw.pick(&IDS),
+                    };
+                    if halted.is_none_or(|(halted, _)| halted != member) {
+                        let span = draw.pick(&[2, 20, 200, 2_000, 20_000]);
+                        if cluster.leader() == Some(member) {
+                            drawn.leaders_stalled += 1;
+                        }
+                        cluster.stall(member);
+                        stalled = Some((member, ms + 1 + draw.below(span)));
+                        drawn.stalls += 1;
+                    }
+                }
                 _ => {}
             }
         }
@@ -717,6 +755,11 @@ fn search(seed: u64, length_ms: u64) -> Drawn {
                 service_turn(
                     &cluster, member, beside, index, &mut canon, &mut draw, ms, &mut drawn,
                 );
+            }
+            // A stalled module reads nothing its services told it and appends no
+            // timer event; its services run on.
+            if stalled.is_some_and(|(stalled, _)| stalled == member) {
+                continue;
             }
             let cut_off_now = cut_off.is_some_and(|(cut, _)| cut == member);
             member_turn(&mut cluster, member, beside, cut_off_now, &mut drawn);
@@ -890,6 +933,8 @@ fn every_timer_is_handed_over_once_at_one_position_beside_every_member() {
         all.unsettled_clusters += drawn.unsettled_clusters;
         all.leader_cuts += drawn.leader_cuts;
         all.refreshes += drawn.refreshes;
+        all.stalls += drawn.stalls;
+        all.leaders_stalled += drawn.leaders_stalled;
         if drawn.unsettled_members > 0 {
             println!(
                 "seed {seed}: the elections of {} of the three members had not closed at the \
@@ -942,5 +987,10 @@ fn every_timer_is_handed_over_once_at_one_position_beside_every_member() {
     assert!(
         all.stale_leader_events > 0,
         "seeds {seeds:?} had no cut-off leader append an event"
+    );
+    assert!(
+        all.leaders_stalled > 0,
+        "seeds {seeds:?} stalled no leader's module, of {} stalls",
+        all.stalls
     );
 }
