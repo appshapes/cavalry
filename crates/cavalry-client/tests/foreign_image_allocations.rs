@@ -76,6 +76,8 @@ fn a_conductor_allocates_nothing_for_an_image_that_is_another_clients() {
     // file is held open for the client to read, and nothing is written to it.
     let _counters =
         CountersFile::create(&dir.0, spec::COUNTERS_CAPACITY).expect("the counters file");
+    // Where a client makes its lock file, which it does before its first command.
+    std::fs::create_dir(dir.0.join("clients")).expect("the directory of the clients' locks");
     let ring = CommandRing::create(&dir.0, spec::COMMAND_RING_CAPACITY).expect("the ring");
     let consumer = ring
         .consumer(spec::COMMAND_RING_UNBLOCK_TIMEOUT)

@@ -7,6 +7,7 @@ mod committed_log;
 mod conductor;
 mod counter;
 mod error;
+mod owned;
 mod publication;
 mod recording;
 mod replay;
