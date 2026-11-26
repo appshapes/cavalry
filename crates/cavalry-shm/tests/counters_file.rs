@@ -22,7 +22,7 @@ use cavalry_shm::counters::{
 /// The capacity of every file these tests create: the smallest the header takes that
 /// is above every static counter's id, since a static counter is in the record whose
 /// index is its id (`spec/counters-file.md`, "`counters.toml`"), and `counters.toml`'s
-/// largest static id is 148. A static counter of id 256 or more moves this to 512.
+/// largest static id is 204. A static counter of id 256 or more moves this to 512.
 const CAPACITY: u32 = 256;
 
 /// A fresh directory for one test, removed when the test ends.
