@@ -2259,3 +2259,101 @@ fn a_scan_refuses_a_bad_range() {
     assert_eq!(refused(192, 64), (64, 192));
     assert_eq!(refused(0, max + 32), (max + 32, 0));
 }
+
+/// Where the child of
+/// [`a_log_that_cannot_be_created_leaves_no_file`] creates its log.
+const LIMITED_DIR: &str = "CAVALRY_SHM_TEST_LIMITED_DIR";
+
+/// Every file under `dir`, by its path from `dir`.
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in fs::read_dir(&next).expect("the directory is read") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                found.push(
+                    path.strip_prefix(dir)
+                        .expect("under the directory")
+                        .to_path_buf(),
+                );
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// A log that cannot be created leaves no file (`spec/log-buffer.md`, "File"; ADR
+/// 0172; work item 492; GitHub issue 238). The creation is made to fail for real,
+/// after its file exists: a child process whose files the operating system limits
+/// to less than the log, so that sizing the file fails, as it does in a directory
+/// with no room. The child asks three times, as a caller that tries again does.
+/// Without the removal each ask leaves a file, under one name here and under a new
+/// name for each command's correlation id in a driver.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_log_that_cannot_be_created_leaves_no_file() {
+    let dir = Dir::new("not-created");
+    // The limit is in blocks of 512 or 1,024 bytes, by the shell: 64 or 128 KiB, and
+    // the log is 3 × 64 KiB + 4 KiB. The signal a write past the limit sends is
+    // ignored, so that the sizing returns its error.
+    let child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(
+            "trap '' XFSZ; ulimit -f 128 && exec \"$0\" a_log_is_created_where_files_are_limited \
+             --exact --ignored --nocapture --test-threads=1",
+        )
+        .arg(std::env::current_exe().expect("this program's path"))
+        .env(LIMITED_DIR, dir.path())
+        .output()
+        .expect("the child runs");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert!(child.status.success(), "{said}");
+    assert!(said.contains("refused three times"), "{said}");
+    assert_eq!(files_under(dir.path()), Vec::<PathBuf>::new(), "{said}");
+    // The same directory, with no limit: the log is created, at the path the three
+    // refusals left free.
+    let created = LogBuffers::create(dir.path(), &fields(LogType::Concurrent)).expect("create");
+    assert_eq!(files_under(dir.path()).len(), 1);
+    // And a creation that fails because a file is already at the path removes
+    // nothing: that file is not its own. The log that is there still opens.
+    assert!(matches!(
+        LogBuffers::create(dir.path(), &fields(LogType::Concurrent)),
+        Err(LogError::Io(_))
+    ));
+    assert_eq!(files_under(dir.path()).len(), 1);
+    LogBuffers::open(dir.path(), CORRELATION, false).expect("the log that was there opens");
+    drop(created);
+}
+
+/// The child of [`a_log_that_cannot_be_created_leaves_no_file`], which runs it in a
+/// process whose files are limited: on its own it has nothing to do.
+#[test]
+#[ignore = "the child of a_log_that_cannot_be_created_leaves_no_file"]
+fn a_log_is_created_where_files_are_limited() {
+    let Some(dir) = std::env::var_os(LIMITED_DIR) else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    for ask in 1..=3 {
+        match LogBuffers::create(&dir, &fields(LogType::Concurrent)) {
+            Err(LogError::Io(error)) => {
+                assert_eq!(
+                    files_under(&dir),
+                    Vec::<PathBuf>::new(),
+                    "after ask {ask}, refused with {error}"
+                );
+            }
+            Err(other) => panic!("ask {ask}: {other}"),
+            Ok(_) => panic!("ask {ask}: the log was created under the limit"),
+        }
+    }
+    println!("refused three times");
+}

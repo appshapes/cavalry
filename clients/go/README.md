@@ -587,17 +587,15 @@ a poll between (ADR 0159, ADR 0168). The publication's log is 192 MiB in the dri
 directory, every page of it resident, and every service holds it from that poll on, a
 program with no timer and no snapshot too; where the directory has no room for it, the
 refusal is `ErrStorageSpace`, code 12, and `cavalry doctor` names it with
-`driver.log_create_failed`. Until work item 492 lands, each such refusal also leaves
-the log's file in the directory, one at each ask, a second apart, and the first holds
-whatever room was left (GitHub issue 238). What a service tells its member of its
-timers, each pending timer again every second among it, is offered and waits for
-nothing, a program's first timer too. The runner's cluster round reports the waits. On
-this laptop (Apple M5 Pro), in each of 10 runs, 4 of about 43,300 to 47,800 polls of
-three services took over 1 ms. The report names the longest poll alone: in every run
-it was the poll in which a service first opened its member's log, with the six adds in
-it, 27.5 to 32.2 ms. Before ADR 0168 it was the poll in which a service's program
-first scheduled a timer, 22.7 to 37.8 ms. The program's other goroutines run
-meanwhile.
+`driver.log_create_failed`. The driver leaves no file for a log it could not create,
+however often it is asked (ADR 0172). What a service tells its member of its timers,
+each pending timer again every second among it, is offered and waits for nothing, a
+program's first timer too. The runner's cluster round reports the waits. On this
+laptop (Apple M5 Pro), in each of 10 runs, 4 of about 43,300 to 47,800 polls of three
+services took over 1 ms. The report names the longest poll alone: in every run it was
+the poll in which a service first opened its member's log, with the six adds in it,
+27.5 to 32.2 ms. Before ADR 0168 it was the poll in which a service's program first
+scheduled a timer, 22.7 to 37.8 ms. The program's other goroutines run meanwhile.
 
 ### Threads
 
