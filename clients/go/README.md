@@ -498,6 +498,25 @@ target/release/cavalry run &                     # one driver per host
 kill -TERM %1
 ```
 
+After the library is built again, Go's own cache can still hand back what it made
+with the library before. cgo links `libcavalry_ffi.a` by its path, and the cache does
+not see that file change (`go help cache`: it "does not detect changes to C libraries
+imported with cgo"). With no Go source changed:
+
+- `go run` runs the program it linked before. `go run -a ./example` once links it
+  again, and a plain `go run` after that runs the new one.
+- `go test` prints the result it cached. `go test -count=1` links and runs again each
+  time; `-a` once is not enough, since the next plain `go test` prints the older
+  cached result.
+- `go build -o` onto a program that is already there leaves it as it is. Build to a
+  new path, or with `-a`.
+
+`go clean -cache` cures the first two, at the cost of every package's next build,
+and not the third: a program that is already at the path stays.
+`conformance/go/run.sh` names the contents of the library and of the header in its
+build's flags, and each of its programs that links the library stops unless it was
+linked with the one just built (`conformance/go/linked`).
+
 ```go
 package main
 
@@ -587,17 +606,15 @@ a poll between (ADR 0159, ADR 0168). The publication's log is 192 MiB in the dri
 directory, every page of it resident, and every service holds it from that poll on, a
 program with no timer and no snapshot too; where the directory has no room for it, the
 refusal is `ErrStorageSpace`, code 12, and `cavalry doctor` names it with
-`driver.log_create_failed`. Until work item 492 lands, each such refusal also leaves
-the log's file in the directory, one at each ask, a second apart, and the first holds
-whatever room was left (GitHub issue 238). What a service tells its member of its
-timers, each pending timer again every second among it, is offered and waits for
-nothing, a program's first timer too. The runner's cluster round reports the waits. On
-this laptop (Apple M5 Pro), in each of 10 runs, 4 of about 43,300 to 47,800 polls of
-three services took over 1 ms. The report names the longest poll alone: in every run
-it was the poll in which a service first opened its member's log, with the six adds in
-it, 27.5 to 32.2 ms. Before ADR 0168 it was the poll in which a service's program
-first scheduled a timer, 22.7 to 37.8 ms. The program's other goroutines run
-meanwhile.
+`driver.log_create_failed`. The driver leaves no file for a log it could not create,
+however often it is asked (ADR 0172). What a service tells its member of its timers,
+each pending timer again every second among it, is offered and waits for nothing, a
+program's first timer too. The runner's cluster round reports the waits. On this
+laptop (Apple M5 Pro), in each of 10 runs, 4 of about 43,300 to 47,800 polls of three
+services took over 1 ms. The report names the longest poll alone: in every run it was
+the poll in which a service first opened its member's log, with the six adds in it,
+27.5 to 32.2 ms. Before ADR 0168 it was the poll in which a service's program first
+scheduled a timer, 22.7 to 37.8 ms. The program's other goroutines run meanwhile.
 
 ### Threads
 

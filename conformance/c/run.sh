@@ -46,6 +46,13 @@ mkdir -p target/conformance
     conformance/c/quickstart.c target/release/libcavalry_ffi.a $libs \
     -o target/conformance/quickstart-c
 
+# The port picker alone, before anything is started: 20,000 draws of the three ports
+# that step 2b takes together, which must differ in every draw (work item 461). A
+# picker that takes them one at a time gave two the same in 22 draws of 100,000 on a
+# Mac, so 20,000 draws fail it about 99 times in 100; they take under a second.
+echo "conformance/c: the port picker, with no driver"
+target/conformance/quickstart-c --pick-ports 20000
+
 echo "conformance/c: cavalry run, in the background, on $CAVALRY_DIR"
 target/release/cavalry run &
 driver_pid=$!

@@ -2347,13 +2347,28 @@ fn subscriber_failure<T>(joined: thread::Result<Result<T, String>>) -> String {
     }
 }
 
-/// A loopback port no socket holds at the moment it is read, bound and released: the
-/// UDP rows' channel is `cavalry:udp?endpoint=127.0.0.1:<port>`.
+/// `N` loopback ports that no socket holds at the moment they are read, no two of them
+/// the same: every socket is bound before any is released, so the system cannot give
+/// one port twice. Rows that need several ports that must differ, a control address
+/// and its destinations, take them in one call. A port bound, read and released, and
+/// then another the same way, can be the same port again, since nothing held the first
+/// (work item 461).
+fn free_ports<const N: usize>() -> Result<[u16; N], String> {
+    let error = |e: std::io::Error| format!("finding a free loopback port: {e}");
+    let mut sockets = Vec::with_capacity(N);
+    for _ in 0..N {
+        sockets.push(UdpSocket::bind("127.0.0.1:0").map_err(error)?);
+    }
+    let mut ports = [0u16; N];
+    for (port, socket) in ports.iter_mut().zip(&sockets) {
+        *port = socket.local_addr().map_err(error)?.port();
+    }
+    Ok(ports)
+}
+
+/// One such port: the UDP rows' channel is `cavalry:udp?endpoint=127.0.0.1:<port>`.
 fn free_port() -> Result<u16, String> {
-    UdpSocket::bind("127.0.0.1:0")
-        .and_then(|socket| socket.local_addr())
-        .map(|address| address.port())
-        .map_err(|e| format!("finding a free loopback port: {e}"))
+    free_ports::<1>().map(|[port]| port)
 }
 
 /// The wall clock in nanoseconds since the Unix epoch, chrony's on the bench hosts: the
@@ -3163,12 +3178,16 @@ fn bench_udp_mdc(options: &Options) -> Result<LogRun, String> {
             Driver::start_with_threads(dir, dir.join("log"), driver_idle(options), on_thread_start)
                 .map_err(|e| e.to_string())?;
         let mut client = Cavalry::connect_to(dir).map_err(|e| e.to_string())?;
-        let second = format!("cavalry:udp?endpoint=127.0.0.1:{}", free_port()?);
+        // The three ports together, since they must differ: the control address, the
+        // measured destination and the drained one.
+        let [control, first, second] = free_ports::<3>()?;
+        let second = format!("cavalry:udp?endpoint=127.0.0.1:{second}");
         let run = mdc_rows(
             options,
             &mut client,
             &pins,
             "127.0.0.1",
+            [control, first],
             Second::Drained(&second),
             CONNECT_TIMEOUT,
         )?;
@@ -3223,7 +3242,8 @@ impl<'a> Second<'a> {
 }
 
 /// One run of the multi-destination cast rows on `client`, whose driver already runs:
-/// a subscription on a free port of `host`, the measured destination, a second
+/// a subscription on the second of the two ports given, on `host`, the measured
+/// destination, with the first port for the control address, a second
 /// subscription on the second destination when it is [`Second::Drained`], a
 /// publication on a control channel of `host` with both as its destinations, connected
 /// within `timeout`, the measured run, the drain stopped and joined whatever the run's
@@ -3234,14 +3254,12 @@ fn mdc_rows(
     client: &mut Cavalry,
     pins: &DriverPins,
     host: &str,
+    [control, first]: [u16; 2],
     second: Second<'_>,
     timeout: Duration,
 ) -> Result<LogRun, String> {
-    let control = format!(
-        "cavalry:udp?control={host}:{}|control-mode=manual|fc=min",
-        free_port()?
-    );
-    let first = format!("cavalry:udp?endpoint={host}:{}", free_port()?);
+    let control = format!("cavalry:udp?control={host}:{control}|control-mode=manual|fc=min");
+    let first = format!("cavalry:udp?endpoint={host}:{first}");
     let mut subscription = client
         .add_subscription(&first, STREAM_ID)
         .map_err(|e| e.to_string())?;
@@ -3561,6 +3579,10 @@ fn run_link(
         &mut client,
         &pins,
         &link.here_host(),
+        // Together, since the two must differ. They are free on the loopback, which
+        // says nothing of the link's address: `crates/cavalry-raft/tests/ports/mod.rs`,
+        // "What the rule does not cover".
+        free_ports::<2>()?,
         Second::Peer(&peer),
         LINK_TIMEOUT,
     )?;
@@ -5851,5 +5873,22 @@ mod tests {
                 ("b".to_string(), purged(1, 30, true)),
             ])
         );
+    }
+
+    /// The ports of one call are bound together, so no two are the same, however many
+    /// times they are taken: the multi-destination rows' control address and its
+    /// destinations must differ (work item 461). A picker that takes them one at a
+    /// time gave two the same in 22 draws of 100,000 on a Mac.
+    #[test]
+    fn the_ports_of_one_call_are_never_the_same() {
+        for draw in 0..20_000 {
+            let [control, first, second] = free_ports::<3>().expect("three ports");
+            assert!(
+                control != first && control != second && first != second,
+                "draw {draw} gave {control}, {first} and {second}"
+            );
+        }
+        let [alone] = free_ports::<1>().expect("one port");
+        assert_ne!(alone, 0);
     }
 }

@@ -617,6 +617,12 @@ pub const CLUSTER_FLOOR_ANSWERS_IGNORED: CounterId = CounterId(202);
 /// `cluster.floor_answer`, a client gauge: The lowest log position of the floor answers one cluster member took since it stored its cluster.vote_floor, in this run, -1 for none: from version 3 of the cluster protocol, the member clears its floor only once its cluster.append_position is at or past it, as well as joined to its leader's live log and at or past the floor (spec/cluster.md, The floor answer; ADR 0163). key and label as cluster.elections.
 pub const CLUSTER_FLOOR_ANSWER: CounterId = CounterId(203);
 
+/// `driver.parks_overdue`, a static counter: Parks of a driver thread that ran more than 200 ms past their timeout and that the driver then ended, by unparking the thread: the driver's watch for the conductor, the recorder, the replayer, the sender and the receiver, and the conductor for the watch. Under the backoff idle strategy a thread parks for at most 1 ms when its duty cycle found no work, and a sender, a receiver or a replayer that holds nothing to do parks for 1 s; each is due back by that timeout. A park is counted once, however many looks it takes to end. The watch runs where a timed wait can outlive its timer, which is macOS (ADR 0171, ADR 0176); elsewhere the counter stays 0.
+pub const DRIVER_PARKS_OVERDUE: CounterId = CounterId(206);
+
+/// `client.conductor_parks_overdue`, a client counter: Parks of one client's conductor thread, or of the client's watch, that ran more than 200 ms past their timeout and that the other of the two then ended, by unparking it (ADR 0177). A client's conductor parks for at most 1 ms when its duty cycle found no work, and its watch for 100 ms. The client has a watch where a timed wait can outlive its timer, which is macOS (ADR 0171); its conductor adds this counter at the first such park and not before, so most clients have none, and stores the count with a release store; key: client id (i64), little-endian. A park is counted once, however many looks it takes to end. The driver frees the counter when the client closes or is timed out.
+pub const CLIENT_CONDUCTOR_PARKS_OVERDUE: CounterId = CounterId(207);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -753,7 +759,7 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Counter,
         scope: Scope::Static,
         doc: "Log buffers the driver could not create or size, refused with error code 12: the filesystem under the driver directory is full or not writable (spec/client-protocol.md, Commands).",
-        doctor: "Free space on the filesystem under the driver directory (/dev/shm on Linux): each cavalry:ipc publication needs 3 × 64 MiB + 4 KiB there while it is live or lingers, and each cavalry:udp publication and each image 3 × its term length + 4 KiB, 48 MiB unless the publication's channel names a shorter term-length. Close publications that are not used, name a shorter term-length on the channels of low-rate streams, or move the driver directory to a filesystem with room; a container's default /dev/shm is 64 MiB.",
+        doctor: "Free space on the filesystem under the driver directory (/dev/shm on Linux): each cavalry:ipc publication needs 3 × 64 MiB + 4 KiB there while it is live or lingers, and each cavalry:udp publication and each image 3 × its term length + 4 KiB, 48 MiB unless the publication's channel names a shorter term-length. Close publications that are not used, name a shorter term-length on the channels of low-rate streams, or move the driver directory to a filesystem with room; a container's default /dev/shm is 64 MiB. A replay's log is 3 × its recording's term length + 4 KiB. A log that was not created leaves no file: every file under publications/ and images/ there is a live or lingering publication's, an image's or a replay's (spec/log-buffer.md, File; ADR 0172).",
     },
     CounterDef {
         id: CONDUCTOR_IDLE_STRATEGY,
@@ -2250,5 +2256,21 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "The lowest log position of the floor answers one cluster member took since it stored its cluster.vote_floor, in this run, -1 for none: from version 3 of the cluster protocol, the member clears its floor only once its cluster.append_position is at or past it, as well as joined to its leader's live log and at or past the floor (spec/cluster.md, The floor answer; ADR 0163). key and label as cluster.elections.",
         doctor: "This member holds a vote floor and has an answer from its leader: it clears the floor once its log reaches the answer's position and it has joined the live log. Nothing to do.",
+    },
+    CounterDef {
+        id: DRIVER_PARKS_OVERDUE,
+        name: "driver.parks_overdue",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Parks of a driver thread that ran more than 200 ms past their timeout and that the driver then ended, by unparking the thread: the driver's watch for the conductor, the recorder, the replayer, the sender and the receiver, and the conductor for the watch. Under the backoff idle strategy a thread parks for at most 1 ms when its duty cycle found no work, and a sender, a receiver or a replayer that holds nothing to do parks for 1 s; each is due back by that timeout. A park is counted once, however many looks it takes to end. The watch runs where a timed wait can outlive its timer, which is macOS (ADR 0171, ADR 0176); elsewhere the counter stays 0.",
+        doctor: "A thread of this driver did not come back from a timed wait and was woken by the driver's watch, after a stall of up to 300 ms past its timeout each time. On a Mac the system can lose a timer wake-up, about one in 40 million on the machine where it was found, and a few of these a day is that: nothing to do, and docs/how-to/find-a-wait-that-does-not-return.md says how to probe the machine. Many a minute means the host could not run the driver's threads for 200 ms at a time: look for a host under memory pressure or CPU contention, or a process stopped and continued.",
+    },
+    CounterDef {
+        id: CLIENT_CONDUCTOR_PARKS_OVERDUE,
+        name: "client.conductor_parks_overdue",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Parks of one client's conductor thread, or of the client's watch, that ran more than 200 ms past their timeout and that the other of the two then ended, by unparking it (ADR 0177). A client's conductor parks for at most 1 ms when its duty cycle found no work, and its watch for 100 ms. The client has a watch where a timed wait can outlive its timer, which is macOS (ADR 0171); its conductor adds this counter at the first such park and not before, so most clients have none, and stores the count with a release store; key: client id (i64), little-endian. A park is counted once, however many looks it takes to end. The driver frees the counter when the client closes or is timed out.",
+        doctor: "A client's conductor did not come back from a timed wait and was woken by the client's watch, after a stall of up to 300 ms past its timeout each time, in which the client sent no keepalive and took no image. On a Mac the system can lose a timer wake-up, about one in 40 million on the machine where it was found, and a few of these a day is that: nothing to do, and docs/how-to/find-a-wait-that-does-not-return.md says how to probe the machine. Many a minute means the host could not run the client's threads for 200 ms at a time: look for a host under memory pressure or CPU contention, or a process stopped and continued.",
     },
 ];

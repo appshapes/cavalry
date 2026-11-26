@@ -24,6 +24,7 @@ use std::collections::VecDeque;
 use std::fs::{File, TryLockError};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -78,6 +79,7 @@ use crate::replayer;
 use crate::sender;
 use crate::socket::{ReceiveSocket, SendSocket};
 use crate::spec;
+use crate::watch::{WakeDue, Watched};
 
 /// The docs anchor an error event's message names.
 const ERRORS_DOC: &str = "docs/reference/client-protocol.md#error-codes";
@@ -1172,10 +1174,33 @@ impl Conductor {
     }
 
     /// The conductor's loop: duty cycles until `stop`, then −1 in the heartbeat.
-    pub(crate) fn run(mut self, stop: &AtomicBool) {
+    pub(crate) fn run(
+        mut self,
+        stop: &AtomicBool,
+        due: Option<Arc<WakeDue>>,
+        watch: Option<(Arc<Watched>, Counter)>,
+    ) {
+        // Where this thread says when each park is due, for the driver's watch, and the
+        // watch itself, whose own park this thread ends when it is overdue: each of the
+        // two gets the other back (ADR 0176).
+        self.idler.watch(due);
+        // The due time of the watch's park last counted: an idle pass can come many
+        // times before the watch has woken and cleared its due time, under busy-spin
+        // every few nanoseconds, and each unparks it and one counts it.
+        let mut counted = 0;
         while !stop.load(Ordering::Acquire) {
             let now = now_nanos();
             if self.duty_cycle(now) == 0 {
+                if let Some((watched, parks_overdue)) = &watch
+                    && let Some((thread, due)) = watched.overdue(now)
+                {
+                    // Counted before the watch is woken, as the watch counts.
+                    if due != counted {
+                        counted = due;
+                        parks_overdue.increment();
+                    }
+                    thread.unpark();
+                }
                 self.idler.idle();
             } else {
                 self.idler.reset();
@@ -6845,8 +6870,14 @@ impl Conductor {
         for counter in counters {
             let _ = self.counters.free(counter.id(), reuse);
         }
-        drop(log);
-        remove_log(&self.dir, self.replays[index].replay_session_id);
+        // The file is removed only where this replay made it. A log that was not
+        // created left none (`spec/log-buffer.md`, "File"; ADR 0172), and the path
+        // may then be another's: a `start replay` whose correlation id is a live
+        // publication's fails its creation on that publication's file, which stays.
+        if let Some(log) = log {
+            drop(log);
+            remove_log(&self.dir, self.replays[index].replay_session_id);
+        }
         if let Some((endpoint_index, socket)) = endpoint {
             self.abandon_send_endpoint(endpoint_index, socket.is_some(), reuse);
         }
@@ -14142,6 +14173,39 @@ mod replay {
             publication.udp.as_ref().map(|udp| udp.endpoint_id),
             Some(h.conductor.send_endpoints[shared].registration_id)
         );
+        drop(appender);
+    }
+
+    /// A `start replay` whose correlation id is a live publication's registration id
+    /// fails the creation of its log on that publication's file, which is not the
+    /// replay's to remove and stays (`spec/log-buffer.md`, "File"; ADR 0172; work
+    /// item 492): the answer is error code 12, counted, and the publication goes on.
+    /// Before, the replay's undo removed the path whether or not it had made the
+    /// file, and the live publication lost its log.
+    #[test]
+    fn a_replay_under_a_live_publications_id_leaves_that_publications_log() {
+        let (mut h, mut appender) = recorded("replay-under-a-live-id");
+        offer(&mut h, &mut appender, 0, 10);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let _ = events(&mut h);
+        let path = h.dir.path().join("publications/2.logbuffer");
+        assert!(path.exists(), "the live publication's log");
+        assert_eq!(h.conductor.publications.len(), 1);
+        let failed = h.counter(DRIVER_LOG_CREATE_FAILED);
+        start_replay(&mut h, 2, 0, -1, None);
+        let got = events(&mut h);
+        let refused = errors(&got);
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert_eq!(refused[0].1, 12, "{refused:?}");
+        assert_eq!(h.counter(DRIVER_LOG_CREATE_FAILED), failed + 1);
+        assert!(
+            path.exists(),
+            "the live publication's log is not the replay's to remove"
+        );
+        assert_eq!(h.conductor.publications.len(), 1);
+        // And the file is the publication's still: it opens, with its header whole.
+        LogBuffers::open(h.dir.path(), 2, false).expect("the publication's log opens");
         drop(appender);
     }
 
