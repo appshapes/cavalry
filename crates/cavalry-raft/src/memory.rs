@@ -2436,7 +2436,9 @@ impl Cluster {
         let now_ns = self.world.clock.now_ns;
         let run = self.world.runs.get(from).copied().unwrap_or(0);
         let queue = std::mem::take(&mut self.world.stream_queue);
-        let mut kept = Vec::with_capacity(queue.len());
+        // Reserved whole, as the queue was at the start: a hold after this release
+        // pushes into it without growing it.
+        let mut kept = Vec::with_capacity(MAX_HELD_STREAM);
         let mut sent = 0;
         for mut flight in queue {
             if flight.to != to || sender_of(&flight) != from {
@@ -2648,5 +2650,49 @@ mod tests {
             [in_flight_to(&cluster, 0), in_flight_to(&cluster, 2)],
             others
         );
+    }
+
+    /// The record of votes holds its bound, `MAX_VOTES_CAST` (invariant 3; work item
+    /// 476). Of `MAX_VOTES_CAST + 1` votes, each in a term of its own so that none
+    /// repeats the one before it, the first `MAX_VOTES_CAST` are recorded, and the one
+    /// past the bound is counted in `votes_unrecorded` and not pushed.
+    #[test]
+    fn the_record_of_votes_holds_its_bound() {
+        let mut cluster = Cluster::with_election(&[0, 1, 2], 1).expect("three members");
+        assert!(cluster.votes_cast().is_empty(), "no vote before a run");
+        let bound = i64::try_from(MAX_VOTES_CAST).expect("a term");
+        for term in 0..=bound {
+            cluster.world.record_vote(0, term, 1);
+        }
+        assert_eq!(cluster.votes_cast().len(), MAX_VOTES_CAST);
+        assert_eq!(cluster.votes_unrecorded(), 1);
+        assert_eq!(
+            cluster.votes_cast().last().map(|vote| vote.term),
+            Some(bound - 1),
+            "the last vote recorded is the last within the bound"
+        );
+    }
+
+    /// The queue of held streams stays reserved whole, at `MAX_HELD_STREAM`, after a
+    /// release, as it was built: a hold after it pushes into the queue without growing
+    /// it (invariant 3; work item 476). A release in parts and a whole release each
+    /// rebuild the queue.
+    #[test]
+    fn the_queue_of_held_streams_stays_reserved_after_a_release() {
+        let mut cluster = Cluster::with_election(&[0, 1, 2], 1).expect("three members");
+        cluster.run_ms(2_000);
+        let leader = cluster.leader().expect("a leader");
+        let follower = if leader == 0 { 1 } else { 0 };
+        cluster.hold_stream(leader, follower);
+        cluster.run_ms(500);
+        assert!(
+            cluster.held_stream_count(leader, follower) > 1,
+            "the leader's messages to the follower are held"
+        );
+        cluster.release_stream_first(leader, follower, 1);
+        assert!(cluster.world.stream_queue.capacity() >= MAX_HELD_STREAM);
+        cluster.release_stream(leader, follower);
+        assert_eq!(cluster.held_stream_count(leader, follower), 0);
+        assert!(cluster.world.stream_queue.capacity() >= MAX_HELD_STREAM);
     }
 }
