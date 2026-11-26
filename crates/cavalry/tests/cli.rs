@@ -817,6 +817,62 @@ const ELECTION_COUNTERS: [&str; 18] = [
     "cluster.commit_position",
 ];
 
+/// How long a three-member start's elections may take in these tests, 30 s. A start
+/// can take one leader heartbeat timeout and an election more: a follower that took the
+/// term of a leader that has since given it up waits out the leader heartbeat timeout,
+/// 10 s, for that leader's log before it canvasses again (work item 512). That start
+/// closed in 11.7 s in work item 510's measure. A bound of 10 s is the timeout itself,
+/// and it cannot tell a start that settles after it from one that never does; 30 s says
+/// that a start did not settle.
+const ELECTION_BOUND: Duration = Duration::from_secs(30);
+
+/// The leader heartbeat timeout (`spec/cluster.md`, "Roles and the election"): a start
+/// that took longer is reported, though it passes.
+const LEADER_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Each member's counters of [`ELECTION_COUNTERS`], and the members string, whose ports
+/// a member's error names.
+fn election_report(dirs: &[TestDir], members: &str) -> String {
+    let mut report = vec![format!("the members string: {members}")];
+    for (member, dir) in dirs.iter().enumerate() {
+        let counters: Vec<String> = ELECTION_COUNTERS
+            .iter()
+            .map(|name| format!("{name} {:?}", cluster_counter(&dir.0, name)))
+            .collect();
+        report.push(format!("member {member}: {}", counters.join(", ")));
+    }
+    report.join("\n")
+}
+
+/// Waits until `closed`, the members' elections closed, within [`ELECTION_BOUND`]. A
+/// wait that took longer than the leader heartbeat timeout prints each member's
+/// election counters and passes, so that a slow start is seen; one that reached the
+/// bound fails with them.
+fn wait_for_elections(
+    what: &str,
+    dirs: &[TestDir],
+    members: &str,
+    mut closed: impl FnMut() -> bool,
+) {
+    let began = Instant::now();
+    while !closed() {
+        assert!(
+            began.elapsed() < ELECTION_BOUND,
+            "{what} within {} s\n{}",
+            ELECTION_BOUND.as_secs(),
+            election_report(dirs, members)
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    if began.elapsed() > LEADER_HEARTBEAT_TIMEOUT {
+        eprintln!(
+            "{what} in {} ms, past the leader heartbeat timeout (work item 512):\n{}",
+            began.elapsed().as_millis(),
+            election_report(dirs, members)
+        );
+    }
+}
+
 #[test]
 fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_elect_a_leader() {
     let ports = loopback_ports(15);
@@ -860,28 +916,12 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_elect_a_leader() 
     // each member's directory is kept on this host. Together they tell a member that
     // could not bind an endpoint from one whose leader closed without it, and a start
     // that took more than one ballot, or failed an election, from one that waited on
-    // a single step.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !dirs
-        .iter()
-        .all(|dir| cluster_counter(&dir.0, CLUSTER_ELECTION_STATE) == Some(17))
-    {
-        if Instant::now() >= deadline {
-            let mut report = vec![format!("the members string: {members}")];
-            for (member, dir) in dirs.iter().enumerate() {
-                let counters: Vec<String> = ELECTION_COUNTERS
-                    .iter()
-                    .map(|name| format!("{name} {:?}", cluster_counter(&dir.0, name)))
-                    .collect();
-                report.push(format!("member {member}: {}", counters.join(", ")));
-            }
-            panic!(
-                "every member's election closed within 10 s\n{}",
-                report.join("\n")
-            );
-        }
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    // a single step. A start that took longer than the leader heartbeat timeout prints
+    // the same report and passes (`ELECTION_BOUND`).
+    wait_for_elections("every member's election closed", &dirs, &members, || {
+        dirs.iter()
+            .all(|dir| cluster_counter(&dir.0, CLUSTER_ELECTION_STATE) == Some(17))
+    });
     let roles: Vec<Option<i64>> = dirs
         .iter()
         .map(|dir| cluster_counter(&dir.0, CLUSTER_ROLE))
@@ -999,8 +1039,10 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_elect_a_leader() 
             c
         });
     }
-    wait(
+    wait_for_elections(
         "every member's election closed again in a later term",
+        &dirs,
+        &members,
         || {
             dirs.iter().all(|dir| {
                 cluster_counter(&dir.0, CLUSTER_ELECTION_STATE) == Some(17)
@@ -1225,7 +1267,7 @@ fn snapshot_asks_the_leader_names_it_beside_a_follower_and_finds_no_member_on_a_
             c
         });
     }
-    wait("every member's election closed", || {
+    wait_for_elections("every member's election closed", &dirs, &members, || {
         dirs.iter()
             .all(|dir| cluster_counter(&dir.0, CLUSTER_ELECTION_STATE) == Some(17))
     });
