@@ -637,6 +637,29 @@ public static class Quickstart
                 + " with error " + commitAfterCloseCode + "; expected -1 and ERROR with ERR_NULL (" + Abi.ERR_NULL
                 + "), and -1 with ERR_NO_CLAIM (" + Abi.ERR_NO_CLAIM + ")");
         }
+        // The subscription's images after its close, the other place where the ABI refuses
+        // them: the count is -1, and the list and the image at an index each throw that
+        // refusal, ERR_NULL, with no empty list and no null (work item 468; a runner asks
+        // since work item 477).
+        var closed = new List<string> { subscription.ImageCount().ToString() };
+        foreach (Func<object?> ask in asks)
+        {
+            try
+            {
+                closed.Add("answered " + ask());
+            }
+            catch (CavalryException refusedClosed)
+            {
+                closed.Add(refusedClosed.Function + " " + refusedClosed.Code);
+            }
+        }
+        string refusedOfClosed = "cavalry_subscription_image_count " + Abi.ERR_NULL;
+        if (closed.Count != 3 || closed[0] != "-1" || closed[1] != refusedOfClosed || closed[2] != refusedOfClosed)
+        {
+            Fail(name + ": after the subscription's close its image count, its list of images and its image at an index gave "
+                + string.Join(", ", closed) + "; expected -1, and a CavalryException of cavalry_subscription_image_count with"
+                + " ERR_NULL (" + Abi.ERR_NULL + ") for each of the other two");
+        }
         Say(name + ": a poll from inside a handler of its own subscription returned -1 with ERR_POLLING, the image count there"
             + " was -1 and the list of images and the image at an index each threw CavalryException with that code, and the"
             + " outer handler saw"
@@ -645,7 +668,8 @@ public static class Quickstart
             + " Commit, Abort and SetReservedValue answered -1 with ERR_NO_CLAIM; a close"
             + " from inside the handler threw CavalryException with ERR_POLLING, kept the subscription open for message 18, and"
             + " the close after the poll closed it; after the closes, Poll and TryClaim were refused by the ABI with ERR_NULL"
-            + " and Commit with ERR_NO_CLAIM");
+            + " and Commit with ERR_NO_CLAIM, and the subscription's image count was -1 and the list of images and the"
+            + " image at an index each threw CavalryException with ERR_NULL");
     }
 
     /// <summary>Checks, on stream 1005, that a reserved value beyond 2^53 and the smallest long
