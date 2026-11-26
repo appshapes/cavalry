@@ -1,0 +1,54 @@
+# The macOS gates, once a week at master's head, by hand, and at a release (ADR 0170).
+#
+# The gates are ci.yml's `gates` job, every step of it, on the macOS runner: this file
+# has no steps of its own and calls that one, so the two operating systems cannot come
+# to run different gates. What macOS holds is the laptop's half of invariant 5,
+# "`cavalry` with no arguments works on a laptop": the one platform where a process is
+# found with `ps` and not under `/proc`, where there is no `/dev/shm`, and where the
+# clock's tick is 41.67 ns (ADR 0073).
+#
+# Why a week and not a commit: every session works on a Mac and runs the gates there
+# before each pull request, so this run is a second net, a clean machine with a slower
+# clock. For each commit it cost about 4.5 hours of a macOS runner a day in the week of
+# 2026-11-22, and about one of its jobs in twenty loses its runner for no fault of a
+# change (work item 456), which each night would be a red run every three weeks.
+#
+# It is no run of `ci` for a commit and no required check, as the latency gate's and
+# Brigade's server's nights are not (ADRs 0139 and 0142), so a red week is not a red
+# master. Its reader is `/next-task`, and
+# docs/how-to/read-the-weekly-run-of-the-macos-gates.md says what to do with one: run
+# it again when the runner was lost, and find a failure of ours on a Mac by bisecting
+# the week's commits.
+#
+#   gh workflow run macos.yml                    # at master's head
+#   gh workflow run macos.yml --ref <branch>     # at a branch that holds this file
+#
+# At a release: the release's workflow runs the same job at the release's commit,
+# whatever the weekday, by calling ci.yml as this file does. That workflow is work
+# item 491's. Until it lands, whoever cuts a release starts this one by hand at the
+# release's tag, the second command above.
+#
+# The token reads the repository and nothing else, which is all ci.yml asks for.
+name: macos
+
+on:
+  schedule:
+    # 04:23 UTC each Monday: the week's commits are read before the week's release
+    # notes go out at 14:41 UTC (send-release-notes.yml), the two nightly runs start
+    # at 06:43 and 07:17, and a schedule on the hour is the one GitHub delays most.
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# No concurrency group here: ci.yml has one for the runs this file calls, one run at a
+# time for a ref with one more waiting, and a group of the same name in both files
+# would have the two wait on each other.
+
+jobs:
+  macos:
+    name: macos
+    uses: ./.github/workflows/ci.yml
+    with:
+      macos: true
