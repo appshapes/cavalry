@@ -71,6 +71,25 @@ else
                 -e "CARGO_HOME=$cargo_home" -e "RUSTUP_HOME=/floor-toolchain/rustup" -e "CAVALRY_FLOOR_INSTALL=1")
 fi
 
+# The image, pulled before the run and tried three times: a registry that does not
+# answer for a moment is not the change's fault, and the last line says so. An image
+# that is here already is not pulled.
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    pulled=""
+    for attempt in 1 2 3; do
+        if docker pull --quiet "$IMAGE" >/dev/null; then
+            pulled=yes
+            break
+        fi
+        echo "floor: pull $attempt of 3 of $IMAGE failed" >&2
+        [ "$attempt" -lt 3 ] && sleep $((attempt * 10))
+    done
+    if [ -z "$pulled" ]; then
+        echo "floor: the registry quay.io did not give the floor's image in three tries. Unless the change under test moves the image's digest in scripts/floor.sh, this is not its fault: start the run again; $HELP" >&2
+        exit 1
+    fi
+fi
+
 # /dev/shm of a container is 64 MiB unless it is asked for, and a driver's directory is
 # there. HOME is a directory any user of the container may write. --init puts a small
 # program at the container's process 1 that passes signals on, so Ctrl-C and a

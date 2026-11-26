@@ -126,7 +126,10 @@ def expected_platform():
     floor = glibc_floor()
     libraries, versions = floor.read(run(["objdump", "-p", LIBRARY], "objdump's reading of the library's "
                                                                      "dynamic section and version references"))
-    newest = floor.newest(versions)
+    try:
+        newest = floor.newest(versions)
+    except floor.FloorError as error:
+        fail(f"{LIBRARY}: {error}")
     if newest is None:
         fail(f"objdump shows no GLIBC version among those {LIBRARY} asks for; {HELP}")
     other = sorted(set(libraries) - floor.LIBRARIES)

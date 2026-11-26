@@ -121,9 +121,12 @@ Linux for everything it builds.
 - **`floor: no Rust toolchain at ...`.** On Linux the container uses the host's
   toolchain, and found none at `CARGO_HOME` and `RUSTUP_HOME`, or at `~/.cargo` and
   `~/.rustup`. Install it with `rustup`.
-- **The pull fails, or `docker: Error response from daemon`, with `quay.io` in the
-  message.** The image comes from `quay.io`. Run the command again; a registry that
-  stays unreachable fails every run until it answers, CI's included.
+- **`floor: the registry quay.io did not give the floor's image in three tries`.**
+  The image comes from `quay.io`, and the script pulls it before the run, three
+  times with a pause between. Unless the change moves the image's digest in
+  `scripts/floor.sh`, the failure is the registry's and not the change's: run the
+  command again, and in CI start the run again. A registry that stays
+  unreachable fails every run until it answers, on a pull request and on `master`.
 - **`glibc-floor: ... needs glibc 2.34`, with a list of functions.** The file was
   linked on a newer system than the floor, most often because it came from
   `target/release/` and not from `target/floor/release/`. Build it with
