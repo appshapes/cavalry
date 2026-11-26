@@ -37,6 +37,17 @@ integers through `od` in hex, because
 it reads eight bytes it knows to be 4096 and chooses no member on a host that reads them
 otherwise.
 
+A runner picks a loopback port by binding a socket to port 0, reading the port the
+system gave and closing the socket. Nothing holds that port afterwards, so a second
+pick can be given the same one. A step that needs several ports that must differ
+takes them together: every socket is bound before any is closed. `c/quickstart.c`'s
+step 2b, a control address and two destinations, takes its three from
+`free_udp_ports`, and `run.sh` runs that picker alone first, `quickstart-c
+--pick-ports 20000`, which fails on a draw with two ports the same (work item 461).
+The other runners' quickstarts take one port in a step. The tests under `crates/`
+take theirs by number, each once in a process, from
+`crates/cavalry-raft/tests/ports/mod.rs`.
+
 The cluster round is a runner's check of a cluster's service and of a session with a
 cluster (`spec/c-abi.md`, versions 4 and 5; `spec/cluster.md`, "Sessions", "The service"
 and "Replies"). Every runner's round also holds a program's timer (version 7; ADR
