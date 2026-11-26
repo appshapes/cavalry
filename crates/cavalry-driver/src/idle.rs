@@ -14,7 +14,7 @@ pub enum IdleStrategy {
     BusySpin,
     /// Yield the CPU to another thread on every idle cycle.
     Yield,
-    /// Spin a few times, then yield a few times, then sleep for longer and longer, up to
+    /// Spin a few times, then yield a few times, then park for longer and longer, up to
     /// a millisecond, until there is work again. The default.
     #[default]
     Backoff,
@@ -86,7 +86,7 @@ const MAX_PARK: Duration = Duration::from_millis(1);
 /// is an instance of an `IdleStrategy`, with its `idle()` and `reset()`
 /// (`docs/glossary.md`, idle strategy).
 ///
-/// The backoff spins 10 times, then yields 20 times, then sleeps from 1 µs to 1 ms,
+/// The backoff spins 10 times, then yields 20 times, then parks from 1 µs to 1 ms,
 /// doubling, until a reset: Aeron's `BackoffIdleStrategy` figures.
 ///
 /// ```
@@ -107,7 +107,7 @@ const MAX_PARK: Duration = Duration::from_millis(1);
 ///         idler.reset();
 ///         break;
 ///     }
-///     // No work: spin, then yield, then sleep for longer and longer.
+///     // No work: spin, then yield, then park for longer and longer.
 ///     idler.idle();
 ///     idled += 1;
 /// }
@@ -133,8 +133,18 @@ impl Idler {
     }
 
     /// Called after a duty cycle with no work: busy-spin spins once and yield yields
-    /// once, and backoff takes the next step of its streak, which is a sleep of at most
+    /// once, and backoff takes the next step of its streak, which is a park of at most
     /// 1 ms once the spins and the yields are spent.
+    ///
+    /// The park is [`std::thread::park_timeout`], not a sleep, so that whoever stops the
+    /// loop can end it: an [`unpark`](std::thread::Thread::unpark) of this thread makes
+    /// the park return at once, and one that came before it makes the next park return
+    /// at once. A loop that calls this reads its stop flag every pass, so a stop is the
+    /// flag stored and then the unpark, and it does not depend on the park's own
+    /// timeout. That timeout is not sure on every machine: on one Mac a wait of 1 ms in
+    /// about 20 million did not return until its thread was woken (ADR 0171;
+    /// `docs/how-to/find-a-wait-that-does-not-return.md`). A park may also return
+    /// early for no reason, which costs one duty cycle.
     pub fn idle(&mut self) {
         match self.strategy {
             IdleStrategy::BusySpin => std::hint::spin_loop(),
@@ -147,7 +157,11 @@ impl Idler {
                     self.yields += 1;
                     std::thread::yield_now();
                 } else {
-                    std::thread::sleep(self.park);
+                    #[cfg(test)]
+                    let park = tests::PARK_FOR_TEST.get().unwrap_or(self.park);
+                    #[cfg(not(test))]
+                    let park = self.park;
+                    std::thread::park_timeout(park);
                     self.park = (self.park * 2).min(MAX_PARK);
                 }
             }
@@ -163,8 +177,56 @@ impl Idler {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+
+    thread_local! {
+        /// For a test: how long this thread's backoff parks, in place of at most 1 ms.
+        /// An hour stands for the park whose timeout never comes, so that a test passes
+        /// only when something unparks the thread.
+        pub(crate) static PARK_FOR_TEST: Cell<Option<Duration>> = const { Cell::new(None) };
+    }
+
+    /// A park that would last an hour.
+    pub(crate) const NEVER: Duration = Duration::from_secs(3600);
+
+    #[test]
+    fn a_backoff_that_has_parked_returns_when_its_thread_is_unparked() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let parking = Arc::new(AtomicBool::new(false));
+        let (ended, end) = mpsc::channel();
+        let handle = {
+            let (stop, parking) = (Arc::clone(&stop), Arc::clone(&parking));
+            std::thread::spawn(move || {
+                PARK_FOR_TEST.set(Some(NEVER));
+                let mut idler = Idler::new(IdleStrategy::Backoff);
+                let mut idled = 0u32;
+                while !stop.load(Ordering::Acquire) {
+                    if idled == MAX_SPINS + MAX_YIELDS {
+                        parking.store(true, Ordering::Release);
+                    }
+                    idler.idle();
+                    idled += 1;
+                }
+                let _ = ended.send(idled);
+            })
+        };
+        while !parking.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        // The stop of every loop that idles here: the flag, then the unpark. Whether the
+        // unpark comes before the park or during it, the park returns.
+        stop.store(true, Ordering::Release);
+        handle.thread().unpark();
+        let idled = end
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the idler's loop ended when its thread was unparked, not an hour later");
+        assert_eq!(idled, MAX_SPINS + MAX_YIELDS + 1, "one park, ended by the unpark");
+        handle.join().expect("the thread ended");
+    }
 
     #[test]
     fn every_strategy_round_trips_through_its_name_and_its_counter_value() {
