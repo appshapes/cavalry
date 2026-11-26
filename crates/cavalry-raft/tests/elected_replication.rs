@@ -2,11 +2,11 @@
 //! commit position", "Members and streams"; ADR 0060, ADR 0069, ADR 0100): what the
 //! log holds when a cluster starts together, what a commit needs, what an offer is
 //! refused for, what a lossy and late consensus stream changes, the bound of the
-//! members table and of the stream, a cluster of one, a member that starts late, a
-//! leader that lost its log directory, members parted, and the bound of the new
-//! leadership terms the in-memory cluster holds back. Every test checks, at
-//! every step, that no committed entry is lost, and that the leader commits nothing
-//! a quorum has not synced.
+//! members table and of the stream, a cluster of one, a cold start with a member
+//! missing, a leader that lost its log directory, members parted, and the bound of the
+//! new leadership terms the in-memory cluster holds back. Every test checks, at every
+//! step, that no committed entry is lost, and that the leader commits nothing a quorum
+//! has not synced.
 
 mod elected_cluster;
 
@@ -111,23 +111,22 @@ fn a_cluster_started_together_elects_its_leader_replicates_and_commits() {
     assert_eq!(cluster.leader(), Some(leader), "it led throughout");
 }
 
-/// A cold start with a member missing. Until a member's first election has closed its
-/// canvass deadline is the startup canvass timeout, 60 s: with two of three reporting,
-/// neither is a candidate before it, since the third may hold a log ahead of theirs.
-/// At the deadline the two make a quorum with no log ahead. One nominates itself, the
-/// other votes for it, and it leads and closes its election with the two, which
-/// commit. The third member starts after the term's first entry. It is behind its
-/// leader's log within the leader's term, so it catches up and joins, and the three
-/// commit under the same leader.
+/// A cold start with a member missing elects no leader until that member starts (work
+/// item 476). A member whose log is empty cannot tell a new cluster from one whose logs
+/// were lost, and one that lost its log in the cluster's first ballot may have voted
+/// there. So in a cluster of empty logs it neither stands nor votes until every other
+/// voter has reported. Two of three run for 120 s, twice the startup canvass timeout:
+/// both still canvass, neither has stood, voted or stored a term, and an offer is
+/// refused. The third starts, the three hear each other and elect a leader, and what
+/// it commits is on all three.
 #[test]
-fn two_of_three_wait_the_startup_canvass_timeout_and_a_member_that_starts_late_catches_up() {
+fn two_of_three_elect_no_leader_until_the_third_starts_and_then_the_three_elect() {
     let ids = [0, 1, 2];
     let two = [0, 1];
     let mut cluster = Cluster::with_election(&ids, 1).expect("three members");
     let mut safety = Safety::new(&ids);
     cluster.halt(2);
-    safety.run(&mut cluster, 59_900);
-    // A quorum is there, and both still canvass for the third.
+    safety.run(&mut cluster, 120_000);
     assert_eq!(cluster.leader(), None);
     for id in two {
         assert_eq!(cluster.role(id), Some(Role::Follower), "member {id}");
@@ -136,45 +135,35 @@ fn two_of_three_wait_the_startup_canvass_timeout_and_a_member_that_starts_late_c
             Some(ElectionState::Canvass),
             "member {id}"
         );
+        let counts = cluster.counts(id).expect("a member");
+        assert_eq!(counts.candidacies, 0, "member {id}: {counts:?}");
+        assert_eq!(counts.votes_for, 0, "member {id}: {counts:?}");
+        assert_eq!(counts.votes_against, 0, "member {id}: {counts:?}");
         assert_eq!(
             cluster.record_of_terms(id),
             Some((vec![], -1)),
-            "member {id} proposed nothing yet"
+            "member {id} proposed nothing"
         );
         assert!(cluster.log(id).is_empty(), "member {id}");
     }
     assert_eq!(cluster.offer(b"early"), Err(Refused::NotLeader));
 
-    // The startup canvass timeout: a quorum candidate nominates itself, wins the
-    // other's vote and closes with it.
-    safety.run_until(&mut cluster, 2_000, "a leader of the two", |cluster| {
-        settled(cluster, &two)
+    // The third member starts: every voter has reported, and the three elect.
+    cluster.resume(2);
+    safety.run_until(&mut cluster, 5_000, "the three elect a leader", |cluster| {
+        settled(cluster, &ids)
     });
     let leader = cluster.leader().expect("a leader");
-    let first = cluster.offer(b"two of three").expect("the leader appends");
-    safety.run(&mut cluster, 500);
-    for id in two {
-        assert_eq!(cluster.commit_position(id), Some(first), "member {id}");
-    }
-    assert_eq!(cluster.append_position(2), Some(0));
-
-    // The third member starts now, behind its leader's log: it catches up.
-    cluster.resume(2);
-    safety.run_until(&mut cluster, 5_000, "the late member joined", |cluster| {
-        settled(cluster, &ids) && cluster.append_position(2) == Some(first)
-    });
-    let late = cluster.counts(2).expect("a member");
-    assert_eq!(late.catchups, 1, "{late:?}");
-    assert_eq!(late.elections_failed, 0, "{late:?}");
-    assert_eq!(late.candidacies, 0, "{late:?}");
-    assert_eq!(cluster.log(2), cluster.log(leader));
-    let second = cluster
+    let first = cluster
         .offer(b"three of three")
         .expect("the leader appends");
     safety.run(&mut cluster, 500);
     for id in ids {
-        assert_eq!(cluster.commit_position(id), Some(second), "member {id}");
+        assert_eq!(cluster.commit_position(id), Some(first), "member {id}");
         assert_eq!(cluster.log(id), cluster.log(leader), "member {id}");
+        let counts = cluster.counts(id).expect("a member");
+        assert_eq!(counts.elections_failed, 0, "member {id}: {counts:?}");
+        assert_eq!(counts.elections_closed, 1, "member {id}: {counts:?}");
     }
     assert_eq!(cluster.leader(), Some(leader), "it led throughout");
     assert_eq!(cluster.counts(leader).expect("the leader").terms_led, 1);
@@ -869,19 +858,23 @@ fn a_follower_that_loses_its_image_begins_again_and_joins_level_or_behind() {
 }
 
 /// The history on which the check fails, so that it is known to fail. An election
-/// keeps what a quorum committed while a quorum keeps its logs, and no protocol keeps
-/// it when a quorum loses them: two of three start again on empty log directories
-/// while the third, which kept its own, is cut off. The two elect a leader of term 0
-/// a second time, which commits its term's first entry where the first history holds
-/// another, and the check says so at the step that commits it. That first entry is
-/// the whole of the other history here: nothing is offered after the wipe, and the
-/// test passes on the first panic that carries the check's words.
+/// keeps what a quorum committed while a member that holds it is heard, and no
+/// protocol keeps it once every member has lost it: all three start again on empty
+/// log directories. Two that lost theirs beside a third that kept its own elect
+/// nobody while the third is not heard (work item 476), and vote its log in once it
+/// is (`lost_log_directory.rs`,
+/// `two_members_that_lost_their_logs_vote_in_the_one_that_holds_the_log`), so the
+/// whole cluster is wiped here. The three hear each other's empty logs and elect a
+/// leader of term 0 a second time, which commits its term's first entry where the
+/// first history holds another, and the check says so at the step that commits it.
+/// That first entry is the whole of the other history here: nothing is offered after
+/// the wipe, and the test passes on the first panic that carries the check's words.
 #[test]
 #[should_panic(expected = "leads with a log that differs from what was committed")]
 fn a_quorum_that_lost_its_logs_commits_another_history_and_the_check_fails() {
     let ids = [0, 1, 2];
     let mut safety = Safety::new(&ids);
-    let (mut cluster, leader) = elected(1, &mut safety);
+    let (mut cluster, _) = elected(1, &mut safety);
     cluster
         .offer(b"the first history, entry 1")
         .expect("the leader appends");
@@ -889,17 +882,16 @@ fn a_quorum_that_lost_its_logs_commits_another_history_and_the_check_fails() {
         .offer(b"the first history, entry 2")
         .expect("the leader appends");
     safety.run(&mut cluster, 1_000);
-    let [kept, lost] = followers(&ids, leader)[..] else {
-        panic!("two followers");
-    };
-    assert_eq!(cluster.commit_position(kept), Some(end));
+    for id in ids {
+        assert_eq!(cluster.commit_position(id), Some(end), "member {id}");
+    }
 
-    cluster.cut(kept);
-    safety.wipe(&mut cluster, leader);
-    safety.wipe(&mut cluster, lost);
-    // The two hear no member ahead of them and elect at the startup canvass timeout,
-    // 60 s. The first entry the new leader commits is not the first history's.
-    safety.run(&mut cluster, 70_000);
+    for id in ids {
+        safety.wipe(&mut cluster, id);
+    }
+    // Every voter reports an empty log, and the three elect at once. The first entry
+    // the new leader commits is not the first history's.
+    safety.run(&mut cluster, 10_000);
 }
 
 /// A partition between the leader and one follower stops the log and the consensus

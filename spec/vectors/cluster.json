@@ -3166,7 +3166,7 @@
     },
     {
       "kind": "arithmetic",
-      "name": "withholds-not-a-new-clusters-member",
+      "name": "withholds-not-a-new-clusters-member-once-every-voter-reported",
       "rule": "withholds",
       "inputs": {
         "own": [
@@ -3174,10 +3174,28 @@
           0
         ],
         "vote_floor": -1,
-        "log_heard": false
+        "log_heard": false,
+        "all_reported": true
       },
       "fields": {
         "withholds": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "withholds-a-new-clusters-member-until-every-voter-reported",
+      "rule": "withholds",
+      "inputs": {
+        "own": [
+          -1,
+          0
+        ],
+        "vote_floor": -1,
+        "log_heard": false,
+        "all_reported": false
+      },
+      "fields": {
+        "withholds": true
       }
     },
     {
@@ -3190,7 +3208,8 @@
           0
         ],
         "vote_floor": -1,
-        "log_heard": true
+        "log_heard": true,
+        "all_reported": true
       },
       "fields": {
         "withholds": true
@@ -3206,7 +3225,8 @@
           4096
         ],
         "vote_floor": 8192,
-        "log_heard": false
+        "log_heard": false,
+        "all_reported": true
       },
       "fields": {
         "withholds": true
@@ -3222,7 +3242,8 @@
           8192
         ],
         "vote_floor": 8192,
-        "log_heard": true
+        "log_heard": true,
+        "all_reported": true
       },
       "fields": {
         "withholds": true
@@ -3238,7 +3259,25 @@
           4096
         ],
         "vote_floor": -1,
-        "log_heard": true
+        "log_heard": true,
+        "all_reported": true
+      },
+      "fields": {
+        "withholds": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "withholds-a-log-with-no-floor-not-before-every-voter-reported",
+      "rule": "withholds",
+      "inputs": {
+        "own": [
+          3,
+          4096
+        ],
+        "vote_floor": -1,
+        "log_heard": false,
+        "all_reported": false
       },
       "fields": {
         "withholds": false
@@ -3254,7 +3293,8 @@
           12288
         ],
         "vote_floor": 8192,
-        "log_heard": false
+        "log_heard": false,
+        "all_reported": true
       },
       "fields": {
         "withholds": true
@@ -3270,7 +3310,8 @@
           4096
         ],
         "vote_floor": 0,
-        "log_heard": false
+        "log_heard": false,
+        "all_reported": true
       },
       "fields": {
         "withholds": true

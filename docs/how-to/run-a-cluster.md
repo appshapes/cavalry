@@ -91,10 +91,14 @@ committed once a quorum, two of three, has it on disk.
    ```
 
    Each prints `cavalry run: driver started on ...` and then `cavalry run: cluster
-   member <id> started`. Start all three within a minute. Three members that have
-   heard one another elect a leader within a second. Two that run while the third
-   is not started wait 60 s for it, the startup canvass timeout, and then elect one
-   of the two; the third joins when it starts and catches up from the leader.
+   member <id> started`. Start all three. A new cluster elects its first leader only
+   once every member has started: three members that have heard one another elect a
+   leader within a second, and two that run while the third has not started wait
+   for it, for as long as it takes, since a member of a new cluster votes only once it
+   has heard every member (work item 476). Once the cluster has its first leader, a
+   member that stops or starts late no longer holds the others back: two of three
+   elect while the third is stopped, and the third catches up from the leader when it
+   starts.
 
 4. Ask each member what it is:
 
@@ -431,8 +435,10 @@ committed once a quorum, two of three, has it on disk.
 - `WARN cluster-no-leader`: the member is in an election and has no leader to follow.
   The message says which state its election is in and why it began, from
   `cluster.election_cause`. A leader needs the votes of two of three members. At a
-  start, members that have not heard every other member wait 60 s for it, the
-  startup canvass timeout, before two of them elect. Run `doctor` on each member's
+  new cluster's start, every member waits until it has heard every other member, for
+  as long as that takes: start the member that has not started. Once the cluster has
+  held a log, members that have not heard every other member wait 60 s, the startup
+  canvass timeout, before two of them elect. Run `doctor` on each member's
   host, and check that each host reaches the `consensus` endpoint of every other,
   the second port of each entry in step 1. In canvass the message has one more
   sentence, for a member that has replicated a term it missed: it canvasses again

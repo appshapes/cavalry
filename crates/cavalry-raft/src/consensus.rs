@@ -2250,7 +2250,11 @@ impl Consensus {
             term: request.log_leadership_term_id,
             position: request.log_position,
         };
-        if self.withholds(Some(candidate_log)) {
+        // A member whose log is empty votes by that one case even when it does not
+        // withhold, in a cluster of empty logs once every voter has reported: the term
+        // condition keeps it from a second vote in a term it voted in before it lost its
+        // log (work item 476).
+        if self.withholds(Some(candidate_log)) || self.log_empty() {
             let mut reports = self.reports(self.own_report());
             if let Some(slot) = self
                 .other(candidate_member_id)
@@ -2694,7 +2698,18 @@ impl Consensus {
                 })
             });
         let log_heard = reported || candidate.as_ref().is_some_and(holds);
-        withholds(self.own_report(), self.vote_floor, log_heard)
+        // Every other voter of the members string has reported in this election: until
+        // then a member whose log is empty in a cluster of empty logs withholds too,
+        // since a candidate it voted for before it lost its log names that term only in
+        // a report (work item 476).
+        let all_reported = self
+            .peers
+            .iter()
+            .take(self.count)
+            .enumerate()
+            .filter(|&(index, _)| index != self.own)
+            .all(|(_, peer)| peer.reported);
+        withholds(self.own_report(), self.vote_floor, log_heard, all_reported)
     }
 
     /// The lowest log position of the floor answers this member took since it last

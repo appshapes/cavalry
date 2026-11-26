@@ -44,6 +44,15 @@ consensus session. No layout of version 2 changes and every header's version sta
 0. It adds a use for a reserved bit of a `flags` field to what a version of a major
 may add ("Versions and the upgrade"). A member and a client of version 3 write 768.
 
+Version 3 is amended once, with no version moved (work item 476): a member whose log
+is empty, beside members whose logs are empty too, stands and votes only once every
+voter of its members string has reported in its election, and then by the one case
+in which a member that withholds votes ("A member that lost its log"). It changes no
+message and no layout. Only a cluster whose logs are all empty behaves differently: a
+new cluster's start, and a cluster each of whose members lost its log. A member built
+before the amendment votes there as it did, so a new cluster is started with members
+of one build.
+
 ## Members and streams
 
 A cluster is a members string, the same string on every member and every client,
@@ -1357,9 +1366,29 @@ which the `withheld-vote` and `votes-in-term` vectors pin, the voters alone give
 
 - Its log is empty, log leadership term id −1 at position 0, while a member's report
   in this election, or the request it answers, holds a log, log leadership term id 0
-  or more or a position above 0. A member whose log is empty beside members whose
-  logs are empty too is a member of a new cluster, and votes as any voter does.
+  or more or a position above 0; or while a voter of its members string other than
+  itself has not reported in this election.
 - It holds a vote floor.
+
+So a member whose log is empty beside members whose logs are empty too, a member of a
+new cluster or one that lost its log in the new cluster's first ballot, stands and
+votes only once every voter has reported in this election, and it votes then by the
+one case above, as every member whose log is empty does, whether it withholds or not
+(work item 476). Without it, such a member that voted for one candidate in the
+cluster's first ballot and lost its log before the term's first entry would vote
+for a second candidate of that term, since no log is heard, and the two would lead
+one term. Every report it counts names a term at least the one it voted in, if the
+voter is the candidate it voted for: it read that candidate's request before it lost
+its log, so every frame of that candidate's stream written before the request was
+sent before it, and of those, a datagram still on its way at the start is dropped
+below the new image ("What the second case rests on"). A frame held back to the new
+image was written after the request, so after the candidate stored the term. The
+cost is the start of a new cluster: it elects its first leader only once each of its
+members has run, and two members that run while the third has never started wait
+for it, with no bound (`cluster-no-leader` in `cavalry doctor` names the voter not
+yet heard). In Aeron, a cluster elects at its start with a quorum once the startup
+canvass timeout passes, which rests on a member's state being kept; this page keeps
+the startup canvass timeout for a member whose log is not empty.
 
 The **vote floor** is the mark a member that took a leader with its log empty holds
 until it has caught up. A member whose log is empty that takes a leader on a new
@@ -1578,14 +1607,11 @@ stopped has a leader and no follower of it, and commits nothing, until the stopp
 member runs again. No member can tell that leader from a deposed one while the
 member that would name the later term is stopped. Two members of three that lost their logs
 while the third is heard elect the third, since every voter is heard. Two that lost
-their logs while the third is stopped elect between them as a new cluster does: a
-quorum's record is gone, which no rule of this page gives back. So do two members of
-three that hold no log, one that lost it and one that never held a byte of it, as a
-new cluster's member that started late and has not caught up, while the third, which
-holds the log, is stopped. No member that runs holds what the cluster committed, and
-neither can tell the cluster from a new one, whose members elect with one of three
-not yet started; a rule that held this case would keep every new cluster from
-electing until each of its members runs. And a member whose
+their logs while the third, which holds the log, is stopped, and two of three that
+hold no log, one that lost it and one that never held a byte of it, as a new
+cluster's member that started late and has not caught up, elect nothing while the
+third is stopped: each waits for every voter's report, and the third's holds a log
+(work item 476). Once the third runs, they withhold and it leads. And a member whose
 leader's log no longer begins at position 0, its recordings purged below a snapshot,
 cannot replicate what it lacks, and withholds until it is started from a peer's
 snapshot, which this version does not do (work item 365).

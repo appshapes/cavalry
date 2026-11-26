@@ -300,12 +300,17 @@ fn a_candidate_counts_the_voters_alone_and_waits_for_no_standby() {
 /// A member reads a message whoever sent it. A voter votes, on the logs compared,
 /// for a candidate that its own string marks a standby, and follows the leader that
 /// candidate becomes: the candidate runs a string that gives it a vote, as it does
-/// while a promotion's string reaches the members one after another.
+/// while a promotion's string reaches the members one after another. The voter has
+/// heard member 1, the other voter of its string, with no log, as a voter whose log is
+/// empty must before it votes (work item 476).
 #[test]
 fn a_voter_votes_for_and_follows_a_member_its_own_string_marks_a_standby() {
     let mut io = Stub::new();
     let mut member = Consensus::with_standbys(&[0, 1], &[2], 0, 1).expect("a voter");
     member.do_work(at(1), &mut io).expect("no fault");
+    member
+        .on_message(at(2), &canvass_position(1, -1, 0), &mut io)
+        .expect("no fault");
     member
         .on_message(at(2), &request_vote(2, 0, 0), &mut io)
         .expect("no fault");
@@ -449,8 +454,8 @@ fn a_standby_follows_its_leader_and_neither_votes_nor_leads_nor_delays_an_electi
 
 /// A standby that does not run delays no election: the voters are unanimous among
 /// themselves and one leads within a second, where a voter that did not run would
-/// hold them in canvass for the startup canvass timeout, 60 s. The standby starts
-/// late, catches up and follows.
+/// hold them in canvass until it ran (work item 476). The standby starts late, catches
+/// up and follows.
 #[test]
 fn a_standby_that_does_not_run_holds_no_voter_in_canvass() {
     let ids = [0, 1, 2, 3];
@@ -842,13 +847,16 @@ fn a_lost_voter_is_replaced_by_a_standby_in_two_changes_of_one_mark_each() {
 
 /// What the rules of a change are for (`spec/cluster.md`, "Changing a standby's
 /// mark"; ADR 0134): two marks changed with no election closed between them elect a
-/// leader that lacks a committed entry. Five voters and a standby. Members 0, 2 and
-/// 3, a quorum, elect a leader and commit an entry, parted from members 1, 4 and 5.
+/// leader that lacks a committed entry. Five voters and a standby. The six elect a
+/// leader of term 0 together, so that every log holds that term: a cluster of empty
+/// logs elects only once every voter has reported (work item 476). Then members 0, 2
+/// and 3 are parted from members 1, 4 and 5, and started again on the logs they kept.
+/// A quorum, they elect a leader of a later term among themselves and commit an entry.
 /// Then members 1, 4 and 5 are started with a string that is two marks from the one
-/// the others run: member 2 a standby and member 5 a voter. They are a quorum of
-/// that string's five voters, and none of them holds the entry or voted in its
-/// term. One of them leads, in the same term as the first leader, with a log that
-/// does not hold the committed entry.
+/// the others run: member 2 a standby and member 5 a voter. They are a quorum of that
+/// string's five voters, and none of them holds the entry or voted in its term. One of
+/// them leads, in the same term as the first leader, with a log that does not hold the
+/// committed entry.
 ///
 /// The test holds the harness to finding that, and the page to its reason. The same
 /// members started with one mark changed, member 2 a standby alone, are two of four
@@ -858,20 +866,33 @@ fn two_marks_changed_at_once_elect_a_leader_that_lacks_a_committed_entry() {
     let ids = [0, 1, 2, 3, 4, 5];
     let (one_side, other_side) = ([0, 2, 3], [1, 4, 5]);
     let mut cluster = Cluster::with_standbys(&ids, &[5], 1).expect("six members");
+    assert!(
+        stepped_until(&mut cluster, 3_000, |cluster| settled(cluster, &ids)),
+        "the six elect a leader"
+    );
+    let term_zero = cluster
+        .leader()
+        .and_then(|id| cluster.member(id))
+        .map(Consensus::leadership_term_id);
+    assert_eq!(term_zero, Some(0), "the six elect a leader of term 0");
+    // Every recording syncs the term's first entry, so each log holds term 0 at a
+    // restart.
+    cluster.run_ms(500);
     for a in one_side {
         for b in other_side {
             cluster.cut_between(a, b);
         }
     }
-    // Three of five voters: a quorum candidate at the startup canvass timeout.
-    for _ in 0..62_000 {
-        cluster.step();
-        if settled(&cluster, &one_side) {
-            break;
-        }
+    for member in one_side {
+        cluster.restart(member);
     }
+    // Three of five voters, whose logs hold term 0: a quorum candidate at the startup
+    // canvass timeout.
+    let first_side = |cluster: &Cluster| {
+        settled(cluster, &one_side) && cluster.leader().is_some_and(|id| one_side.contains(&id))
+    };
     assert!(
-        settled(&cluster, &one_side),
+        stepped_until(&mut cluster, 62_000, first_side),
         "members 0, 2 and 3 elect a leader"
     );
     let first = cluster.leader().expect("a leader");
@@ -884,6 +905,7 @@ fn two_marks_changed_at_once_elect_a_leader_that_lacks_a_committed_entry() {
         .member(first)
         .expect("a member")
         .leadership_term_id();
+    assert!(first_term > 0, "a term after the six's first");
 
     // Two marks at once: member 2 a standby and member 5 a voter.
     for member in other_side {
@@ -932,16 +954,27 @@ fn one_mark_changed_elects_no_leader_without_the_committed_entry() {
     let (one_side, other_side) = ([0, 2, 3], [1, 4, 5]);
     let mut cluster = Cluster::with_standbys(&ids, &[5], 1).expect("six members");
     let mut safety = Safety::new(&ids);
+    safety.run_until(&mut cluster, 3_000, "the six elect a leader", |cluster| {
+        settled(cluster, &ids)
+    });
+    // Every recording syncs the term's first entry, so each log holds a term at a
+    // restart.
+    safety.run(&mut cluster, 500);
     for a in one_side {
         for b in other_side {
             cluster.cut_between(a, b);
         }
     }
+    for member in one_side {
+        safety.restart(&mut cluster, member);
+    }
     safety.run_until(
         &mut cluster,
         62_000,
         "members 0, 2 and 3 elect a leader",
-        |cluster| settled(cluster, &one_side),
+        |cluster| {
+            settled(cluster, &one_side) && cluster.leader().is_some_and(|id| one_side.contains(&id))
+        },
     );
     let first = cluster.leader().expect("a leader");
     let end = cluster

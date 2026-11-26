@@ -405,17 +405,24 @@ fn follows_no_deposed_leader(late_canvass: bool) {
 /// holds nothing cannot tell its empty log from one it lost, so it withholds, and the
 /// other member that runs cannot win alone. Nothing committed is lost meanwhile, and
 /// once the leader runs again the three end on its log.
+///
+/// The member that holds nothing is heard from the start but hears nothing, as a host
+/// that drops the packets it receives does. A new cluster elects only once every voter
+/// has reported (work item 476), so a member that never ran would keep the first leader
+/// from being elected at all.
 #[test]
 fn a_new_clusters_member_that_holds_nothing_when_its_leader_stops_waits_for_the_leader() {
     let ids = [0, 1, 2];
     let mut safety = Safety::new(&ids);
     let mut cluster = Cluster::with_election(&ids, 3).expect("three members");
-    // One member hears nothing from the start: the two others elect after the startup
-    // canvass timeout, 60 s, and commit ten entries between them.
+    // One member hears nothing from the start, and the log does not reach it: the two
+    // others hear all three, elect, and commit ten entries between them.
     let late = 2;
-    cluster.cut(late);
     let others = [0, 1];
-    safety.run_until(&mut cluster, 120_000, "two members elect", |cluster| {
+    for other in others {
+        cluster.cut_one_way(other, late);
+    }
+    safety.run_until(&mut cluster, 3_000, "two members elect", |cluster| {
         settled(cluster, &others)
     });
     let leader = cluster.leader().expect("a leader");
@@ -432,9 +439,11 @@ fn a_new_clusters_member_that_holds_nothing_when_its_leader_stops_waits_for_the_
         .expect("a member");
     assert_eq!(cluster.append_position(holder), Some(committed));
 
-    // The leader stops, and the late member is heard at last.
+    // The leader stops, and the late member hears the others at last.
     cluster.halt(leader);
-    cluster.heal(late);
+    for other in others {
+        cluster.heal_between(other, late);
+    }
     safety.run(&mut cluster, 30_000);
     assert_eq!(
         cluster.leader(),
