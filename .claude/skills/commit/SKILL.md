@@ -116,6 +116,15 @@ a dead or overlapping arm shows only elsewhere.
   correctness.
 - Wrap the body at 72 characters. Backticks and quotes are safe inside the quoted
   heredoc below, so use the real names of files, flags and crates.
+- **No attribution lines.** The message ends where the review record ends. It has no
+  `Co-Authored-By:` line that names Claude, no `Claude-Session:` line with a session's
+  link, and no "Generated with Claude Code" line (the owner's ruling of 2026-11-26;
+  work item 475). Claude Code adds these lines by default and tells a session that the
+  user's own instruction about them comes first: this is that instruction. The
+  project's `.claude/settings.json` also turns them off, with `attribution`, so that
+  no session depends on remembering. A reader of the log learns nothing from a link
+  that only the owner's account opens. A commit that is already pushed keeps its
+  lines: nothing is amended or force-pushed to remove one.
 
 ## 6. Execute
 

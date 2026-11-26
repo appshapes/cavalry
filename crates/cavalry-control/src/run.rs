@@ -9,8 +9,8 @@
 
 use std::path::Path;
 
-use cavalry_shm::counters::generated::RUN_MEMBER_GIVEN_UP;
-use cavalry_shm::counters::{CountersError, CountersWriter};
+use cavalry_shm::counters::generated::{RUN_MEMBER_GIVEN_UP, RUN_MEMBER_REFUSED};
+use cavalry_shm::counters::{CounterId, CountersError, CountersWriter};
 
 /// Adds one to `run.member_given_up` in the counters file of the driver in `dir`:
 /// `cavalry run` gave up the cluster member it ran beside that driver, after the
@@ -45,10 +45,47 @@ use cavalry_shm::counters::{CountersError, CountersWriter};
 /// # }
 /// ```
 pub fn member_given_up(dir: &Path) -> Result<(), CountersError> {
+    add_one(dir, RUN_MEMBER_GIVEN_UP)
+}
+
+/// Adds one to `run.member_refused` in the counters file of the driver in `dir`:
+/// `cavalry run` started that driver for a cluster member whose start failed, refused
+/// by the consensus module or with no thread to run it on, and is about to close the
+/// driver (work item 472). The member never ran a duty cycle, and any counter of its
+/// own was freed with its client, so the driver's file would otherwise say nothing of
+/// it. Errors as [`member_given_up`]'s.
+///
+/// ```
+/// use cavalry_control::run::member_refused;
+/// use cavalry_driver::Driver;
+/// use cavalry_shm::counters::CountersReader;
+/// use cavalry_shm::counters::generated::RUN_MEMBER_REFUSED;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let dir = std::env::temp_dir().join(format!("cavalry-control-refused-{}", std::process::id()));
+/// let log_dir = dir.with_extension("log");
+/// let driver = Driver::start(&dir, &log_dir)?;
+/// member_refused(&dir)?;
+/// driver.close()?;
+/// // The count is in the directory the closed driver left.
+/// let counters = CountersReader::open(&dir)?;
+/// assert_eq!(counters.read(RUN_MEMBER_REFUSED.record())?, 1);
+/// # std::fs::remove_dir_all(&dir)?;
+/// # std::fs::remove_dir_all(&log_dir)?;
+/// # Ok(())
+/// # }
+/// ```
+pub fn member_refused(dir: &Path) -> Result<(), CountersError> {
+    add_one(dir, RUN_MEMBER_REFUSED)
+}
+
+/// Adds one to the static counter `id` in the counters file of the driver in `dir`,
+/// when the file's record of it holds that counter.
+fn add_one(dir: &Path, id: CounterId) -> Result<(), CountersError> {
     let counters = CountersWriter::open(dir)?;
-    let record = RUN_MEMBER_GIVEN_UP.record();
+    let record = id.record();
     match counters.record(record)? {
-        Some(fields) if fields.type_id() == RUN_MEMBER_GIVEN_UP.0 => {
+        Some(fields) if fields.type_id() == id.0 => {
             counters.counter(record)?.increment();
             Ok(())
         }

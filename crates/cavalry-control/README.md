@@ -40,7 +40,9 @@ is allowed here.
   command is that call behind a `main`.
 - Records what `cavalry run` did, for `doctor` to read once the driver has closed:
   `run::member_given_up` adds one to `run.member_given_up` in the driver's counters
-  file when `cavalry run` gives up the cluster member it runs beside its driver. The
+  file when `cavalry run` gives up the cluster member it runs beside its driver, and
+  `run::member_refused` adds one to `run.member_refused` when that member's start
+  fails, so that none of its own counters remains. The
   counter is static, the driver's own, so it is in the directory a closed driver
   leaves, and `doctor` reports it there with its sentence from `counters.toml`; what
   the member counted is freed with its client. `doctor` reads a static counter only

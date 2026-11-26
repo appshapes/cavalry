@@ -37,7 +37,9 @@ test *ARGS: test-scripts
 # check of the built book, on a made-up book and made-up built pages (work item 474),
 # and the Python client's package: its manifest, its build backend's reading of made-up
 # libraries, the wheel it writes and the client's search for its library in a made-up
-# tree (work item 469). Standard library only, no network.
+# tree (work item 469), and the rule that a commit and a pull request body carry no
+# attribution lines: the project's settings, the skills' words and the check `/pr`
+# gives (work item 475). Standard library only, no network.
 test-scripts:
     python3 scripts/release-notes-email-test.py
     python3 scripts/release-notes-test.py
@@ -51,6 +53,7 @@ test-scripts:
     python3 scripts/tidy-test.py
     python3 scripts/gen-counters-test.py
     python3 scripts/decisions-index-test.py
+    python3 scripts/attribution-test.py
     python3 clients/generate-test.py
     python3 clients/lint-test.py
     python3 clients/package-test.py
