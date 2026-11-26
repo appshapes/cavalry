@@ -292,7 +292,7 @@ fn a_poll_inside_its_handler_stores_into_a_record_that_is_still_its_own() {
         },
     );
     let record = position_record(&publisher).expect("the image's position");
-    while !matches!(first.offer(&[0u8; 32]), Ok(_)) {
+    while first.offer(&[0u8; 32]).is_err() {
         std::hint::spin_loop();
     }
 
@@ -371,7 +371,7 @@ fn a_poll_inside_its_handler_stores_into_a_record_that_is_still_its_own() {
     );
     // The next poll takes the ended image out and the new one in, and the driver lets
     // the held record go.
-    while !matches!(second.offer(&[0u8; 32]), Ok(_)) {
+    while second.offer(&[0u8; 32]).is_err() {
         std::hint::spin_loop();
     }
     let mut read = 0;

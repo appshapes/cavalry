@@ -236,3 +236,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0176. Watch the driver's parks, and end one that outlived its timeout](decisions/0176-watch-the-drivers-parks-and-end-one-that-outlived-its-timeout.md)
 - [0177. Watch a client's conductor, and count its overdue parks in a counter the client adds](decisions/0177-watch-a-clients-conductor-and-count-its-overdue-parks-in-a-counter-the-client-adds.md)
 - [0178. Build every native artefact for glibc 2.28, in an image of it, and run it there](decisions/0178-build-every-native-artefact-for-glibc-2-28-in-an-image-of-it-and-run-it-there.md)
+- [0179. Give a record a client writes to another owner only when its writer has let it go](decisions/0179-give-a-record-a-client-writes-to-another-owner-only-when-its-writer-has-let-it-go.md)

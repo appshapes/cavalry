@@ -338,10 +338,29 @@ In Aeron, this is the client, with `tryClaim` and `commit`
   one, `client.conductor_parks_overdue`, keyed by the client's id, which `cavalry
   doctor` explains. On other systems a client has no watch (ADR 0177).
 
+- Says when it has stopped writing a counter, so that the driver never gives a record
+  to another owner while a thread here may still store into it. A subscriber stores
+  its image's position after each poll, and learns that the image ended, or that its
+  client was timed out, from an event another thread reads; a process that was
+  stopped stores when it is continued. So every handle on a record this client writes
+  is one type, `Owned`, which stores the record's release word, the last store to
+  the slot, when its owner gives it up: a subscription on the thread that polls, when
+  it takes an image out; a counter when it is closed; any handle when it is dropped.
+  The client also holds a lock for its life on a file of its own in the driver's
+  directory, `clients/<client id>.lock`, by which the driver learns that nothing of
+  a client that closed or was timed out is left. A program has nothing to do for
+  either. One thing follows for it: a client that was closed gives its counters'
+  records back when everything made from it is dropped, so drop a closed client's
+  subscriptions and counters with it (`spec/client-protocol.md`, "The records a
+  client writes"; ADR 0179).
+
 ## What it must never do
 
 - Lie about delivery (invariant 1). A stream is ordered; a message is delivered once, or
   its absence is reported to the subscriber.
+- Store into a counter's record after it has stored that record's release word, or
+  through a second handle on it. A handle on a record this client writes is not
+  `Clone`.
 - Allocate, lock, make a syscall, await or panic per message (invariant 2). The path
   from claim to the fragment handler is judged at p99.99 and max, never at the mean.
 - Allocate for another client's image. The driver announces every image to every

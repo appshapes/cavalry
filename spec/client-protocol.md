@@ -1066,7 +1066,8 @@ client that can store into a counter shares the one open file: the client, its
 subscriptions, its counters and its conductor. So the lock is let go when the last of
 them is dropped, and when the process ends, however it ends, and a process that is
 stopped still holds it. A process that the client's process forked holds it too, with
-the mapping, for as long as it lives.
+the mapping, for as long as it lives. A client removes its file when it lets go of the
+lock.
 
 When a client closes or is timed out, the driver renames its lock file to
 `clients/<client id>.gone`. The lock is on the file and goes with it, and the name is
@@ -1077,6 +1078,22 @@ it go. Otherwise the driver tries the lock on the renamed file once every lock c
 interval, without waiting. When it takes the lock, nothing of that client can store:
 it lets every record held for the client go, removes the file and lets go of the
 lock.
+
+Two parties lock such a file, and each takes an exclusive lock: the client, for its
+life, and the driver, in a try that does not wait and that it lets go of at once. The
+driver lets a record go by the lock only when its own try has taken it, so no other
+process can make that happen early: one that held the lock for a moment would delay
+the driver by a lock check interval and no more. `cavalry doctor` locks nothing. It
+reads the directory: a file named `.gone` is a client that has gone and still holds
+its lock, and the time the file has had that name is how long.
+
+A driver that starts removes `clients/` with everything else the driver before it
+left ("The driver directory"), and makes it again, empty. A client of that earlier
+driver that is stopped still holds a lock, on a file that no longer has a name, and
+a mapping of that driver's counters file, which has none either: it can store into
+nothing of the driver that started. Continued, it finds its own ring's heartbeat
+older than the driver timeout and closes. `counters.held` and `counters.retired` are
+counters of the new file and begin at 0.
 
 **A client that holds no lock.** A directory may refuse the lock, or the file. Such a
 client attaches all the same. The driver tries the lock at the client's first command
