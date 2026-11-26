@@ -80,11 +80,11 @@ CANCELLED_ID = 78          # the timer that is scheduled and cancelled in the sa
 # How long after the message's entry the timer is due. A second, and not the 50 ms this
 # round had first: the event of a timer that is due at once is stamped tens of
 # milliseconds after its message, the time an entry takes to be committed and read by a
-# service on a laptop, and more on a busy host, so the event of a timer that was wrongly
-# due at once is stamped about as late as a deadline of 50 ms, and that margin would let
-# it pass. Before ADR 0168 a service's first timer waited for its publication to its
-# member too, 49 ms in one run of this round. The round prints what it was in its own
-# run, for its first timers and for 200 later ones.
+# service on a laptop, 11 to 42 ms in this round's runs there, and more on a busy host,
+# so a deadline of 50 ms is a thin margin for telling a timer that was wrongly due at
+# once from one that waited. Before ADR 0168 a service's first timer waited for its
+# publication to its member too, 49 ms in one run of this round. The round prints what
+# it was in its own run, for its first timers and for 200 later ones.
 TIMER_AFTER_MS = 1000
 HOUR_MS = 3_600_000        # the deadline its first schedule gives it, which the second replaces
 LATER_MESSAGE = b"later"   # the prefix of a message at which each program schedules one more timer, due at once

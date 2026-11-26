@@ -598,24 +598,26 @@ most.
 
 A cluster service's poll is the one per-message function that can wait for the driver.
 It sends commands with the service's client when it opens the member's log, at a
-session's opening, where a term's leader changes and at a recording's end, and six more once in a service's life, its five counters and its
-publication to its member, in the poll that first opens the member's log, before
-that poll's entries (ADR 0168). It
-waits for each answer on the calling thread; a session message costs no command. A
-driver that refuses one of the six is that poll's −1, after the entries its handler
-took are taken, and the
-service adds them again before the entries of each poll after it (ADR 0159). What a
-service tells its member of its timers, each pending timer again every second among
-it, is offered and waits for nothing, a program's first timer too. The
-runner's cluster round reports the waits. On an Apple M5 Pro laptop (macOS 26.6.1,
-Node v24.16.0), in each of 10 runs, 7 of about 42,500 polls of three services took
-over 1 ms, where 4 of about 18,500 did in each of 25 runs before the round scheduled
-a timer. The report names the longest poll alone: in every run it was a poll in which
-a service's program first scheduled a timer, 23.6 to 36.9 ms with its six
-commands, where the longest before, a poll that opened a member's log, took 7.2 to
-10.4 ms. A
-program whose event loop cannot stop for that long runs its service on a
-`worker_threads` worker, with a `Client` of its own.
+session's opening, where a term's leader changes and at a recording's end, and six
+more, its five counters and its publication to its member, in the poll that first
+opens the member's log, before that poll's entries (ADR 0168). It waits for each
+answer on the calling thread; a session message costs no command. A driver that
+refuses one of the six is that poll's −1, after the entries its handler took are
+taken, and the service asks again at its first poll a second later, with no error from
+a poll between (ADR 0159, ADR 0168). The publication's log is 192 MiB in the driver's
+directory, every page of it resident, and every service holds it from that poll on, a
+program with no timer and no snapshot too; where the directory has no room for it, the
+refusal is `CAVALRY_ERR_STORAGE_SPACE`, code 12, and `cavalry doctor` names it with
+`driver.log_create_failed`. What a service tells its member of its timers, each
+pending timer again every second among it, is offered and waits for nothing, a
+program's first timer too. The runner's cluster round reports the waits. On an Apple
+M5 Pro laptop (macOS 26.6.1, Node v24.16.0), in each of 10 runs, 4 of about 42,700 to
+51,400 polls of three services took over 1 ms. The report names the longest poll
+alone: in every run it was the poll in which a service first opened its member's log,
+with the six adds in it, 28.8 to 34.5 ms. Before ADR 0168 it was the poll in which a
+service's program first scheduled a timer, 23.6 to 36.9 ms. A program whose event loop
+cannot stop for that long runs its service on a `worker_threads` worker, with a
+`Client` of its own.
 
 ### Threads
 

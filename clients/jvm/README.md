@@ -566,22 +566,26 @@ a command or a close waits on the driver for up to 10 s (`spec/c-abi.md`, "Threa
 the thread blocks in the call. `client.connectCluster` waits until the leader has
 opened the session, 20 s at most.
 
-A cluster service's `poll` is the one per-message method that can wait for the
-driver. It sends commands with the service's client when it opens the member's log,
-at a session's opening, where a term's leader changes and at a recording's end, and
-six more once in a service's life, its five counters and its
-publication to its member, in the poll that first opens the member's log, before
-that poll's entries (ADR 0168). It waits for each answer in the
-call, as an add does; a session message costs no command. A driver that refuses one
-of the six is that poll's −1, after the entries its handler took are taken, and the
-service adds them again before the entries of each poll after it (ADR 0159). What a
-service tells its member of its timers, each pending timer again every second among
-it, is offered and waits for nothing, a program's first timer too. The runner's cluster round reports the waits. On this
-laptop (Apple M5 Pro, Java 25.0.5), in each of 10 runs, 8 or 9 of about 36,100 polls
-of three services took over 1 ms, where 5 to 7 of about 17,900 did in each of 25
-runs before the round scheduled a timer. The report names the longest poll alone: in
-every run it was a poll in which a service's program first scheduled a timer, 22.8
-to 33.8 ms with its six commands, where the longest before took 7.5 to 22.2 ms.
+A cluster service's `poll` is the one per-message method that can wait for the driver.
+It sends commands with the service's client when it opens the member's log, at a
+session's opening, where a term's leader changes and at a recording's end, and six
+more, its five counters and its publication to its member, in the poll that first
+opens the member's log, before that poll's entries (ADR 0168). It waits for each
+answer in the call, as an add does; a session message costs no command. A driver that
+refuses one of the six is that poll's −1, after the entries its handler took are
+taken, and the service asks again at its first poll a second later, with no error from
+a poll between (ADR 0159, ADR 0168). The publication's log is 192 MiB in the driver's
+directory, every page of it resident, and every service holds it from that poll on, a
+program with no timer and no snapshot too; where the directory has no room for it, the
+refusal is `Abi.ERR_STORAGE_SPACE`, code 12, and `cavalry doctor` names it with
+`driver.log_create_failed`. What a service tells its member of its timers, each
+pending timer again every second among it, is offered and waits for nothing, a
+program's first timer too. The runner's cluster round reports the waits. On this
+laptop (Apple M5 Pro, Java 25.0.5), in each of 10 runs, 5 of about 36,800 to 43,600
+polls of three services took over 1 ms. The report names the longest poll alone: in
+every run it was the poll in which a service first opened its member's log, with the
+six adds in it, 28.9 to 33.4 ms. Before ADR 0168 it was the poll in which a service's
+program first scheduled a timer, 22.8 to 33.8 ms.
 
 ### Threads
 

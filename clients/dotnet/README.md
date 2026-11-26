@@ -562,25 +562,28 @@ compiler). An add, a command or a close waits on the driver for up to 10 s
 (`spec/c-abi.md`, "Threads"); the thread blocks in the call. `client.ConnectCluster`
 waits until the leader has opened the session, 20 s at most.
 
-A cluster service's `Poll` is the one per-message method that can wait for the
-driver. It sends commands with the service's client when it opens the member's log,
-at a session's opening, where a term's leader changes and at a recording's end, and
-six more once in a service's life, its five counters and its
-publication to its member, in the poll that first opens the member's log, before
-that poll's entries (ADR 0168). It waits for each answer in the
-call, as an add does; a session message costs no command. A driver that refuses one
-of the six is that poll's −1, after the entries its handler took are taken, and the
-service adds them again before the entries of each poll after it (ADR 0159). What a
-service tells its member of its timers, each pending timer again every second among
-it, is offered and waits for nothing, a program's first timer too. The runner's cluster round reports the waits. On this
-laptop (Apple M5 Pro, .NET 10.0.9), in each of 10 runs, 8 of about 7,800 polls of
-three services took over 1 ms, where 5 or 6 of about 3,800 did in each of 25 runs
-before the round scheduled a timer. The report names the longest poll alone: in
-every run it was a poll in which a service's program first scheduled a timer, 23.8
-to 36.9 ms with its six commands, where the longest before took 8.0 to 11.5 ms. The
-round sleeps 1 ms between its duty
-cycles, the shortest sleep `Thread.Sleep` makes, so it counts fewer polls than another
-client's round, which sleeps 200 µs.
+A cluster service's `Poll` is the one per-message method that can wait for the driver.
+It sends commands with the service's client when it opens the member's log, at a
+session's opening, where a term's leader changes and at a recording's end, and six
+more, its five counters and its publication to its member, in the poll that first
+opens the member's log, before that poll's entries (ADR 0168). It waits for each
+answer in the call, as an add does; a session message costs no command. A driver that
+refuses one of the six is that poll's −1, after the entries its handler took are
+taken, and the service asks again at its first poll a second later, with no error from
+a poll between (ADR 0159, ADR 0168). The publication's log is 192 MiB in the driver's
+directory, every page of it resident, and every service holds it from that poll on, a
+program with no timer and no snapshot too; where the directory has no room for it, the
+refusal is `Abi.ERR_STORAGE_SPACE`, code 12, and `cavalry doctor` names it with
+`driver.log_create_failed`. What a service tells its member of its timers, each
+pending timer again every second among it, is offered and waits for nothing, a
+program's first timer too. The runner's cluster round reports the waits. On this
+laptop (Apple M5 Pro, .NET 10.0.9), in each of 10 runs, 5 of about 8,000 to 9,200
+polls of three services took over 1 ms. The report names the longest poll alone: in
+every run it was the poll in which a service first opened its member's log, with the
+six adds in it, 29.0 to 33.0 ms. Before ADR 0168 it was the poll in which a service's
+program first scheduled a timer, 23.8 to 36.9 ms. The round sleeps 1 ms between its
+duty cycles, the shortest sleep `Thread.Sleep` makes, so it counts fewer polls than
+another client's round, which sleeps 200 µs.
 
 ### Threads
 
