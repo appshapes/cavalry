@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use memmap2::{Mmap, MmapMut, MmapOptions};
 
+use crate::allocate;
 use crate::pretouch;
 
 use super::CommandRingError;
@@ -197,7 +198,7 @@ impl CommandRing {
             .create_new(true)
             .open(dir.join(FILE_NAME))?;
         let length = fields.file_length();
-        file.set_len(length)?;
+        allocate::sized(&file, length)?;
         // SAFETY: memmap2 marks mapping a file `unsafe` because another process could
         // truncate it under the mapping and turn a load into a fault. This call created
         // the file, in the driver's directory, the trust boundary every shared layout

@@ -20,6 +20,14 @@ memmap2 = "0.9.11"
 # encodings of spec/counters-file.md are little-endian views over plain bytes.
 zerocopy = { version = "0.8.62", default-features = false, features = ["derive"] }
 
+# `fallocate`, which the standard library does not have: a new shared file is given its
+# room before it is mapped, so that a directory with no room is an error and never a bus
+# error (src/allocate.rs; ADR 0175). On the control plane only, where a file is created;
+# nix is the crate the driver and the client already take, and its wrapper keeps the
+# `unsafe` of the call out of this crate.
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.32", default-features = false, features = ["fs"] }
+
 [dev-dependencies]
 # Model checker for the publish protocols in src/counters/cells.rs: `just loom`.
 loom = "0.7"
@@ -39,4 +47,4 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(cavalry_unche
 # from CLAUDE.md, "Data plane", and every dependency it takes must be listed here.
 [package.metadata.cavalry]
 data_plane = true
-allowed-dependencies = ["memmap2", "zerocopy"]
+allowed-dependencies = ["memmap2", "nix", "zerocopy"]

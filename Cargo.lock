@@ -164,6 +164,7 @@ dependencies = [
  "cavalry-proto",
  "loom",
  "memmap2",
+ "nix",
  "serde_json",
  "zerocopy",
 ]

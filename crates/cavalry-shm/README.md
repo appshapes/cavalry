@@ -44,9 +44,13 @@ the two crates where `unsafe` is permitted.
   the mapping is handed out, with Linux's populate advice where the kernel has it and one
   read per page elsewhere, so the data plane never takes a page fault and two mappings
   never race on a fresh page
-  ([ADR 0027](../../docs/decisions/0027-pre-touch-shared-mappings-at-map-time.md)). A
-  directory that cannot hold the file fails here, by name, and a log buffer that
-  fails here leaves no file behind
+  ([ADR 0027](../../docs/decisions/0027-pre-touch-shared-mappings-at-map-time.md)).
+- Gives a new file its room before it maps it, on Linux: `create` asks the filesystem
+  how much it has free and then for the room of the whole file, so a directory that
+  cannot hold the file fails there, by name, on every kernel, and never with a bus
+  error at the touch of a page
+  ([ADR 0175](../../docs/decisions/0175-give-a-new-shared-file-its-room-before-it-is-mapped.md)).
+  A log buffer that fails there leaves no file behind
   ([ADR 0172](../../docs/decisions/0172-remove-the-file-of-a-log-that-could-not-be-created.md)).
 - Carries the control plane's two queues between the processes on a host: the command
   ring, through which every client sends the driver its commands, with a `Producer` per

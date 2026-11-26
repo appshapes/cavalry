@@ -297,26 +297,44 @@ doctor:
     cargo run --quiet -p cavalry -- doctor
 
 # The driver on a directory with no room for a log, the "shm exhaustion" of CLAUDE.md's
-# gate 3 (ADR 0172): `dir` is a directory on a filesystem with less room than a
-# `cavalry:ipc` log's 192 MiB, as a container's default /dev/shm of 64 MiB is. A driver
-# whose directory is under it is asked five times for such a log: each ask is error
-# code 12, no log file is left, and the filesystem has afterwards the room it had. It
-# is Linux's failure, on a kernel that has the populate advice, 5.14 and later: making
-# a log's pages resident fails there on a filesystem that cannot back them. On an
-# earlier kernel the driver is killed by a bus error there (work item 497), and so is
-# this test; on macOS no page is refused at the map, and on a directory with room the
-# test fails and says that the directory has room. A test cannot mount a small
-# filesystem for itself, so `just test` passes this one over, CI's Linux job mounts 64
-# MiB and runs this, and the test's comment in
-# crates/cavalry-client/tests/publication.rs has the container to run it in by hand.
-# The recipe fails unless that one test ran and passed: a filter that matches no test
-# passes with nothing run.
+# gate 3 (ADR 0172, ADR 0175): `dir` is a directory on a filesystem with less room than
+# a `cavalry:ipc` log's 192 MiB, as a container's default /dev/shm of 64 MiB is. A
+# driver whose directory is under it is asked five times for such a log: each ask is
+# error code 12, no log file is left, and the filesystem has afterwards the room it
+# had. It is Linux's test: there the driver asks the filesystem for a new file's room
+# before it maps it, and is refused. On macOS a file is given its length alone and the
+# log is created (work item 505), so the test fails there; on a directory with room it
+# fails and says that the directory has room. A test cannot mount a small filesystem
+# for itself, so `just test` passes this one over, CI's Linux job mounts 64 MiB and runs
+# this, and the test's comment in crates/cavalry-client/tests/publication.rs has the
+# container to run it in by hand.
+#
+# On Linux it then runs the test again as a kernel before 5.14 runs it, one without the
+# populate advice, under scripts/no-populate-advice.c: there the pages of a mapping are
+# touched one by one, and before ADR 0175 the first touch of a page the filesystem could
+# not back killed the driver with a bus error. No runner has such a kernel, so the
+# advice is refused for the run. The other tests of that program then run under it too,
+# so that a log that does fit is created and used by the path such a kernel takes.
+# The recipe fails unless the one test ran and passed each time: a filter that matches
+# no test passes with nothing run.
 shm-exhaustion dir:
     #!/usr/bin/env bash
     set -euo pipefail
-    said=$(CAVALRY_CLIENT_TEST_FULL_DIR={{dir}}/cavalry cargo test -p cavalry-client --test publication a_driver_whose_directory_has_no_room_leaves_no_log_file -- --exact --ignored --nocapture 2>&1) || { echo "$said"; exit 1; }
-    echo "$said"
-    grep -q "^test result: ok. 1 passed" <<<"$said" || { echo "shm-exhaustion: the test of a driver whose directory has no room did not run; its name is in the justfile's recipe" >&2; exit 1; }
+    no_room() {
+        local said
+        said=$(CAVALRY_CLIENT_TEST_FULL_DIR={{dir}}/cavalry ${1+"$@"} cargo test -p cavalry-client --test publication a_driver_whose_directory_has_no_room_leaves_no_log_file -- --exact --ignored --nocapture 2>&1) || { echo "$said"; exit 1; }
+        echo "$said"
+        grep -q "^test result: ok. 1 passed" <<<"$said" || { echo "shm-exhaustion: the test of a driver whose directory has no room did not run; its name is in the justfile's recipe and in crates/cavalry-client/tests/publication.rs" >&2; exit 1; }
+    }
+    no_room
+    if [ "$(uname -s)" = Linux ]; then
+        without="${CARGO_TARGET_DIR:-target}/no-populate-advice"
+        mkdir -p "$(dirname "$without")"
+        cc -O2 -Wall -Wextra -Werror -o "$without" scripts/no-populate-advice.c
+        echo "shm-exhaustion: again without the populate advice, as a kernel before 5.14 runs it"
+        no_room "$without"
+        "$without" cargo test -p cavalry-client --test publication
+    fi
 
 # Miri on the unsafe crate: the layout, cell and conformance tests, which run on plain
 # memory. Miri has no file-backed mapping, so the file tests carry

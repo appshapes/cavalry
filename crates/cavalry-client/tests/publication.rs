@@ -506,16 +506,21 @@ fn available_kib(dir: &Path) -> u64 {
 }
 
 /// The case GitHub issue 238 measured, and the one that matters: a driver whose
-/// directory is on a filesystem with no room for a log, where making the log's pages
-/// resident is what fails (ADR 0027), after the file exists and holds whatever room
-/// was left. The driver refuses each ask with error code 12, leaves no file, and the
-/// filesystem has afterwards the room it had before (ADR 0172; work item 492).
+/// directory is on a filesystem with no room for a log. On Linux the driver asks the
+/// filesystem for the file's room before it maps it and is refused (ADR 0175); before
+/// that it was making the log's pages resident that failed (ADR 0027), after the file
+/// existed and held whatever room was left, and on a kernel without the populate
+/// advice the driver was killed by a bus error. The driver refuses each ask with error
+/// code 12, leaves no file, and the filesystem has afterwards the room it had before
+/// (ADR 0172; work items 492 and 497). Each ask's time is printed, the client's round
+/// trip through the driver's conductor: what a refusal costs is in ADR 0175.
 ///
 /// It needs such a directory, which a test cannot make for itself without the right
 /// to mount, so `just test` passes it over and `just shm-exhaustion <directory>` runs
 /// it: in CI's Linux job on a filesystem of 64 MiB that the job mounts, and by hand
 /// in a container whose `/dev/shm` is Docker's default, 64 MiB, less than the 192 MiB
-/// of a `cavalry:ipc` log:
+/// of a `cavalry:ipc` log. The recipe runs it a second time without the populate
+/// advice, as a kernel before 5.14 runs it (`scripts/no-populate-advice.c`):
 ///
 /// ```sh
 /// docker run --rm -v "$PWD":/src:ro -e CARGO_TARGET_DIR=/target -w /src \
@@ -540,12 +545,16 @@ fn a_driver_whose_directory_has_no_room_leaves_no_log_file() {
         dir.display()
     );
     for ask in 1..=5 {
+        let asked = std::time::Instant::now();
         match client.add_exclusive_publication("cavalry:ipc", 10 + ask) {
             Err(ClientError::Refused {
                 code: Some(ErrorCode::StorageSpace),
                 message,
                 ..
-            }) => println!("ask {ask}: refused: {message}"),
+            }) => println!(
+                "ask {ask}: refused in {} us: {message}",
+                asked.elapsed().as_micros()
+            ),
             Err(other) => panic!("ask {ask}: {other}"),
             Ok(_) => panic!("ask {ask}: the log was created"),
         }
