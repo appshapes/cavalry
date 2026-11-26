@@ -19,6 +19,13 @@ memmap2 = "0.9.11"
 # The derives that make a layout struct its spec table (ADR 0009): the header and record
 # encodings of spec/counters-file.md are little-endian views over plain bytes.
 zerocopy = { version = "0.8.62", default-features = false, features = ["derive"] }
+# `openat`, to make a client's lock file through a handle on `clients/` and not by a
+# path (src/client_lock.rs; ADR 0179): the standard library makes a file by a path
+# alone, and a path names another driver's directory once a driver has started again.
+# `fs` carries the call and its flags. The version the driver already takes, so nothing
+# new enters the lock file, and it carries the `unsafe` the call needs. Never on a
+# message's path: a client makes one file when it attaches.
+nix = { version = "0.32", default-features = false, features = ["fs"] }
 
 # `fallocate`, which the standard library does not have: a new shared file is given its
 # room before it is mapped, so that a directory with no room is an error and never a bus
