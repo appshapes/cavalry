@@ -228,6 +228,38 @@ fn a_member_of_a_new_cluster_that_lost_its_log_votes_only_once_it_has_heard_ever
     assert_eq!(votes_to(&io, 0), 1, "a vote in term 1");
 }
 
+/// The mirror of the test above: the voter the member has not heard is the candidate
+/// that asks. Member 1 reports, naming term 0, and member 0, which sends no canvass
+/// position while its ballot runs, asks for term 0. The guarded case takes the request
+/// as member 0's report, so no voter is wanting, and it refuses by the term condition:
+/// member 1 named term 0, and a vote the member cast there before it lost its log may be
+/// member 1's. That refusal keeps one vote to a term, the one that stops seed 804's
+/// second vote, so it is a withheld vote, counted, and not a wait (ADR 0174).
+#[test]
+fn a_member_that_holds_nothing_counts_a_refusal_by_the_term_condition_from_an_unheard_candidate() {
+    let mut io = Stub::new();
+    let mut member = wiped(1, &mut io);
+    member
+        .on_message(at(2), &empty_canvass(1, 0), &mut io)
+        .expect("no fault");
+    io.clear();
+    member
+        .on_message(at(3), &empty_request(0, 0), &mut io)
+        .expect("no fault");
+    assert_eq!(votes_to(&io, 0), 0, "no second vote in term 0");
+    assert_eq!(
+        io.count(|call| matches!(call, Call::StoreCandidateTerm(_))),
+        0,
+        "no term stored"
+    );
+    assert_eq!(
+        member.counts().votes_withheld,
+        1,
+        "a refusal by the term condition, not a wait"
+    );
+    assert_eq!(member.counts().votes_for, 0);
+}
+
 /// A member of a new cluster that has heard every voter, each naming no term, votes as
 /// it did before work item 476: the guarded case holds for a new cluster whose members
 /// all run.

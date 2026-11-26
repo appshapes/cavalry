@@ -2284,11 +2284,16 @@ impl Consensus {
                 // with no log heard and no floor held, answers with nothing and counts
                 // nothing: `cluster.voters_unheard` shows that wait, and
                 // `cluster.votes_withheld` the refusals that keep a committed entry, or
-                // one vote to a term (ADR 0174).
+                // one vote to a term (ADR 0174). The wait is decided from the inputs of
+                // the case itself, the candidate's request taken as its report: a
+                // refusal by the term condition is counted, though the candidate has
+                // sent no report of its own.
                 let waiting = self.holds_nothing()
                     && self.vote_floor < 0
-                    && self.unheard_voters() > 0
-                    && !self.log_heard(Some(candidate_log));
+                    && !self.log_heard(Some(candidate_log))
+                    && self.other(candidate_member_id).is_some_and(|candidate| {
+                        self.waits_for_voter(&reports, candidate, request.candidate_term_id)
+                    });
                 if !waiting {
                     count(&mut self.counts.votes_withheld);
                 }
@@ -2825,6 +2830,34 @@ impl Consensus {
             return 0;
         }
         i64::try_from(self.unheard_voters()).unwrap_or(i64::MAX)
+    }
+
+    /// Whether the guarded case refuses the request vote of the voter at `candidate`, for
+    /// `term`, only for want of a report (ADR 0174): a voter other than this member and
+    /// the candidate has no report in `reports`, where the request stands as the
+    /// candidate's, and no voter other than the two has named `term` or a later one in
+    /// this election. A voter that named such a term refuses the vote by the term
+    /// condition whatever the voter not heard would report, and that refusal is a
+    /// withheld vote.
+    fn waits_for_voter(
+        &self,
+        reports: &[Option<LogReport>; MAX_MEMBERS],
+        candidate: usize,
+        term: i64,
+    ) -> bool {
+        let others = || {
+            (0..self.count.min(MAX_MEMBERS))
+                .filter(|&index| index != self.own && index != candidate)
+        };
+        let unheard = others().any(|index| reports.get(index).is_some_and(Option::is_none));
+        let named = others().any(|index| {
+            self.terms_named
+                .get(index)
+                .copied()
+                .flatten()
+                .is_some_and(|named| named >= term)
+        });
+        unheard && !named
     }
 
     /// The voters other than this member that it has not heard report in this election.
