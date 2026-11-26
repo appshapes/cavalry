@@ -240,7 +240,7 @@ pub(crate) fn prepare_dir(dir: &Path) -> Result<DirLock, DriverError> {
             // this moment, can add a file to `clients/` between the emptying and the
             // removal. It makes one file and no more, so the directory is removed
             // once more; a start that still finds it not empty fails, and nothing of
-            // this driver's has been created yet.
+            // this driver's but its pid file has been created yet.
             std::fs::remove_dir_all(&path).or_else(|first| {
                 if first.kind() == std::io::ErrorKind::DirectoryNotEmpty {
                     std::fs::remove_dir_all(&path)
@@ -252,12 +252,16 @@ pub(crate) fn prepare_dir(dir: &Path) -> Result<DirLock, DriverError> {
             std::fs::remove_file(&path)
         }
         .map_err(|source| {
-            io(
+            // Only a directory that was found not empty twice is helped by another
+            // start; every other failure is the directory's, as the message says.
+            let what = if source.kind() == std::io::ErrorKind::DirectoryNotEmpty {
                 "remove what the last driver left in the directory (a client of that \
-                 driver that is still attaching can add a file while the directory is \
-                 emptied: start the driver again)",
-                source,
-            )
+                 driver that is still attaching added a file while the directory was \
+                 emptied: start the driver again)"
+            } else {
+                "remove what the last driver left in the directory"
+            };
+            io(what, source)
         })?;
     }
     Ok(DirLock { _dir: lock })
@@ -2185,9 +2189,12 @@ impl Conductor {
             // Forgotten when its lock is taken, nothing of its is still to be freed, and
             // every command it wrote has been read: from then on a command with its id
             // could only be a new client's.
+            // A ring the driver found corrupt is read no more, so no command of the
+            // client's will be read from it either.
             if self.gone[index].taken
                 && !self.owes_a_record(client_id)
-                && self.consumer.consumer_position() >= self.gone[index].read_to
+                && (self.ring_corrupt
+                    || self.consumer.consumer_position() >= self.gone[index].read_to)
             {
                 self.gone.swap_remove(index);
             } else {
@@ -20279,6 +20286,36 @@ mod held {
         h.now += spec::nanos(spec::LOCK_CHECK_INTERVAL) + MS;
         h.cycle();
         assert!(h.conductor.gone.is_empty());
+    }
+
+    /// A command ring that the driver found corrupt is read no more, so a client whose
+    /// lock is taken is not kept for a command that will never be read: the list of
+    /// the clients that have gone does not fill with clients the driver has finished
+    /// with.
+    #[test]
+    fn a_client_whose_lock_is_taken_is_forgotten_at_once_when_the_ring_is_read_no_more() {
+        let mut h = Harness::new("held-corrupt-ring");
+        let held_by_client = lock(&h, 7);
+        keepalive(&mut h, 7, 100);
+        let now = h.now;
+        h.conductor.remove_client(7, now);
+        let ring = CommandRing::open(h.dir.path(), true).expect("the ring");
+        let mut producer = ring.producer(spec::DRIVER_TIMEOUT).expect("a producer");
+        let command = Command::ClientKeepalive {
+            client_id: 7,
+            correlation_id: 200,
+        };
+        let mut bytes = [0u8; 64];
+        let length = command.write(&mut bytes).expect("a keepalive");
+        producer
+            .write(command.command_type() as i32, &bytes[..length], h.now)
+            .expect("written");
+        drop(held_by_client);
+        h.conductor.ring_corrupt = true;
+        h.now += spec::nanos(spec::LOCK_CHECK_INTERVAL) + MS;
+        let now = h.now;
+        assert_eq!(h.conductor.try_locks(now), 1, "the lock is taken");
+        assert!(h.conductor.gone.is_empty(), "and the client is forgotten");
     }
 
     /// One command of `client_id`, as the driver reads it from the ring.

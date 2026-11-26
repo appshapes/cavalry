@@ -57,8 +57,9 @@ thread_local! {
     /// What a test does in the middle of this thread's attach, called with the step
     /// the attach has reached: 1, the handle on `clients/` is open and nothing else;
     /// 2, the command ring is mapped and its heartbeat was found fresh; 3, the
-    /// client's id is taken and its lock file is not made yet. A test starts another driver in the directory there, which is
-    /// what a client that was stopped at that step finds when it is continued.
+    /// client's id is taken and its lock file is not made yet. A test starts another
+    /// driver in the directory there, which is what a client that was stopped at that
+    /// step finds when it is continued.
     pub(crate) static ATTACH_STEP: std::cell::RefCell<Option<AttachStep>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -175,7 +176,9 @@ impl Attached {
             Err(source) => {
                 return Err(Unattached::Refused(ClientError::Io {
                     what: "open the directory of the clients' locks, in which this client \
-                           makes its lock file",
+                           makes its lock file; it must be a directory that this user can \
+                           read and write: remove whatever else has its name, and start the \
+                           driver again, which makes it",
                     path: dir.join(cavalry_proto::client_protocol::CLIENT_LOCK_DIRECTORY),
                     source,
                 }));

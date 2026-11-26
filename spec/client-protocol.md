@@ -164,20 +164,24 @@ opened by its name.
 A driver that removes `clients/` while a client of the driver before it is making
 its file there can find the directory not empty. Such a client makes one file, so
 the driver removes the directory once more. A start that still finds it not empty
-fails, with an error that says to start the driver again, and has created nothing.
+fails, with an error that says to start the driver again, and has created nothing
+but `pid`.
 
 The driver learns of a client from the first command that names its client id. When
 a client closes or is timed out, the driver notes it as a client that has gone, and
 forgets it when three things hold: it has taken the client's lock, nothing of the
 client's is left to free, and it has read the command ring up to where the ring's
-producers stood when it took the lock. A command that names a client that has gone
-is dropped: the driver registers nobody for it and answers nothing, and
-`client_protocol.dropped_command` counts it. Such a command is certain to come from
-a client that was stopped past its timeout: continued, its conductor sends a
-keepalive before it reads its `client timeout`. A client writes a command before it
+producers stood when it took the lock. A ring that the driver found corrupt is read
+no more, and the third does not count then. A command that names a client that has
+gone is dropped: the driver registers nobody for it and answers nothing, and
+`client_protocol.dropped_command` counts it. Such commands are an ordinary thing: a
+client that was stopped past its timeout and is continued sends a keepalive before
+it reads its `client timeout`, a thread of a client that closes can write one, and
+so can a client that ends just after it wrote. A client writes a command before it
 lets go of its lock, so every command of a client is in the ring before the driver
 can take the lock, and the driver has read them all, and dropped them, before it
-forgets the client: no command of a client that has gone registers a client again.
+forgets the client: no command of a client that the driver noted as gone registers a
+client again.
 
 A first command whose client's lock the driver can take is of a client that has
 ended since it wrote the command: its process ended, or everything of it was
@@ -1193,7 +1197,10 @@ only by a lock that the client held. Three kinds of client give it nothing to tr
   without its lock, so this is a lock file that another hand removed.
   `client.without_lock` counts it, and `cavalry doctor` warns. It is forgotten when
   it goes, so a command of its that comes late registers a client again, and is
-  counted again.
+  counted again. A hand that puts another file of the name in its place, which
+  nobody locks, makes the client look like one that has ended: its commands are
+  dropped, and counted, until the ring is read past where it stood then, and its
+  next command registers it as this kind.
 - A client whose lock file could not be renamed when it went, or was removed by
   another hand afterwards. A file that is not there is no answer. A try that the
   system fails is none either, and is made again at the next interval.

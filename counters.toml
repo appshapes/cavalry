@@ -2015,7 +2015,7 @@ id = 209
 name = "counters.retired"
 kind = "counter"
 scope = "static"
-doc = "Records of the counters file that are out of use until the driver starts again: what a client that the driver cannot ask about left held, with no release word, when it closed or was timed out. That is a client whose lock file was not there at its first command, one whose lock file could not be renamed when it went or was removed by another hand, and one that went while the driver's list of the clients that have gone, 256, was full. Nothing tells the driver that such a client can no longer store, so it gives the records to nobody."
+doc = "Records of the counters file that are out of use until the driver starts again: what a client that the driver cannot ask about left held, with no release word, when it closed or was timed out. That is a client whose lock file was not there at its first command, or whose lock the system failed to try then, one whose lock file could not be renamed when it went or was removed by another hand, and one that went while the driver's list of the clients that have gone, 256, was full. Nothing tells the driver that such a client can no longer store, so it gives the records to nobody."
 doctor = "A client that the driver could not ask about closed or was timed out, and left this many records that the driver cannot give out again before it restarts. Most often something removed the client's lock file from clients/ in the driver's directory while the client ran (client.without_lock counts the ones gone by a client's first command): keep everything but the driver and its clients out of that directory. Otherwise more than 256 clients had gone at once and still held their locks: cavalry doctor names them. The records count against the counters file's capacity until the driver starts again; see docs/reference/client-protocol.md#the-records-a-client-writes."
 
 [[counter]]
@@ -2031,7 +2031,7 @@ id = 211
 name = "client_protocol.dropped_command"
 kind = "counter"
 scope = "static"
-doc = "Commands the driver dropped because the client they named had gone: it had closed or been timed out and the driver had not finished with it, or the driver could take its lock when it read its first command. Nobody is registered for such a command and nothing is answered. A client that was stopped past the client liveness timeout sends one when it is continued, before it reads its client timeout, and a client that ends just after it wrote a command leaves one (spec/client-protocol.md, The driver directory)."
+doc = "Commands the driver dropped because the client they named had gone: it had closed or been timed out and the driver had not finished with it, or the driver could take its lock when it read its first command. Nobody is registered for such a command and nothing is answered. A client that was stopped past the client liveness timeout sends one when it is continued, before it reads its client timeout, and a client that ends just after it wrote a command leaves one. Such a client's lock file is removed when the driver drops its first command; when 256 clients have gone and the driver has finished with none of them, the file stays until the driver starts again (spec/client-protocol.md, The driver directory)."
 doctor = ""
 
 [[state_machine]]
