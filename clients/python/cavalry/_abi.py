@@ -498,10 +498,14 @@ def load(path):
         from . import CavalryError  # the package's error; the package has loaded by the time load runs
         raise CavalryError("cavalry_abi_version", CAVALRY_ERR_ABI_VERSION,
                            f"the library at {path} is ABI version {found} and this package was generated "
-                           f"from a header of ABI version {CAVALRY_ABI_VERSION}; load the library built from "
-                           f"the same checkout as the package, at CAVALRY_FFI_LIBRARY or the checkout's "
-                           f"target/release, or regenerate the package from the library's header with "
-                           f"`python3 clients/generate.py python`; see "
+                           f"from a header of ABI version {CAVALRY_ABI_VERSION}; the two must come from one "
+                           f"checkout. When the library is inside an installed package, build the package "
+                           f"again after `cargo build --release -p cavalry-ffi --lib` and install that one "
+                           f"(clients/python/README.md#the-package): a package's own library is loaded "
+                           f"before CAVALRY_FFI_LIBRARY is read. In a checkout, build the library again, or "
+                           f"regenerate the client from the library's header with `python3 "
+                           f"clients/generate.py python`. The first `Client(library_path=...)` of a process "
+                           f"loads the library you name, whatever the search finds; see "
                            f"docs/reference/c-abi.md#versions-and-what-a-reader-rejects")
     held = ctypes.PyDLL(path)
     for name, (restype, argtypes) in FUNCTIONS.items():

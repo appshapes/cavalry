@@ -25,7 +25,10 @@ def fail(what):
     sys.exit(1)
 
 
-def main():
+def example():
+    """The README's program and the line it promises, as `(program, expected)`.
+    `scripts/package-python.py` runs the same two against the installed package (work
+    item 469), so the shapes are read in one place."""
     with open(os.path.join(ROOT, README), encoding="utf-8") as f:
         text = f.read()
     program = re.search(r"^PYTHONPATH=clients/python python3 - <<'PY'\n(.*?)^PY$", text, flags=re.S | re.M)
@@ -33,17 +36,22 @@ def main():
     if program is None or expected is None:
         fail("no program between `PYTHONPATH=clients/python python3 - <<'PY'` and `PY`, or no line "
              "\"You will see `...`.\" after it; keep both shapes so this test can find them")
+    return program.group(1), expected.group(1)
+
+
+def main():
+    program, expected = example()
     environment = dict(os.environ, PYTHONPATH=os.path.join(ROOT, "clients", "python"))
     try:
-        result = subprocess.run([sys.executable, "-"], input=program.group(1), capture_output=True, text=True,
+        result = subprocess.run([sys.executable, "-"], input=program, capture_output=True, text=True,
                                 timeout=WAIT_SECONDS, cwd=ROOT, env=environment)
     except subprocess.TimeoutExpired as timeout:
         fail(f"did not finish in {WAIT_SECONDS} s; it printed {timeout.stdout!r}")
     if result.returncode != 0:
         fail(f"exited {result.returncode}; it printed {result.stdout!r} and {result.stderr!r}")
-    if expected.group(1) not in result.stdout.splitlines():
-        fail(f"printed {result.stdout!r}, not the line the README says the reader will see, {expected.group(1)!r}")
-    print(f"conformance/python: {README}'s example printed `{expected.group(1)}`, as the README says")
+    if expected not in result.stdout.splitlines():
+        fail(f"printed {result.stdout!r}, not the line the README says the reader will see, {expected!r}")
+    print(f"conformance/python: {README}'s example printed `{expected}`, as the README says")
     return 0
 
 
