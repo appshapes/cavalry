@@ -1019,7 +1019,11 @@ fn spawn_member<M: Member>(
                             let _ = stopped.send(Stop::Member(last_error));
                             break;
                         }
-                        std::thread::sleep(MEMBER_RETRY_INTERVAL);
+                        // A park, not a sleep: `run` unparks this thread when it
+                        // stops the member, so its join does not wait this out, nor
+                        // on a timeout that a machine may lose (ADR 0171). The loop
+                        // reads the stop flag before the next cycle.
+                        std::thread::park_timeout(MEMBER_RETRY_INTERVAL);
                     }
                 }
             }

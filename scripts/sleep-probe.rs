@@ -27,7 +27,10 @@
 // remainder" is one that is negative or more than was asked.
 //
 // It ends with 0 when no wait stuck, 1 when some did and all returned, and 2 when one
-// was still stuck at the end, without joining the threads, since one cannot be joined.
+// was still stuck at the end or a thread did not end within two seconds of the stop.
+// It never joins a thread, since a stuck one cannot be joined. A wait that a signal
+// does not end, should a system have one, stays STUCK after its WOKE line: read that
+// as "not woken", not as a thread that is unsound.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -163,7 +166,9 @@ fn sleeper_loop(kind: &'static str, sleeper: &Sleeper, stop: &AtomicBool, start:
     let (timebase, queue) = {
         let mut timebase = Timebase { numer: 1, denom: 1 };
         unsafe { mach_timebase_info(&mut timebase) };
-        (timebase, unsafe { kqueue() })
+        let queue = unsafe { kqueue() };
+        assert!(queue >= 0, "kqueue failed with errno {}", errno());
+        (timebase, queue)
     };
     let mut park = Duration::from_micros(1);
     while !stop.load(Ordering::Acquire) {
@@ -313,14 +318,21 @@ fn main() {
     let still = stuck.iter().filter(|s| **s).count();
     println!("stuck sleeps seen: {stuck_total}; still stuck at the end: {still}");
     stop.store(true, Ordering::Release);
-    if still > 0 {
-        std::process::exit(2);
+    // No join: a wait that stuck in the run's last seconds was not yet seen, and its
+    // thread would hold a join for ever. Two seconds for the others to end, watched by
+    // a park that an ended thread does not need to wake.
+    let ending = Instant::now();
+    while handles.iter().any(|handle| !handle.is_finished()) && ending.elapsed() < Duration::from_secs(2) {
+        for handle in &handles {
+            handle.thread().unpark();
+        }
+        std::thread::park_timeout(Duration::from_millis(20));
     }
-    for handle in handles {
-        handle.thread().unpark();
-        let _ = handle.join();
+    let late = handles.iter().filter(|handle| !handle.is_finished()).count();
+    if late > still {
+        println!("threads that did not end within two seconds of the stop: {late}");
     }
-    std::process::exit(if stuck_total > 0 { 1 } else { 0 });
+    std::process::exit(if still > 0 || late > 0 { 2 } else if stuck_total > 0 { 1 } else { 0 });
 }
 
 fn summary(state: &[Arc<Sleeper>], start: Instant, when: &str) {

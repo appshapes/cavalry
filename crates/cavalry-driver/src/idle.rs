@@ -144,7 +144,9 @@ impl Idler {
     /// timeout. That timeout is not sure on every machine: on one Mac a wait of 1 ms in
     /// about 20 million did not return until its thread was woken (ADR 0171;
     /// `docs/how-to/find-a-wait-that-does-not-return.md`). A park may also return
-    /// early for no reason, which costs one duty cycle.
+    /// early for no reason, which costs one duty cycle. And it takes the thread's
+    /// unpark token: a loop that parks for a purpose of its own as well does not count
+    /// on an unpark from before a call of this to end a park after it.
     pub fn idle(&mut self) {
         match self.strategy {
             IdleStrategy::BusySpin => std::hint::spin_loop(),
@@ -224,10 +226,11 @@ pub(crate) mod tests {
         let idled = end
             .recv_timeout(Duration::from_secs(20))
             .expect("the idler's loop ended when its thread was unparked, not an hour later");
-        assert_eq!(
-            idled,
-            MAX_SPINS + MAX_YIELDS + 1,
-            "one park, ended by the unpark"
+        // One park, ended by the unpark; more only if a park returned early by itself,
+        // which a park may.
+        assert!(
+            idled > MAX_SPINS + MAX_YIELDS,
+            "{idled} idles: the loop reached its park"
         );
         handle.join().expect("the thread ended");
     }

@@ -25,8 +25,8 @@ while it has something, and an unpark does not reach a sleep. Nothing woke the
 driver's conductor, its recorder, or a client's conductor.
 
 A probe with no Cavalry code in it, `scripts/sleep-probe.rs`, found the cause on
-2026-11-26. On that laptop, macOS 26.6.1 on Apple silicon, a timed wait of 1 ms in
-about 20 million is not ended by its timer. The thread is sound: it returns at once
+2026-11-26. On that laptop, macOS 26.6.1 on Apple silicon, one timed wait of 1 ms in
+20 to 34 million is not ended by its timer. The thread is sound: it returns at once
 when a signal or an unpark wakes it. Every kind of timed wait tried shares the
 fault, so no other call is a remedy. The same probe found nothing on CI's Linux
 runner or on CI's macOS runner, macOS 26.3 in a virtual machine. Evidence has the
@@ -40,8 +40,9 @@ conductor's backoff wait in `std::thread::park_timeout` where they waited in
 `std::thread::sleep`, for the same 1 µs doubling to 1 ms. `Driver::stop` stores the
 stop flag and then unparks all five threads, the conductor and the recorder with the
 three it woke before, and joins them. A client's close stores the closed state and
-then unparks its conductor, and joins it. So no join waits on a timed wake-up: the
-flag is read by a thread that the unpark has woken, or that was not parked.
+then unparks its conductor, and joins it. So no join waits on an idle wait's
+timeout: the flag is read by a thread that the unpark has woken, or that was not
+parked.
 
 What this does not decide is what gets a thread back while its program runs. A park
 that loses its wake-up holds its thread until something unparks it, and such a
@@ -52,9 +53,12 @@ conductor before a stop. A driver whose conductor is held answers no command and
 stores no heartbeat, and its clients close with `driver-timeout` after 10 s. A
 client whose conductor is held sends no keepalive, and the driver times it out after
 10 s and counts it in `client.timed_out`. A recorder that is held writes nothing,
-and nothing bounds that. On the laptop measured, an idle thread waits about 940
-times a second, which is one lost wake-up for each idle thread in six to ten hours,
-and one among a driver's five threads in one to two hours. Work item 338's second
+and nothing bounds that. On the laptop measured, a thread that idles by backoff
+waits about 940 times a second, which at one wait in 20 to 34 million is one lost
+wake-up for each such thread in six to ten hours. In a driver with nothing to send,
+to receive or to replay, two threads idle that way, the conductor and the recorder,
+and the other three park for a second at a time: one lost wake-up in three to five
+hours. With all five at work and idling between, it is one in one to two hours. Work item 338's second
 change decides the rescue and its counter, and the bound of a stop's join for a
 thread that does not end for any other reason.
 
@@ -63,14 +67,23 @@ stopped by another thread is stopped by its flag and then an unpark of its threa
 An unpark that comes while the thread is not parked makes its next park return at
 once, which costs one duty cycle. `cavalry run`'s member loop idles with an `Idler`
 on a thread of its own, and `cavalry run` now unparks that thread after it stores
-the member's stop flag and before it joins it. The driver's start does the same for
-a conductor it stops because a later thread could not be started.
+the member's stop flag and before it joins it; that loop's wait of 100 ms after a
+cycle that failed is a park too, which the same unpark ends. The driver's start
+unparks a conductor it stops because a later thread could not be started.
 
-Not covered: a wait in `std::thread::sleep` on the caller's own thread, which has no
-other thread to wake it. These are a client's wait for the driver's answer to a
-command, in steps of 50 µs up to its deadline, the cluster client's waits, a
-service's pauses around a snapshot, and every test's own sleep. One of them that
-loses its wake-up holds its caller without a bound. The second change weighs them.
+Not covered: a wait in `std::thread::sleep` on the caller's own thread. These are a
+client's wait for the driver's answer to a command, in steps of 50 µs up to its
+deadline, a client's wait to attach, the cluster client's waits, a service's pauses
+around a snapshot, the wait of 1 ms between two readings of a recording's catalog
+entry whose checksum does not hold, and every test's own sleep. They stay sleeps
+because the thread is the caller's: a park there would take an unpark that the
+caller's program meant for a park of its own. One of them that loses its wake-up
+holds its caller without a bound. Two threads that a stop joins can be in one: the
+member thread of `cavalry run`, while its module waits for the driver's answer to a
+command or closes its client, and the driver's replayer, while it reads a catalog
+entry again. A stop that falls in such a wait, on a machine that loses that
+wake-up, still hangs, at a small part of the odds it had. The second change weighs
+them with the join's bound.
 
 ## Alternatives considered
 
@@ -81,7 +94,7 @@ loses its wake-up holds its caller without a bound. The second change weighs the
   change's.
 - **Another timed wait.** Lost on the evidence: `nanosleep`, `park_timeout`, a
   condition variable's timed wait, `mach_wait_until` and `kevent` with a timeout
-  each stuck on the laptop. What is lost is the timer's wake-up of a waiting thread,
+  each stuck on the laptop, the last three in the third run. What is lost is the timer's wake-up of a waiting thread,
   below all of them.
 - **Never park on macOS: spin or yield.** Lost: a core for each of five threads on a
   laptop, where the default must be right (invariant 5), to avoid a fault that a
@@ -134,7 +147,11 @@ The tests: `cavalry-driver`'s
 `close_ends_the_conductor_though_its_park_would_not_time_out`. Each has a backoff
 park for an hour, which stands for the park whose timeout never comes, and ends in
 time only when the stop unparks the thread. With the recorder left out of the stop's
-unparks, or the client's unpark removed, its test fails after its bound of 20 s.
+unparks, or the client's unpark removed, its test fails after its bound of 20 s. The
+driver's test holds the conductor's and the recorder's unparks: its other three
+threads have nothing to do and wait in their own park of a second. The three ran
+twenty times in a row on each of CI's runners before the pull request, `test times`
+run 45773733451.
 
 No message passes through the idle path, so the change adds no work for a message.
 The latency gate's next night measures `master` with it, and every row is read as
@@ -142,8 +159,9 @@ before (ADR 0139): each of them has threads that idle by backoff between message
 
 ## Consequences
 
-Easier: a stop of a driver or of a client ends on a machine that loses a timed
-wake-up, and the laptop's gates are no longer held by this fault at a stop.
+Easier: a stop of a driver or of a client whose threads idle ends on a machine that
+loses a timed wake-up, which is the stop of every sighting, and the laptop's gates
+are no longer held by it.
 
 Harder: a thread that is unparked while it is not parked turns once more than it
 would have. A reader of a hang now needs two samples to tell a lost wake-up from a

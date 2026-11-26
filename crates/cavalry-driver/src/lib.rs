@@ -453,11 +453,13 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    /// A stop does not wait on any thread's park to time out (ADR 0171). Every thread's
-    /// backoff parks for an hour here, which stands for the park whose timeout never
-    /// comes, so `close` returns in time only if the stop unparks each of the five: the
-    /// conductor and the recorder idle by their strategy from the start, and a driver
-    /// with nothing to send, to receive or to replay parks the other three.
+    /// A stop does not wait on an idling thread's park to time out (ADR 0171). Every
+    /// thread's backoff parks for an hour here, which stands for the park whose timeout
+    /// never comes. The conductor and the recorder idle by their strategy from the
+    /// start, so each is in that park, and `close` returns in time only if the stop
+    /// unparks both. The sender, the receiver and the replayer hold nothing to do in
+    /// this driver and wait in their own park of a second, which would end without an
+    /// unpark: what this test holds of the stop is the conductor's and the recorder's.
     #[test]
     fn close_ends_every_thread_though_no_park_would_time_out() {
         let dir = std::env::temp_dir().join(format!(
