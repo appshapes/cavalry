@@ -405,6 +405,36 @@ impl LogBuffers {
             .write(true)
             .create_new(true)
             .open(&path)?;
+        // From here the file is this call's. A log that is not created leaves no
+        // file (`spec/log-buffer.md`, "The file"; ADR 0171): whatever fails below,
+        // the sizing, the mapping, the touch of every page or the header, the file
+        // is removed before the error is returned, and with it the pages the
+        // filesystem had given it. The file's name holds the command's correlation
+        // id, so a caller that asks again would leave one more each time, and the
+        // first would keep what room a full directory had left (GitHub issue 238).
+        // A file that was already at the path failed the open above, and is not
+        // this call's to remove.
+        match Self::fill(&file, fields, &positions, position) {
+            Ok(mapped) => Ok(Self { mapped }),
+            Err(error) => {
+                drop(file);
+                // The error returned is the creation's: a file that cannot be
+                // removed either, as in a directory made read-only meanwhile, stays.
+                let _ = std::fs::remove_file(&path);
+                Err(error)
+            }
+        }
+    }
+
+    /// Sizes, maps and touches the file [`LogBuffers::create_at`] has just created, and
+    /// publishes its header at `position`. An error drops the mapping it made, so that
+    /// the caller's removal of the file gives its pages back.
+    fn fill(
+        file: &std::fs::File,
+        fields: &HeaderFields,
+        positions: &Positions,
+        position: i64,
+    ) -> Result<Arc<Mapped>, LogError> {
         let length = fields.file_length();
         file.set_len(length)?;
         // SAFETY: memmap2 marks mapping a file `unsafe` because another process could
@@ -412,7 +442,7 @@ impl LogBuffers {
         // the file, in the driver's directory, the trust boundary every shared layout
         // assumes (ADR 0010 bounds the values a peer writes, not whether the file
         // exists); a truncation is a fault, never silent misbehaviour.
-        let map = unsafe { MmapOptions::new().len(length as usize).map_mut(&file)? };
+        let map = unsafe { MmapOptions::new().len(length as usize).map_mut(file)? };
         pretouch::writable(&map)?;
         let mapped = Arc::new(Mapped::new(Map::Writer(map), *fields)?);
         let meta = mapped.meta();
@@ -433,7 +463,7 @@ impl LogBuffers {
         meta.stream.set_end_of_stream_position(NOT_ENDED);
         meta.stream.set_connected(false);
         meta.header.publish(fields);
-        Ok(Self { mapped })
+        Ok(mapped)
     }
 
     /// Opens the log of publication `correlation_id` under `dir`, writable for a
