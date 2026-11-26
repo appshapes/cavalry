@@ -3,9 +3,14 @@
 - **Status:** Accepted
 - **Date:** 2026-11-26
 - **Invariants affected:** 3, 5, 6
-- **Supersedes:** none. It decides what ADR 0166 left to "the release's ADR" under
-  "The wheel's floor is the build machine's", and names what it leaves to the release
-  ADR of work item 490 and to work item 497.
+- **Supersedes:** ADR 0166 on one point, its rule for an ELF library's tag: the wheel
+  was tagged for "the newest `GLIBC_` symbol version an ELF library needs", and its
+  Consequences said "The backend will tag what it is given". No tag is now below the
+  floor, as Decision says under "The name an artefact carries". The rest of ADR 0166
+  stands, among it that the tag is read from the library and never from the machine
+  that builds it. This decision also decides what ADR 0166 left to "the release's
+  ADR" under "The wheel's floor is the build machine's", and names what it leaves to
+  the release ADR of work item 490 and to work item 497.
 
 ## Context
 
