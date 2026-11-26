@@ -273,6 +273,13 @@ thread_local! {
     /// `Some(Some(Some(hour)))` a watch whose first park is held.
     pub(crate) static WATCH_FOR_TEST: std::cell::Cell<Option<Option<Option<Duration>>>> =
         const { std::cell::Cell::new(None) };
+    /// For a test: a flag that holds the conductor of a client this thread connects.
+    /// While it is set the conductor does nothing at the top of its pass, as a thread
+    /// that its system does not run does nothing, and the application's thread goes
+    /// on. A client takes the flag of the thread that connects it for its conductor's
+    /// thread.
+    pub(crate) static HOLD_FOR_TEST: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// The count of overdue parks as the conductor has published it (ADR 0177): nothing
@@ -403,7 +410,17 @@ impl Conductor {
         }
         // The due time of the watch's park last counted (ADR 0177).
         let mut counted = 0;
+        #[cfg(test)]
+        let hold = HOLD_FOR_TEST.with_borrow(Clone::clone);
         while self.shared.closed().is_none() {
+            #[cfg(test)]
+            if let Some(hold) = &hold {
+                while hold.load(std::sync::atomic::Ordering::Acquire)
+                    && self.shared.closed().is_none()
+                {
+                    std::thread::park_timeout(Duration::from_millis(1));
+                }
+            }
             let epoch = epoch_time();
             if let Some(reason) = self.liveness(epoch) {
                 self.shared.close(reason);
@@ -1421,6 +1438,166 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "{failure}");
             std::thread::park_timeout(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// A client whose conductor is slow must not store an ended image's position into
+    /// the record of the image that came next (work item 506; invariant 1). The driver
+    /// frees an image's position record when it sends `unavailable image`, and gives
+    /// the record out again after the counter reuse timeout, 1 s. The subscriber's
+    /// thread stores its position after each poll until its conductor has handed it
+    /// the event. Here the conductor is held across one publication's end and the next
+    /// one's start, for longer than that timeout, while the subscriber's thread polls
+    /// as an application does. The next image's position must stay where that image
+    /// joined, 0, until the subscriber reads it, and its publisher must be held at its
+    /// window: a position ahead of the reader lets the publisher write over what the
+    /// reader has not read.
+    #[test]
+    fn a_slow_conductor_does_not_store_an_ended_images_position_into_the_next_images_record() {
+        use cavalry_shm::counters::generated::{PUBLICATION_LIMIT, SUBSCRIPTION_POSITION};
+        const STREAM: i32 = 5062;
+        const CHANNEL: &str = "cavalry:ipc";
+        // Four terms of the driver's 64 MiB, in messages of 1,024 bytes with their
+        // headers: an end position that is two terms and more past a new image's 0.
+        const FIRST: usize = 4 * 64 * 1024;
+        let (dir, driver) = watch_test_driver("stray-store-next-image");
+        let counters = cavalry_shm::counters::CountersReader::open(&dir).expect("the counters");
+        let records_of = |type_id: i32| -> Vec<u32> {
+            (0..counters.capacity())
+                .filter(|id| {
+                    counters
+                        .record(*id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|fields| fields.type_id() == type_id)
+                })
+                .collect()
+        };
+        let offer_all = |publication: &mut crate::Publication, count: usize| -> usize {
+            let mut offered = 0;
+            for _ in 0..count {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+                loop {
+                    match publication.offer(&[7u8; 992]) {
+                        Ok(_) => {
+                            offered += 1;
+                            break;
+                        }
+                        Err(crate::Offer::AdminAction) => {}
+                        Err(_) if std::time::Instant::now() < deadline => std::hint::spin_loop(),
+                        Err(_) => return offered,
+                    }
+                }
+            }
+            offered
+        };
+
+        super::WATCH_FOR_TEST.set(Some(None));
+        let mut publisher = crate::Cavalry::connect_to(&dir).expect("the publisher connects");
+        let hold = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        super::HOLD_FOR_TEST.set(Some(std::sync::Arc::clone(&hold)));
+        let mut subscriber = crate::Cavalry::connect_to(&dir).expect("the subscriber connects");
+        super::HOLD_FOR_TEST.set(None);
+        super::WATCH_FOR_TEST.set(None);
+        let mut subscription = subscriber
+            .add_subscription("cavalry:ipc", STREAM)
+            .expect("the subscription");
+
+        // The first publication, all read.
+        let mut first = publisher
+            .add_publication(CHANNEL, STREAM)
+            .expect("the first");
+        let mut read = 0usize;
+        let mut offered = 0usize;
+        while offered < FIRST {
+            offered += offer_all(&mut first, 64);
+            read += subscription.poll(|_, _| {}, 256).expect("polls");
+        }
+        wait_within("the subscriber did not read the first publication", || {
+            read += subscription.poll(|_, _| {}, 256).expect("polls");
+            (read == FIRST).then_some(())
+        });
+        let record = *records_of(SUBSCRIPTION_POSITION.0)
+            .first()
+            .expect("the image's position");
+        let end = counters.read(record).expect("the position");
+        assert_eq!(
+            usize::try_from(end),
+            Ok(FIRST * 1024),
+            "the first image's position at its end"
+        );
+
+        // The conductor is held; the first publication ends; the driver frees the
+        // record; the subscriber's thread polls on, as it would.
+        hold.store(true, std::sync::atomic::Ordering::Release);
+        first.close().expect("the first publication closes");
+        wait_within("the driver did not free the first image's position", || {
+            subscription.poll(|_, _| {}, 16).expect("polls");
+            counters
+                .record(record)
+                .ok()
+                .flatten()
+                .is_none()
+                .then_some(())
+        });
+        let freed = std::time::Instant::now();
+        while freed.elapsed()
+            < cavalry_driver::spec::COUNTER_REUSE_TIMEOUT + std::time::Duration::from_millis(200)
+        {
+            subscription.poll(|_, _| {}, 16).expect("polls");
+        }
+
+        // The next publication on the stream: its image's position for this subscriber
+        // is in the record that was freed, the first free one.
+        let mut second = publisher
+            .add_publication(CHANNEL, STREAM)
+            .expect("the second");
+        wait_within("the next image's position was not allocated", || {
+            (records_of(SUBSCRIPTION_POSITION.0) == [record]).then_some(())
+        });
+        let limit = *records_of(PUBLICATION_LIMIT.0).first().expect("its limit");
+        // The subscriber's thread polls its old image on: its conductor is held, so it
+        // has not been told that the image ended.
+        let mut seen = vec![counters.read(record).expect("the position")];
+        let polled = std::time::Instant::now();
+        while polled.elapsed() < std::time::Duration::from_millis(300) {
+            subscription.poll(|_, _| {}, 16).expect("polls");
+            let value = counters.read(record).expect("the position");
+            if seen.last() != Some(&value) {
+                seen.push(value);
+            }
+        }
+        let window_limit = counters.read(limit).expect("the limit");
+        // What the publisher is let write while the subscriber has read nothing of the
+        // new image.
+        let written = offer_all(&mut second, 2 * FIRST);
+
+        // The conductor goes on: the subscriber takes the new image and reads it.
+        hold.store(false, std::sync::atomic::Ordering::Release);
+        let mut delivered = 0usize;
+        let mut fault = None;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while delivered < written && fault.is_none() && std::time::Instant::now() < deadline {
+            match subscription.poll(|_, _| {}, 256) {
+                Ok(count) => delivered += count,
+                Err(error) => fault = Some(format!("{error:?}")),
+            }
+        }
+        let report = format!(
+            "the next image's position record {record} read {seen:?} while the subscriber had \
+             read nothing of it (the first image ended at {end}); its publisher's limit was \
+             {window_limit} and it wrote {written} messages of 1,024 bytes into terms of 64 MiB; \
+             the subscriber then read {delivered} of them, fault {fault:?}"
+        );
+        assert_eq!(seen, vec![0], "{report}");
+        assert_eq!(delivered, written, "{report}");
+        assert!(fault.is_none(), "{report}");
+
+        drop(second);
+        drop(subscription);
+        subscriber.close().expect("the subscriber closes");
+        publisher.close().expect("the publisher closes");
+        driver.close().expect("the driver closes");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A client's watch ends a park of its conductor that outlived its timeout, and

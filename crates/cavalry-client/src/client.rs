@@ -336,6 +336,8 @@ impl Cavalry {
             crate::conductor::PARK_FOR_TEST.get(),
             crate::conductor::PARK_FOR_TEST_ONCE.get(),
         );
+        #[cfg(test)]
+        let hold_for_test = crate::conductor::HOLD_FOR_TEST.with_borrow(Clone::clone);
         let handle = std::thread::Builder::new()
             .name("cavalry-client-conductor".to_string())
             .spawn(move || {
@@ -343,6 +345,7 @@ impl Cavalry {
                 {
                     crate::conductor::PARK_FOR_TEST.set(park_for_test.0);
                     crate::conductor::PARK_FOR_TEST_ONCE.set(park_for_test.1);
+                    crate::conductor::HOLD_FOR_TEST.set(hold_for_test);
                 }
                 conductor.run()
             })
