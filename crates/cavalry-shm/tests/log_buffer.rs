@@ -2287,7 +2287,7 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// A log that cannot be created leaves no file (`spec/log-buffer.md`, "File"; ADR
-/// 0171; work item 492; GitHub issue 238). The creation is made to fail for real,
+/// 0172; work item 492; GitHub issue 238). The creation is made to fail for real,
 /// after its file exists: a child process whose files the operating system limits
 /// to less than the log, so that sizing the file fails, as it does in a directory
 /// with no room. The child asks three times, as a caller that tries again does.
