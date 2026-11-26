@@ -62,7 +62,7 @@ pub const CONDUCTOR_IDLE_STRATEGY: CounterId = CounterId(17);
 /// `counters.allocations`, a static counter: Counter allocations made since the driver started, the static counters' own records included: every record that went from unused or reclaimed to allocated, the transition counters.allocated adds one for, so that counters.allocations minus counters.freed is counters.allocated (spec/counters-file.md, Metadata record).
 pub const COUNTERS_ALLOCATIONS: CounterId = CounterId(18);
 
-/// `counters.freed`, a static counter: Counters freed since the driver started: every record that went from allocated to reclaimed, the transition counters.allocated loses one for; a reclaimed record is allocated again after the counter reuse timeout.
+/// `counters.freed`, a static counter: Counters freed since the driver started: every record that went from allocated to reclaimed, the transition counters.allocated loses one for; a reclaimed record is allocated again after the counter reuse timeout, and one whose value a client wrote only once its writer has let it go (counters.held).
 pub const COUNTERS_FREED: CounterId = CounterId(19);
 
 /// `recording.started`, a static counter: Recordings the driver started: a catalog slot taken, the time index and the first segment file created, the two position counters allocated and recording ready sent (spec/client-protocol.md, Commands).
@@ -626,8 +626,11 @@ pub const CLIENT_CONDUCTOR_PARKS_OVERDUE: CounterId = CounterId(207);
 /// `counters.held`, a static gauge: Records of the counters file that the driver has freed and gives to no other owner yet: an image's position or a counter a client added, whose writer in the client has not stored the release word and whose client the driver does not know to be gone. A reader sees no counter in a held record; the driver lets it go, and counts the counter reuse timeout from then, when the word is stored or when it holds the client's lock.
 pub const COUNTERS_HELD: CounterId = CounterId(208);
 
-/// `counters.retired`, a static counter: Records of the counters file that are out of use until the driver starts again: what a client that held no lock left held, with no release word, when it closed or was timed out. Nothing tells the driver that such a client can no longer store, so it gives the records to nobody.
+/// `counters.retired`, a static counter: Records of the counters file that are out of use until the driver starts again: what a client that the driver cannot ask about left held, with no release word, when it closed or was timed out. That is a client that held no lock, one whose lock file was renamed or removed by another hand, and one that went while the driver's list of the clients that have gone, 256, was full. Nothing tells the driver that such a client can no longer store, so it gives the records to nobody.
 pub const COUNTERS_RETIRED: CounterId = CounterId(209);
+
+/// `client.without_lock`, a static counter: Clients that held no lock on their file in the driver's directory when the driver read their first command: each such client is counted once. The driver cannot learn that such a client is gone, so what it leaves held with no release word when it closes or is timed out is put out of use, and counters.retired counts it.
+pub const CLIENT_WITHOUT_LOCK: CounterId = CounterId(210);
 
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
@@ -788,7 +791,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "counters.freed",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Counters freed since the driver started: every record that went from allocated to reclaimed, the transition counters.allocated loses one for; a reclaimed record is allocated again after the counter reuse timeout.",
+        doc: "Counters freed since the driver started: every record that went from allocated to reclaimed, the transition counters.allocated loses one for; a reclaimed record is allocated again after the counter reuse timeout, and one whose value a client wrote only once its writer has let it go (counters.held).",
         doctor: "",
     },
     CounterDef {
@@ -2292,7 +2295,15 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "counters.retired",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Records of the counters file that are out of use until the driver starts again: what a client that held no lock left held, with no release word, when it closed or was timed out. Nothing tells the driver that such a client can no longer store, so it gives the records to nobody.",
-        doctor: "A client that held no lock on its file in the driver's directory closed or was timed out, and left this many records that the driver cannot give out again before it restarts. The client could not create or lock its file under clients/ in the driver's directory: check that the driver's directory is on a filesystem that keeps advisory locks and that the client's user may write in clients/. The records count against the counters file's capacity until the driver starts again; see docs/reference/client-protocol.md#the-records-a-client-writes.",
+        doc: "Records of the counters file that are out of use until the driver starts again: what a client that the driver cannot ask about left held, with no release word, when it closed or was timed out. That is a client that held no lock, one whose lock file was renamed or removed by another hand, and one that went while the driver's list of the clients that have gone, 256, was full. Nothing tells the driver that such a client can no longer store, so it gives the records to nobody.",
+        doctor: "A client that the driver could not ask about closed or was timed out, and left this many records that the driver cannot give out again before it restarts. Most often the client held no lock (client.without_lock): it could not create or lock its file under clients/ in the driver's directory: check that the driver's directory is on a filesystem that keeps advisory locks and that the client's user may write in clients/. The records count against the counters file's capacity until the driver starts again; see docs/reference/client-protocol.md#the-records-a-client-writes.",
+    },
+    CounterDef {
+        id: CLIENT_WITHOUT_LOCK,
+        name: "client.without_lock",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Clients that held no lock on their file in the driver's directory when the driver read their first command: each such client is counted once. The driver cannot learn that such a client is gone, so what it leaves held with no release word when it closes or is timed out is put out of use, and counters.retired counts it.",
+        doctor: "A client attached to this driver without a lock on its file under clients/ in the driver's directory. The client works. But when it closes or is timed out, every counter's record that it has not let go is out of use until the driver starts again. The client could not create its file there, or the directory is on a filesystem that keeps no advisory locks: check that the client's user may write in clients/ and that the driver's directory is on a memory or a local filesystem; see docs/reference/client-protocol.md#the-records-a-client-writes.",
     },
 ];

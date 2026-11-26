@@ -68,7 +68,7 @@ use cavalry_shm::counters::generated::{
     SUBSCRIPTION_ADD_DEFERRED, SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT,
     SUBSCRIPTION_ADD_DEFERRED_WAITING, SUBSCRIPTION_LINGERS_ENDED, SUBSCRIPTION_POSITION,
 };
-use cavalry_shm::counters::generated::{COUNTERS_HELD, COUNTERS_RETIRED};
+use cavalry_shm::counters::generated::{CLIENT_WITHOUT_LOCK, COUNTERS_HELD, COUNTERS_RETIRED};
 use cavalry_shm::counters::{Counter, CounterId, CountersError, CountersFile, Scope};
 use cavalry_shm::log::layout as log_layout;
 use cavalry_shm::log::{HeaderFields, LogBuffers, LogType, UnblockOutcome as LogUnblock};
@@ -273,6 +273,18 @@ struct Client {
     locks: bool,
 }
 
+/// A client that closed or was timed out, and held its lock when the driver first
+/// heard of it. The driver tries the lock until it takes it. It then knows that
+/// nothing of the client can store, and remembers that for as long as a record of the
+/// client's may still be freed: over UDP the receiver's word that a reader is gone
+/// comes a cycle or more after the client went (ADR 0179).
+#[derive(Clone, Copy)]
+struct Gone {
+    client_id: i64,
+    /// Whether the driver has taken the client's lock.
+    taken: bool,
+}
+
 /// What one try at a client's lock found.
 enum LockTry {
     /// The client holds it.
@@ -286,7 +298,10 @@ enum LockTry {
 }
 
 /// The client id of a record whose subscription was not registered when the record
-/// was made, which no client has: such a record is let go by its release word alone.
+/// was made, which no client has. Every record is made for a registered subscription
+/// today, so this is reached by nothing: it is here so that such a record, were one
+/// made, is one whose client the driver cannot ask about, let go by its release word
+/// or put out of use, and never taken for another client's.
 const NO_CLIENT: i64 = -1;
 
 /// How many held records' release words the driver loads in one duty cycle.
@@ -841,6 +856,7 @@ enum PendingHop {
 struct Statics {
     counters_held: Counter,
     counters_retired: Counter,
+    client_without_lock: Counter,
     client_timed_out: Counter,
     rejected_command: Counter,
     errors: Counter,
@@ -887,6 +903,7 @@ impl Statics {
         Ok(Self {
             counters_held: get(COUNTERS_HELD)?,
             counters_retired: get(COUNTERS_RETIRED)?,
+            client_without_lock: get(CLIENT_WITHOUT_LOCK)?,
             client_timed_out: get(CLIENT_TIMED_OUT)?,
             rejected_command: get(CLIENT_PROTOCOL_REJECTED_COMMAND)?,
             errors: get(CLIENT_PROTOCOL_ERRORS)?,
@@ -970,9 +987,10 @@ pub(crate) struct Conductor {
     held: Vec<Held>,
     /// Where the next look at the held records' release words begins.
     held_next: usize,
-    /// The clients that have gone, held a lock, and whose lock the driver has yet to
-    /// take, at most [`spec::MAX_CLIENTS`].
-    gone: Vec<i64>,
+    /// The clients that have gone and held a lock, until the driver has taken that
+    /// lock and nothing of the client's is still to be freed: at most
+    /// [`spec::MAX_CLIENTS`].
+    gone: Vec<Gone>,
     /// When the driver last tried the locks of the clients that have gone.
     locks_tried: i64,
     /// The counters clients added, in the order they were added (ADR 0062).
@@ -1465,7 +1483,7 @@ impl Conductor {
                 client_id,
                 correlation_id,
                 registration_id,
-            } => self.remove_subscription(client_id, correlation_id, registration_id),
+            } => self.remove_subscription(client_id, correlation_id, registration_id, now),
             Command::ClientKeepalive { .. } => {}
             Command::ClientClose { client_id, .. } => self.remove_client(client_id, now),
             Command::StartRecording {
@@ -1559,7 +1577,7 @@ impl Conductor {
                 client_id,
                 correlation_id,
                 registration_id,
-            } => self.remove_counter(client_id, correlation_id, registration_id),
+            } => self.remove_counter(client_id, correlation_id, registration_id, now),
         }
     }
 
@@ -1642,7 +1660,13 @@ impl Conductor {
     /// forgets the client's registration, answers `operation success`, sends
     /// `unavailable counter` and frees the record. A registration the driver does not
     /// know, or another client's, is code 5.
-    fn remove_counter(&mut self, client_id: i64, correlation_id: i64, registration_id: i64) {
+    fn remove_counter(
+        &mut self,
+        client_id: i64,
+        correlation_id: i64,
+        registration_id: i64,
+        now: i64,
+    ) {
         let found = self.client_counters.iter().position(|counter| {
             counter.registration_id == registration_id && counter.client_id == client_id
         });
@@ -1659,7 +1683,7 @@ impl Conductor {
         };
         let counter = self.client_counters.remove(index);
         self.send(&Event::OperationSuccess { correlation_id });
-        self.release_client_counter(&counter);
+        self.release_client_counter(&counter, now);
     }
 
     /// Tells every client that a client's counter is going, then frees its record and
@@ -1667,12 +1691,12 @@ impl Conductor {
     /// event, and the record is not allocated again before its writer has let it go
     /// and the counter reuse timeout has passed (`spec/client-protocol.md`, "Events"
     /// and "The records a client writes").
-    fn release_client_counter(&mut self, counter: &ClientCounter) {
+    fn release_client_counter(&mut self, counter: &ClientCounter, now: i64) {
         self.send(&Event::UnavailableCounter {
             registration_id: counter.registration_id,
             counter_id: i32::try_from(counter.counter_id).unwrap_or(i32::MAX),
         });
-        self.hold(counter.counter_id, counter.client_id);
+        self.hold(counter.counter_id, counter.client_id, now);
     }
 
     /// `add destination` and `remove destination` (`spec/client-protocol.md`,
@@ -1893,6 +1917,9 @@ impl Conductor {
             self.try_client_lock(&self.client_lock_path(client_id)),
             LockTry::Held
         );
+        if !locks {
+            self.statics.client_without_lock.increment();
+        }
         self.clients.push(Client {
             id: client_id,
             last_seen: now,
@@ -1944,10 +1971,31 @@ impl Conductor {
     /// to no other owner until [`Self::let_go_released`] reads its release word or
     /// [`Self::try_locks`] takes the client's lock (`spec/client-protocol.md`, "The
     /// records a client writes"; ADR 0179). `counters.held` gains one.
-    fn hold(&mut self, record: u32, client_id: i64) {
-        if self.counters.hold(record).is_ok() {
+    ///
+    /// Three cases need no hold. A client whose lock the driver has already taken can
+    /// store nothing: its record is freed for reuse at once. A client the driver can
+    /// no longer ask about, one that has gone and held no lock, or whose place among
+    /// the clients that have gone was not to be had, leaves a record that is let go
+    /// if its release word is stored and is otherwise out of use until the driver
+    /// starts again: `counters.retired` gains one.
+    fn hold(&mut self, record: u32, client_id: i64, now: i64) {
+        let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
+        let gone = self.gone.iter().find(|gone| gone.client_id == client_id);
+        if gone.is_some_and(|gone| gone.taken) {
+            let _ = self.counters.free(record, reuse);
+            return;
+        }
+        if self.counters.hold(record).is_err() {
+            return;
+        }
+        let asked = gone.is_some() || self.clients.iter().any(|client| client.id == client_id);
+        if asked {
             self.held.push(Held { record, client_id });
             self.statics.counters_held.increment();
+        } else if self.counters.released(record).unwrap_or(false) {
+            let _ = self.counters.let_go(record, reuse);
+        } else {
+            self.statics.counters_retired.increment();
         }
     }
 
@@ -1985,11 +2033,14 @@ impl Conductor {
         work
     }
 
-    /// Tries the lock of each client that has gone, once every
-    /// [`spec::LOCK_CHECK_INTERVAL`]. A lock the driver takes is a client of which
-    /// nothing can store: every
-    /// record held for it is let go, and the file is removed. Returns how many
-    /// clients it finished.
+    /// Tries the lock of each client that has gone and whose lock the driver has not
+    /// taken, at most once every [`spec::LOCK_CHECK_INTERVAL`]. A lock the driver takes
+    /// is a client of which nothing can store: every record held for it is let go, and
+    /// the file is removed. A file that is no longer there tells the driver nothing,
+    /// since only the driver removes one: what that client left with no release word
+    /// is out of use until the driver starts again. A client whose lock is taken is
+    /// forgotten when nothing of its is still to be freed. Returns how many clients
+    /// it finished.
     fn try_locks(&mut self, now: i64) -> usize {
         if now.saturating_sub(self.locks_tried) < spec::nanos(spec::LOCK_CHECK_INTERVAL) {
             return 0;
@@ -1998,60 +2049,82 @@ impl Conductor {
         let mut work = 0;
         let mut index = 0;
         while index < self.gone.len() {
-            let client_id = self.gone[index];
-            let mut path = self.client_gone_path(client_id);
-            if !path.exists() {
-                path = self.client_lock_path(client_id);
-            }
-            match self.try_client_lock(&path) {
-                LockTry::Held | LockTry::Unknown => index += 1,
-                LockTry::Taken | LockTry::NoFile => {
-                    let _ = std::fs::remove_file(&path);
-                    self.gone.swap_remove(index);
-                    let mut held = 0;
-                    while held < self.held.len() {
-                        if self.held[held].client_id == client_id {
-                            self.let_go(held, now);
-                        } else {
-                            held += 1;
+            let Gone { client_id, taken } = self.gone[index];
+            if !taken {
+                let path = self.client_gone_path(client_id);
+                match self.try_client_lock(&path) {
+                    LockTry::Held | LockTry::Unknown => {}
+                    LockTry::Taken => {
+                        let _ = std::fs::remove_file(&path);
+                        self.gone[index].taken = true;
+                        let mut held = 0;
+                        while held < self.held.len() {
+                            if self.held[held].client_id == client_id {
+                                self.let_go(held, now);
+                            } else {
+                                held += 1;
+                            }
                         }
+                        work += 1;
                     }
-                    work += 1;
+                    LockTry::NoFile => {
+                        self.gone.swap_remove(index);
+                        self.retire_unreleased(client_id, now);
+                        work += 1;
+                        continue;
+                    }
                 }
+            }
+            if self.gone[index].taken && !self.owes_a_record(client_id) {
+                self.gone.swap_remove(index);
+            } else {
+                index += 1;
             }
         }
         work
     }
 
-    /// A client has closed or was timed out, and its records are held. One that held
-    /// its lock is tried from now on ([`Self::try_locks`]). One that held none can
-    /// never be known to be gone: what it left with no release word is out of use
-    /// until the driver starts again, and `counters.retired` counts it. So is what a
-    /// client leaves when the list of the clients that have gone is full.
-    fn client_gone(&mut self, client_id: i64, locks: bool, now: i64) {
-        if locks && self.gone.len() < spec::MAX_CLIENTS {
-            // The file takes the name by which `doctor` tells a client that has gone
-            // from one that runs. The lock is on the file and goes with it. A client
-            // that has dropped everything removed its file as it let go: no file
-            // under either name is the same answer as a lock the driver takes.
-            let gone = self.client_gone_path(client_id);
-            match std::fs::rename(self.client_lock_path(client_id), &gone) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    let mut index = 0;
-                    while index < self.held.len() {
-                        if self.held[index].client_id == client_id {
-                            self.let_go(index, now);
-                        } else {
-                            index += 1;
-                        }
-                    }
-                }
-                // Renamed, or not for another reason: the lock is tried under the name
-                // the file has.
-                Ok(()) | Err(_) => self.gone.push(client_id),
-            }
-            return;
+    /// Whether a record of client `client_id`'s is still allocated and will be freed
+    /// later: a position on an image over UDP, which is freed when the receiver says
+    /// that its reader is gone, or with the image.
+    fn owes_a_record(&self, client_id: i64) -> bool {
+        self.udp_images.iter().any(|image| {
+            image
+                .subscriptions
+                .iter()
+                .any(|pair| pair.client_id == client_id)
+        }) || self.images.iter().any(|image| image.client_id == client_id)
+    }
+
+    /// A client closes or is timed out: before anything of it is freed, the driver
+    /// gives its lock file the name by which `doctor` tells a client that has gone
+    /// from one that runs, `clients/<client id>.gone`, and notes the client among
+    /// those whose lock it tries. The lock is on the file and goes with the name.
+    /// Returns whether the client is so noted. One that held no lock, one whose file
+    /// could not be renamed, and one for which the list has no place are not: the
+    /// driver cannot learn that such a client is gone.
+    fn client_going(&mut self, client_id: i64, locks: bool) -> bool {
+        if !locks || self.gone.len() >= spec::MAX_CLIENTS {
+            return false;
         }
+        let renamed = std::fs::rename(
+            self.client_lock_path(client_id),
+            self.client_gone_path(client_id),
+        );
+        if renamed.is_err() {
+            return false;
+        }
+        self.gone.push(Gone {
+            client_id,
+            taken: false,
+        });
+        true
+    }
+
+    /// What a client the driver cannot ask about left held: a record whose release
+    /// word is stored is let go, and every other is out of use until the driver
+    /// starts again, counted in `counters.retired`.
+    fn retire_unreleased(&mut self, client_id: i64, now: i64) {
         let mut index = 0;
         while index < self.held.len() {
             if self.held[index].client_id != client_id {
@@ -4085,7 +4158,7 @@ impl Conductor {
                     {
                         let pair = image.subscriptions.swap_remove(pair);
                         self.udp_pairs = self.udp_pairs.saturating_sub(1);
-                        self.hold(pair.record, pair.client_id);
+                        self.hold(pair.record, pair.client_id, now);
                     }
                 }
                 receiver::Reply::ReaderRejected {
@@ -4427,7 +4500,7 @@ impl Conductor {
             waits
         });
         for (record, client_id) in freed {
-            self.hold(record, client_id);
+            self.hold(record, client_id, now);
         }
         if !pairs.is_empty() {
             self.udp_images[index].subscriptions = pairs;
@@ -4515,7 +4588,7 @@ impl Conductor {
         let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
         let mut image = self.udp_images.swap_remove(index);
         for pair in image.subscriptions.drain(..) {
-            self.hold(pair.record, pair.client_id);
+            self.hold(pair.record, pair.client_id, now);
             self.udp_pairs = self.udp_pairs.saturating_sub(1);
         }
         if image.waiting {
@@ -4608,7 +4681,13 @@ impl Conductor {
         });
     }
 
-    fn remove_subscription(&mut self, client_id: i64, correlation_id: i64, registration_id: i64) {
+    fn remove_subscription(
+        &mut self,
+        client_id: i64,
+        correlation_id: i64,
+        registration_id: i64,
+        now: i64,
+    ) {
         let found = self.subscriptions.iter().position(|subscription| {
             subscription.registration_id == registration_id && subscription.client_id == client_id
         });
@@ -4620,7 +4699,7 @@ impl Conductor {
             );
             return;
         };
-        self.drop_subscription(index);
+        self.drop_subscription(index, now);
         self.send(&Event::OperationSuccess { correlation_id });
     }
 
@@ -4628,7 +4707,7 @@ impl Conductor {
     /// counters; over UDP the receiver drops its readers, whose records are freed on its
     /// replies, retires an image left with none, and the endpoint closes when nothing
     /// holds it.
-    fn drop_subscription(&mut self, index: usize) {
+    fn drop_subscription(&mut self, index: usize, now: i64) {
         let subscription = self.subscriptions.swap_remove(index);
         if let Some(endpoint_id) = subscription.endpoint {
             // The images this was the last subscription to read: the receiver retires
@@ -4667,7 +4746,7 @@ impl Conductor {
                 });
             }
             for record in freed {
-                self.hold(record, subscription.client_id);
+                self.hold(record, subscription.client_id, now);
             }
             self.receiver_request(receiver::Request::RemoveInterest {
                 endpoint_id,
@@ -4706,7 +4785,7 @@ impl Conductor {
         }
         self.images = kept;
         for record in freed {
-            self.hold(record, subscription.client_id);
+            self.hold(record, subscription.client_id, now);
         }
         self.images
             .reserve(spec::MAX_IMAGES.saturating_sub(self.images.len()));
@@ -4727,13 +4806,16 @@ impl Conductor {
             .find(|client| client.id == client_id)
             .is_some_and(|client| client.locks);
         self.clients.retain(|client| client.id != client_id);
+        // Before anything of the client's is freed, so that what is freed below is
+        // held for a client the driver can ask about, where it can.
+        let asked = self.client_going(client_id, locks);
         while let Some(index) = self
             .client_counters
             .iter()
             .position(|counter| counter.client_id == client_id)
         {
             let counter = self.client_counters.remove(index);
-            self.release_client_counter(&counter);
+            self.release_client_counter(&counter, now);
         }
         // Its adds still waiting for a closing endpoint go with it (ADR 0049).
         self.pending_subscriptions
@@ -4762,9 +4844,11 @@ impl Conductor {
             .iter()
             .position(|subscription| subscription.client_id == client_id)
         {
-            self.drop_subscription(index);
+            self.drop_subscription(index, now);
         }
-        self.client_gone(client_id, locks, now);
+        if !asked {
+            self.retire_unreleased(client_id, now);
+        }
     }
 
     /// Times out every client whose last command is older than the liveness timeout, on
@@ -5114,7 +5198,7 @@ impl Conductor {
         let mut kept = Vec::with_capacity(spec::MAX_IMAGES);
         for image in images {
             if image.publication_id == publication_id {
-                self.hold(image.position.id(), image.client_id);
+                self.hold(image.position.id(), image.client_id, now);
             } else {
                 kept.push(image);
             }
@@ -12988,7 +13072,7 @@ mod replay {
 
         // The commands pass: the last subscription goes, and the flag with it, before
         // the limit moves.
-        h.conductor.remove_subscription(CLIENT, 4, 3);
+        h.conductor.remove_subscription(CLIENT, 4, 3, now);
         assert!(h.conductor.images.is_empty());
         let publication = &h.conductor.publications[0];
         assert!(
@@ -13581,7 +13665,7 @@ mod replay {
             "paced at the window"
         );
         let _ = events(&mut h);
-        h.conductor.remove_subscription(CLIENT, 7, 5);
+        h.conductor.remove_subscription(CLIENT, 7, 5, h.now);
         for _ in 0..20 {
             h.cycle();
         }
@@ -17244,9 +17328,9 @@ mod receiving {
         // A second subscription on the stream keeps it armed; the last one drops it.
         h.conductor
             .add_subscription(1, 5, STREAM, channel.as_bytes(), h.now);
-        h.conductor.remove_subscription(1, 6, 2);
+        h.conductor.remove_subscription(1, 6, 2, now);
         assert_eq!(h.conductor.armed_recordings.len(), 1);
-        h.conductor.remove_subscription(1, 7, 5);
+        h.conductor.remove_subscription(1, 7, 5, now);
         assert!(h.conductor.armed_recordings.is_empty());
         let (code, message) = h.last_error(4).expect("the second answer");
         assert_eq!(code, 20, "{message}");
@@ -17351,7 +17435,7 @@ mod receiving {
         assert_eq!(h.counter(RECORDING_ARMED), i64::from(n));
 
         // One subscription goes: exactly its stream's armed recording is dropped.
-        h.conductor.remove_subscription(1, 40_000, 10_005);
+        h.conductor.remove_subscription(1, 40_000, 10_005, now);
         assert_eq!(
             h.conductor.armed_recordings.len(),
             spec::MAX_SUBSCRIPTIONS - 1
@@ -17826,7 +17910,8 @@ mod receiving {
         assert!(!log.exists());
         assert!(unavailable_images(&mut h, 2).is_empty());
         // The subscription and its endpoint stay; removing it frees every record.
-        h.conductor.remove_subscription(1, 3, 2);
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
         assert!(h.cycle_until(|h| h.conductor.receive_endpoints.is_empty()));
         assert_eq!(h.counter(COUNTERS_ALLOCATED), allocated);
         drop(sender);
@@ -17851,7 +17936,7 @@ mod receiving {
         );
         let now = h.now;
         assert!(now < announced + spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
-        h.conductor.remove_subscription(1, 3, 2);
+        h.conductor.remove_subscription(1, 3, 2, now);
         assert!(
             h.conductor.counters.counter(record).is_err(),
             "freed with the removal"
@@ -17937,7 +18022,7 @@ mod receiving {
         h.conductor
             .add_publication(1, 5, STREAM, IPC_CHANNEL, false, now);
         assert_eq!(h.conductor.images.len(), 1);
-        h.conductor.remove_subscription(1, 6, 2);
+        h.conductor.remove_subscription(1, 6, 2, now);
         h.conductor.remove_publication(1, 7, 5, now);
         h.cycle();
         assert!(h.conductor.publications.is_empty());
@@ -18041,7 +18126,8 @@ mod receiving {
         let mut h = Harness::new("udp-unsubscribe");
         let allocated = h.counter(COUNTERS_ALLOCATED);
         let (sender, _image_id, _position) = subscribe_and_connect(&mut h, 2);
-        h.conductor.remove_subscription(1, 3, 2);
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
         assert!(h.cycle_until(|h| h.conductor.receive_endpoints.is_empty()));
         assert_eq!(h.counter(IMAGE_UNSUBSCRIBED), 1);
         assert_eq!(h.counter(IMAGE_REMOVED), 1);
@@ -18131,7 +18217,8 @@ mod receiving {
         );
         // The last subscription goes: its reader's removal takes the last slot, and
         // the retire finds no room.
-        h.conductor.remove_subscription(1, 3, 2);
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
         h.now += MS;
         let now = h.now;
         h.udp_receiver.duty_cycle(now);
@@ -18202,7 +18289,8 @@ mod receiving {
         );
         // The subscription goes: one reader's reply takes the last slot; the other
         // reader stays, leaving, and neither image counts a subscriber or retires.
-        h.conductor.remove_subscription(1, 3, 2);
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
         h.now += MS;
         let now = h.now;
         h.udp_receiver.duty_cycle(now);
@@ -18492,7 +18580,8 @@ mod receiving {
             "the slowest reader's position, the second subscriber's"
         );
         // Removing one subscription leaves the image with the other.
-        h.conductor.remove_subscription(1, 4, 3);
+        let now = h.now;
+        h.conductor.remove_subscription(1, 4, 3, now);
         assert!(h.cycle_until(|h| h.conductor.udp_pairs == 1));
         assert_eq!(h.conductor.udp_images.len(), 1);
         assert_eq!(h.counter(IMAGE_UNSUBSCRIBED), 0);
@@ -18580,7 +18669,8 @@ mod receiving {
         // The last subscription goes: the image is retired, but its log stays while the
         // recording runs, and the recording is stopped at the rebuild position once the
         // recorder has written up to it.
-        h.conductor.remove_subscription(1, 3, 2);
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
         assert!(h.cycle_until(|h| h.counter(IMAGE_UNSUBSCRIBED) == 1));
         assert_eq!(
             h.counter(IMAGE_REMOVED),
@@ -18642,7 +18732,8 @@ mod receiving {
             .add_subscription(1, 2, STREAM, channel.as_bytes(), h.now);
         assert_eq!(h.last_error(2), None);
         h.cycle();
-        h.conductor.remove_subscription(1, 3, 2);
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
         assert_eq!(
             h.conductor.receive_endpoints[0].state,
             ChannelState::Closing
@@ -18726,7 +18817,8 @@ mod receiving {
         let (sender, image_id, _position) = subscribe_and_connect(&mut h, 2);
         let port = h.conductor.receive_endpoints[0].endpoint.port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
-        h.conductor.remove_subscription(1, 3, 2);
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
         // The receiver has not run: the image is listed, live, and holds the endpoint.
         assert_eq!(h.conductor.udp_images.len(), 1);
         assert_eq!(h.conductor.udp_images[0].state, ImageState::Live);
@@ -18783,7 +18875,8 @@ mod receiving {
             .add_subscription(1, 5, STREAM + 1, channel.as_bytes(), h.now);
         assert_eq!(h.last_error(5), None);
         h.cycle();
-        h.conductor.remove_subscription(1, 6, 2);
+        let now = h.now;
+        h.conductor.remove_subscription(1, 6, 2, now);
         assert_eq!(h.conductor.udp_images.len(), 1);
         assert!(h.conductor.udp_images[0].leaving);
         h.conductor
@@ -18827,7 +18920,7 @@ mod receiving {
         assert_eq!(h.last_error(2), None);
         h.cycle();
         let now = h.now;
-        h.conductor.remove_subscription(1, 3, 2);
+        h.conductor.remove_subscription(1, 3, 2, now);
         assert_eq!(
             h.conductor.receive_endpoints[0].state,
             ChannelState::Closing
@@ -18877,7 +18970,8 @@ mod receiving {
             .add_subscription(1, 2, STREAM, channel.as_bytes(), h.now);
         assert_eq!(h.last_error(2), None);
         h.cycle();
-        h.conductor.remove_subscription(1, 3, 2);
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
         assert_eq!(
             h.conductor.receive_endpoints[0].state,
             ChannelState::Closing
@@ -18979,7 +19073,7 @@ mod receiving {
         assert_eq!(h.counter(PUBLICATION_ADD_DEFERRED), 0);
 
         // Its last subscription removed: the add waits for the close, then binds.
-        h.conductor.remove_subscription(1, 4, 2);
+        h.conductor.remove_subscription(1, 4, 2, now);
         h.conductor
             .add_publication(1, 5, STREAM, control.as_bytes(), true, h.now);
         assert_eq!(h.conductor.pending_publications.len(), 1);
@@ -19019,7 +19113,7 @@ mod receiving {
         assert_eq!(h.last_error(2), None);
         h.cycle();
         let now = h.now;
-        h.conductor.remove_subscription(1, 3, 2);
+        h.conductor.remove_subscription(1, 3, 2, now);
         h.conductor
             .add_publication(1, 4, STREAM, control.as_bytes(), true, now);
         h.conductor
@@ -19062,7 +19156,7 @@ mod receiving {
         assert_eq!(h.last_error(2), None);
         h.cycle();
         let now = h.now;
-        h.conductor.remove_subscription(1, 3, 2);
+        h.conductor.remove_subscription(1, 3, 2, now);
         h.conductor
             .add_publication(1, 4, STREAM, control.as_bytes(), false, now);
         assert_eq!(h.conductor.pending_publications.len(), 1);
@@ -19103,7 +19197,8 @@ mod receiving {
             .add_subscription(1, 2, STREAM, channel.as_bytes(), h.now);
         assert_eq!(h.last_error(2), None);
         h.cycle();
-        h.conductor.remove_subscription(1, 3, 2);
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
         assert_eq!(
             h.conductor.receive_endpoints[0].state,
             ChannelState::Closing
@@ -19162,7 +19257,7 @@ mod receiving {
         assert_eq!(h.last_error(2), None);
         h.cycle();
         let now = h.now;
-        h.conductor.remove_subscription(1, 3, 2);
+        h.conductor.remove_subscription(1, 3, 2, now);
         // The registry filled with held adds, exclusive and shared, the receiver
         // running no cycle.
         let capacity = spec::MAX_PUBLICATIONS as i64;
@@ -19231,7 +19326,7 @@ mod receiving {
         assert_eq!(h.last_error(2), None);
         h.cycle();
         let now = h.now;
-        h.conductor.remove_subscription(1, 3, 2);
+        h.conductor.remove_subscription(1, 3, 2, now);
         let registered = spec::MAX_PUBLICATIONS as i64 - 1;
         for n in 0..registered {
             h.conductor
@@ -19620,5 +19715,348 @@ mod clocks {
         assert_eq!(conductor.clients.len(), 1, "not yet on the epoch clock");
         conductor.duty_cycle(stopped + timeout + step + 1);
         assert_eq!(conductor.clients.len(), 0);
+    }
+}
+
+/// The records a client writes (ADR 0179): a record that is freed is held for its
+/// writer, and let go by its release word or by its client's lock.
+#[cfg(test)]
+mod held {
+    use std::fs::File;
+
+    use cavalry_shm::counters::CountersWriter;
+    use cavalry_shm::counters::generated::{
+        CLIENT_WITHOUT_LOCK, CLUSTER_COMMIT_POSITION, COUNTERS_HELD, COUNTERS_RETIRED,
+    };
+
+    use super::recording::Harness;
+    use super::*;
+
+    const SECOND: i64 = 1_000_000_000;
+    const MS: i64 = 1_000_000;
+
+    /// A client's lock file, made and locked as a client makes and locks it, before the
+    /// client's first command.
+    fn lock(h: &Harness, client_id: i64) -> File {
+        let path = h.conductor.client_lock_path(client_id);
+        let file = File::options()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .expect("the lock file");
+        file.try_lock().expect("the client's lock");
+        file
+    }
+
+    /// Adds a counter for `client_id` and returns its record.
+    fn add(h: &mut Harness, client_id: i64, correlation_id: i64) -> u32 {
+        let now = h.now;
+        assert!(h.conductor.touch_client(client_id, now));
+        h.conductor.add_counter(
+            client_id,
+            correlation_id,
+            CLUSTER_COMMIT_POSITION.0,
+            &correlation_id.to_le_bytes(),
+            b"cluster.commit_position 1",
+        );
+        h.conductor
+            .client_counters
+            .iter()
+            .find(|counter| counter.registration_id == correlation_id)
+            .expect("the counter is registered")
+            .counter_id
+    }
+
+    /// Whether `record` holds a counter, as a reader sees it.
+    fn allocated(h: &Harness, record: u32) -> bool {
+        h.conductor.counters.counter(record).is_ok()
+    }
+
+    /// Whether `record` is held: freed, and not to be allocated again until it is let
+    /// go. A record that was let go has a deadline, the counter reuse timeout later,
+    /// and is held no more; what an allocation does with a deadline is `cavalry-shm`'s
+    /// to test, on the real clock.
+    fn held(h: &Harness, record: u32) -> bool {
+        h.conductor.counters.is_held(record).expect("a record")
+    }
+
+    /// A cycle a second later, with a command from `client_id` first, so that the
+    /// driver does not time the client out while the test waits.
+    fn a_second_later(h: &mut Harness, client_id: i64) {
+        h.now += SECOND;
+        let now = h.now;
+        assert!(h.conductor.touch_client(client_id, now));
+        h.cycle();
+    }
+
+    #[test]
+    fn a_removed_counter_is_held_until_its_writer_stores_the_word() {
+        let mut h = Harness::new("held-word");
+        let writer = CountersWriter::open(h.dir.path()).expect("a client's mapping");
+        let record = add(&mut h, 7, 100);
+        assert_eq!(h.counter(COUNTERS_HELD), 0);
+        let now = h.now;
+        h.conductor.remove_counter(7, 101, 100, now);
+        assert!(!allocated(&h, record), "no counter to a reader, at once");
+        assert!(held(&h, record));
+        assert_eq!(h.counter(COUNTERS_HELD), 1);
+        // However long the driver runs, the record is given no deadline.
+        for _ in 0..30 {
+            a_second_later(&mut h, 7);
+        }
+        assert!(held(&h, record));
+        assert_eq!(h.counter(COUNTERS_HELD), 1);
+        // The writer's word: the driver lets the record go, and the counter reuse
+        // timeout runs from then, for a reader.
+        writer.release(record).expect("the word is stored");
+        h.cycle();
+        assert!(!held(&h, record));
+        assert!(!allocated(&h, record));
+        assert_eq!(h.counter(COUNTERS_HELD), 0);
+        assert_eq!(h.counter(COUNTERS_RETIRED), 0);
+    }
+
+    #[test]
+    fn a_gone_clients_records_are_held_until_the_driver_takes_its_lock() {
+        let mut h = Harness::new("held-lock");
+        let held_by_client = lock(&h, 7);
+        let first = add(&mut h, 7, 100);
+        let second = add(&mut h, 7, 102);
+        assert_eq!(
+            h.counter(CLIENT_WITHOUT_LOCK),
+            0,
+            "the client holds its lock"
+        );
+        let now = h.now;
+        h.conductor.remove_client(7, now);
+        assert_eq!(h.counter(COUNTERS_HELD), 2);
+        assert!(
+            h.conductor.client_gone_path(7).exists() && !h.conductor.client_lock_path(7).exists(),
+            "the file has the name of a client that has gone"
+        );
+        // The client's process is stopped: it holds its lock, and nothing is let go.
+        for _ in 0..5 {
+            h.now += 10 * SECOND;
+            h.cycle();
+        }
+        assert_eq!(h.counter(COUNTERS_HELD), 2);
+        assert!(held(&h, first) && held(&h, second));
+        // The process ends: the system lets go of the lock, and the driver takes it at
+        // its next try.
+        drop(held_by_client);
+        h.now += spec::nanos(spec::LOCK_CHECK_INTERVAL) + MS;
+        h.cycle();
+        assert_eq!(h.counter(COUNTERS_HELD), 0);
+        assert!(!held(&h, first) && !held(&h, second));
+        assert!(
+            !h.conductor.client_gone_path(7).exists(),
+            "the driver removed the file"
+        );
+        assert!(h.conductor.gone.is_empty(), "and forgot the client");
+        assert_eq!(h.counter(COUNTERS_RETIRED), 0);
+    }
+
+    #[test]
+    fn the_lock_is_tried_once_an_interval_and_not_every_cycle() {
+        let mut h = Harness::new("held-interval");
+        let held_by_client = lock(&h, 7);
+        add(&mut h, 7, 100);
+        let now = h.now;
+        h.conductor.remove_client(7, now);
+        // The first try, in the cycle after the client went, finds the lock held.
+        h.cycle();
+        assert_eq!(h.counter(COUNTERS_HELD), 1);
+        // Let go now, the lock is not tried again before an interval has passed.
+        drop(held_by_client);
+        let tried = h.conductor.locks_tried;
+        while h.now + 2 * MS < tried + spec::nanos(spec::LOCK_CHECK_INTERVAL) {
+            h.cycle();
+            assert_eq!(h.counter(COUNTERS_HELD), 1, "tried before its interval");
+        }
+        h.now = tried + spec::nanos(spec::LOCK_CHECK_INTERVAL);
+        h.cycle();
+        assert_eq!(h.counter(COUNTERS_HELD), 0);
+    }
+
+    #[test]
+    fn what_a_client_without_a_lock_leaves_is_let_go_by_its_word_or_put_out_of_use() {
+        let mut h = Harness::new("held-no-lock");
+        let writer = CountersWriter::open(h.dir.path()).expect("a client's mapping");
+        let released = add(&mut h, 7, 100);
+        let unreleased = add(&mut h, 7, 102);
+        assert_eq!(
+            h.counter(CLIENT_WITHOUT_LOCK),
+            1,
+            "counted once, at its first command"
+        );
+        writer.release(released).expect("the word is stored");
+        let now = h.now;
+        h.conductor.remove_client(7, now);
+        assert_eq!(
+            h.counter(COUNTERS_HELD),
+            0,
+            "nothing waits: the driver cannot ask"
+        );
+        assert_eq!(h.counter(COUNTERS_RETIRED), 1);
+        assert!(h.conductor.gone.is_empty());
+        assert!(!held(&h, released), "the released one has its deadline");
+        // The other never gets one, whatever the driver does from here.
+        for _ in 0..5 {
+            h.now += 100 * SECOND;
+            h.cycle();
+        }
+        assert!(held(&h, unreleased));
+        assert_eq!(h.counter(COUNTERS_RETIRED), 1);
+        assert_eq!(h.counter(COUNTERS_HELD), 0);
+    }
+
+    /// A record that is freed for a client after the driver has taken that client's
+    /// lock is not held at all: nothing of the client can store. Over UDP that is a
+    /// position whose reader the receiver gives back a cycle after the client went.
+    /// And one freed for a client the driver never could ask about is put out of use.
+    #[test]
+    fn a_record_freed_after_its_client_is_finished_with_is_freed_or_put_out_of_use() {
+        let mut h = Harness::new("held-late");
+        let record = |h: &mut Harness| {
+            h.conductor
+                .counters
+                .allocate(SUBSCRIPTION_POSITION, &[1], "subscription.position 1 1 1")
+                .expect("a record")
+                .id()
+        };
+        // A client whose lock the driver has taken, and of which a record is still owed.
+        h.conductor.gone.push(Gone {
+            client_id: 7,
+            taken: true,
+        });
+        let late = record(&mut h);
+        let now = h.now;
+        h.conductor.hold(late, 7, now);
+        assert!(
+            !allocated(&h, late) && !held(&h, late),
+            "freed, and not held"
+        );
+        assert_eq!(h.counter(COUNTERS_HELD), 0);
+        assert_eq!(h.counter(COUNTERS_RETIRED), 0);
+        // A client the driver does not know, registered nowhere and not among the gone.
+        let orphan = record(&mut h);
+        let now = h.now;
+        h.conductor.hold(orphan, 8, now);
+        assert!(held(&h, orphan), "given to nobody");
+        assert_eq!(h.counter(COUNTERS_HELD), 0);
+        assert_eq!(h.counter(COUNTERS_RETIRED), 1, "out of use, and counted");
+        // The client whose lock was taken is forgotten once nothing of its is owed.
+        h.now += spec::nanos(spec::LOCK_CHECK_INTERVAL) + MS;
+        h.cycle();
+        assert!(h.conductor.gone.is_empty());
+    }
+
+    /// The held records at more than one cycle's looks: every release word is found
+    /// within as many cycles as it takes to go round, and the gauge follows.
+    #[test]
+    fn every_held_records_word_is_looked_at_in_turn() {
+        let mut h = Harness::new("held-turn");
+        let writer = CountersWriter::open(h.dir.path()).expect("a client's mapping");
+        let count = 3 * HELD_PER_CYCLE + 5;
+        let records: Vec<u32> = (0..count)
+            .map(|index| add(&mut h, 7, 100 + i64::try_from(index).expect("small")))
+            .collect();
+        let _held_by_client = lock(&h, 7);
+        // The lock was made after the client's first command here, so the driver took
+        // the client for one without a lock; make it one that the driver can ask.
+        h.conductor.clients[0].locks = true;
+        let now = h.now;
+        h.conductor.remove_client(7, now);
+        assert_eq!(
+            h.counter(COUNTERS_HELD),
+            i64::try_from(count).expect("small")
+        );
+        // The last record's word, and then one in the middle.
+        for (released, left) in [(count - 1, count - 1), (count / 2, count - 2)] {
+            writer
+                .release(records[released])
+                .expect("the word is stored");
+            for _ in 0..count.div_ceil(HELD_PER_CYCLE) {
+                h.cycle();
+            }
+            assert_eq!(
+                h.counter(COUNTERS_HELD),
+                i64::try_from(left).expect("small")
+            );
+            assert!(!held(&h, records[released]));
+        }
+        // And all of them at once.
+        for record in &records {
+            writer.release(*record).expect("the word is stored");
+        }
+        for _ in 0..=count.div_ceil(HELD_PER_CYCLE) {
+            h.cycle();
+        }
+        assert_eq!(h.counter(COUNTERS_HELD), 0);
+        assert_eq!(h.counter(COUNTERS_RETIRED), 0);
+    }
+
+    /// The list of the clients that have gone, at its capacity: the next client that
+    /// goes has no place in it, the driver cannot wait for its lock, and what it left
+    /// with no release word is put out of use and counted. Nothing is refused, and
+    /// nothing is given away.
+    #[test]
+    fn a_client_that_goes_when_the_list_of_gone_clients_is_full_leaves_its_records_out_of_use() {
+        let mut h = Harness::new("held-gone-full");
+        let mut locks = Vec::new();
+        for client in 0..i64::try_from(spec::MAX_CLIENTS).expect("small") {
+            locks.push(lock(&h, 1_000 + client));
+            add(&mut h, 1_000 + client, 2 * client + 10_000);
+            let now = h.now;
+            h.conductor.remove_client(1_000 + client, now);
+        }
+        assert_eq!(h.conductor.gone.len(), spec::MAX_CLIENTS);
+        assert_eq!(
+            h.counter(COUNTERS_HELD),
+            i64::try_from(spec::MAX_CLIENTS).expect("small")
+        );
+        assert_eq!(h.counter(COUNTERS_RETIRED), 0);
+        // One more, which holds its lock as the others do.
+        let last = 5_000;
+        locks.push(lock(&h, last));
+        let record = add(&mut h, last, 50_000);
+        let now = h.now;
+        h.conductor.remove_client(last, now);
+        assert_eq!(h.conductor.gone.len(), spec::MAX_CLIENTS, "no place for it");
+        assert_eq!(h.counter(COUNTERS_RETIRED), 1);
+        assert_eq!(
+            h.counter(COUNTERS_HELD),
+            i64::try_from(spec::MAX_CLIENTS).expect("small")
+        );
+        h.now += 100 * SECOND;
+        h.cycle();
+        assert!(held(&h, record), "it is given to nobody");
+        // The others' processes end: every one of their records is let go.
+        drop(locks);
+        h.now += spec::nanos(spec::LOCK_CHECK_INTERVAL) + MS;
+        h.cycle();
+        assert_eq!(h.counter(COUNTERS_HELD), 0);
+        assert!(h.conductor.gone.is_empty());
+    }
+
+    /// A lock file that is no longer there tells the driver nothing: only the driver
+    /// removes one, after it has taken the lock. What that client left is put out of
+    /// use, and is never taken for released.
+    #[test]
+    fn a_lock_file_that_was_removed_by_another_hand_is_no_answer() {
+        let mut h = Harness::new("held-no-file");
+        let _held_by_client = lock(&h, 7);
+        let record = add(&mut h, 7, 100);
+        let now = h.now;
+        h.conductor.remove_client(7, now);
+        assert_eq!(h.counter(COUNTERS_HELD), 1);
+        std::fs::remove_file(h.conductor.client_gone_path(7)).expect("removed by hand");
+        h.now += spec::nanos(spec::LOCK_CHECK_INTERVAL) + MS;
+        h.cycle();
+        assert_eq!(h.counter(COUNTERS_HELD), 0);
+        assert_eq!(h.counter(COUNTERS_RETIRED), 1);
+        h.now += 100 * SECOND;
+        h.cycle();
+        assert!(held(&h, record));
     }
 }

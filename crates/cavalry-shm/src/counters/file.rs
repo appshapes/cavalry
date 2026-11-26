@@ -326,6 +326,14 @@ impl CountersFile {
         self.free(id, super::layout::HELD)
     }
 
+    /// Whether record `id` is held: freed, with no deadline after which it may be
+    /// allocated again ([`hold`](Self::hold)). [`CountersError::Id`] when `id` is not
+    /// below the capacity.
+    pub fn is_held(&self, id: u32) -> Result<bool, CountersError> {
+        let record = self.mapped.record(id)?;
+        Ok(record.state()? == State::Reclaimed && record.reclaim_deadline() == super::layout::HELD)
+    }
+
     /// Whether the writer of held record `id` has let it go: its release word reads 1,
     /// with an acquire load (`spec/counters-file.md`, "Value slot").
     /// [`CountersError::Id`] when `id` is not below the capacity.
@@ -340,11 +348,10 @@ impl CountersFile {
     /// below the capacity, and [`CountersError::NotHeld`] when the record is not held,
     /// which changes nothing.
     pub fn let_go(&mut self, id: u32, reusable_after: i64) -> Result<(), CountersError> {
-        let record = self.mapped.record(id)?;
-        if record.state()? != State::Reclaimed || record.reclaim_deadline() != super::layout::HELD {
+        if !self.is_held(id)? {
             return Err(CountersError::NotHeld { id });
         }
-        record.set_reclaim_deadline(reusable_after);
+        self.mapped.record(id)?.set_reclaim_deadline(reusable_after);
         Ok(())
     }
 
