@@ -34,8 +34,10 @@ Checks:
           in scripts/changelog.py, which reads the change's two ends, from the
           commit where its head left the base's history)
 
-The range: $LINT_DOCS_RANGE if set; in CI, origin/<base>...HEAD for a pull request and
-<before>..<after> for a push (HEAD~1..HEAD when <before> is the null commit); on a
+The range: $LINT_DOCS_RANGE if set; in CI, origin/<base>...HEAD for a pull request,
+<before>..<after> for a push (HEAD~1..HEAD when <before> is the null commit), and for
+a run by hand, by a schedule or by a call, origin/<default>...HEAD at a branch that is
+not the default one and HEAD~1..HEAD at the default branch or a tag; on a
 laptop, HEAD against the working tree when anything is modified or untracked, else
 HEAD~1..HEAD, which checks the commit just made.
 
@@ -278,10 +280,35 @@ def pick_range() -> tuple[str | None, str | None]:
             return "HEAD~1", "HEAD"
         return before, "HEAD"
     if event:
-        return "HEAD~1", "HEAD"
+        return other_event_range()
     dirty = git("status", "--porcelain", "--untracked-files=all").strip()
     if dirty:
         return "HEAD", None
+    return "HEAD~1", "HEAD"
+
+
+def other_event_range() -> tuple[str, str]:
+    """The range of a run that is neither a pull request's nor a push's: one started by
+    hand, by a schedule, or by a workflow that calls `ci.yml`, as `macos.yml` does.
+
+    At a branch that is not the default one, it is the branch's own change, from where
+    the branch left the default branch, as a pull request's run reads it. The last
+    commit alone would read a branch's second edit of its own new ADR as a change to
+    an accepted decision, and stop the job before its later steps (work item 479). At
+    the default branch, at a tag, or at a branch that has nothing of its own, it is
+    the last commit, as before."""
+    ref = os.environ.get("GITHUB_REF", "")
+    default = "master"
+    path = os.environ.get("GITHUB_EVENT_PATH")
+    if path and Path(path).exists():
+        try:
+            default = json.loads(Path(path).read_text()).get("repository", {}).get("default_branch") or default
+        except (ValueError, AttributeError):
+            pass
+    if ref.startswith("refs/heads/") and ref != f"refs/heads/{default}":
+        base = git("merge-base", f"origin/{default}", "HEAD", check=False).strip()
+        if base and base != git("rev-parse", "HEAD").strip():
+            return base, "HEAD"
     return "HEAD~1", "HEAD"
 
 

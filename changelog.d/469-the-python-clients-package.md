@@ -14,4 +14,4 @@
   is found nowhere names every path that was tried and what to do.
 - `just package` builds the Python client's wheel, installs it into a new environment
   outside the checkout and runs the client README's example there. CI runs it on
-  Linux for every pull request and on macOS too for every commit on `master`.
+  Linux for every pull request and every commit on `master`, and on macOS each week.
