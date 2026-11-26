@@ -89,10 +89,15 @@ pub fn path(dir: &Path, client_id: i64, suffix: &str) -> PathBuf {
 }
 
 /// The client id in the name of a file of `clients/` with `suffix`: the decimal
-/// number before it, as [`path`] writes it. `None` for a name that is no such file.
+/// number before it, as [`path`] writes it, so that one id has one name. `None` for a
+/// name that is no such file, a number with a zero before it among them: `041.lock` is
+/// not client 41's file.
 pub fn client_id(file_name: &str, suffix: &str) -> Option<i64> {
     let id = file_name.strip_suffix(suffix)?;
     if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if id.len() > 1 && id.starts_with('0') {
         return None;
     }
     id.parse().ok()
@@ -122,6 +127,7 @@ mod tests {
         );
         assert_eq!(client_id("41.lock", ".lock"), Some(41));
         assert_eq!(client_id("41.gone", ".gone"), Some(41));
+        assert_eq!(client_id("0.lock", ".lock"), Some(0));
         for name in [
             "41.gone",
             ".lock",
@@ -129,6 +135,8 @@ mod tests {
             "+41.lock",
             "-41.lock",
             "41-1.lock",
+            "041.lock",
+            "00.lock",
             "notes",
         ] {
             assert_eq!(client_id(name, ".lock"), None, "{name}");

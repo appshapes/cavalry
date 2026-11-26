@@ -455,9 +455,26 @@ fn a_ring_has_one_consumer_and_only_its_creator_hands_it_out() {
     );
     assert!(opened.producer(TIMEOUT).is_ok(), "an opened ring produces");
 
-    // Dropping the consumer lets the creator hand out another; still one at a time.
+    // A second handle on a mapping is that mapping: a share of the creator's ring is
+    // refused a second consumer as the ring is, and a share of an opened ring is
+    // refused one as that ring is. Both produce.
+    let shared = ring.share();
+    let refused = shared.consumer(TIMEOUT).unwrap_err();
+    assert!(
+        refused.to_string().contains("already has a consumer"),
+        "{refused}"
+    );
+    assert!(shared.producer(TIMEOUT).is_ok(), "a shared ring produces");
+    let refused = opened.share().consumer(TIMEOUT).unwrap_err();
+    assert!(
+        refused.to_string().contains("only the driver that created"),
+        "{refused}"
+    );
+
+    // Dropping the consumer lets the creator hand out another; still one at a time,
+    // through whichever handle.
     drop(consumer);
-    let _again = ring.consumer(TIMEOUT).unwrap();
+    let _again = shared.consumer(TIMEOUT).unwrap();
     assert_eq!(ring.consumer(TIMEOUT).unwrap_err().reason(), "io");
 }
 
