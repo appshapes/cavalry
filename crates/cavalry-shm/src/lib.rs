@@ -8,6 +8,8 @@ pub mod command_ring;
 pub mod counters;
 pub mod log;
 pub mod spsc;
+// A new shared file is given its room before it is mapped (ADR 0175).
+pub(crate) mod allocate;
 // Every mapping is made resident when it is made (ADR 0027).
 pub(crate) mod pretouch;
 pub(crate) mod sync;

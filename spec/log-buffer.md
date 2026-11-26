@@ -50,9 +50,12 @@ correlation id that is a live publication's leaves that publication its log. And
 one that the driver cannot remove either, as in a directory made read-only after
 the file was created, stays until the driver's next start in that directory, which
 removes whatever the directory held. On Linux the step that fails where a
-filesystem has no room is the making of the pages resident, by the kernel's populate
-advice, which a kernel from 5.14 has; this paragraph is of a driver on such a
-kernel.
+filesystem has no room is the first after the file's creation: the driver asks the
+filesystem for the room of the whole file before it maps it. On a tmpfs, which
+the default driver directory is on wherever `/dev/shm` exists, no page of a mapping
+is then touched that the filesystem cannot back. That is so on a kernel with the populate advice and on one
+before 5.14 without it, where a touch of such a page was a bus error and the end of
+the driver (ADR 0175).
 
 ## Header
 

@@ -14,6 +14,7 @@ use cavalry_proto::frame::{
 };
 use memmap2::{Mmap, MmapMut, MmapOptions};
 
+use crate::allocate;
 use crate::pretouch;
 
 use super::LogError;
@@ -440,12 +441,13 @@ impl LogBuffers {
         position: i64,
     ) -> Result<Arc<Mapped>, LogError> {
         let length = fields.file_length();
-        file.set_len(length)?;
+        allocate::sized(file, length)?;
         // SAFETY: memmap2 marks mapping a file `unsafe` because another process could
-        // truncate it under the mapping and turn a load into a fault. This call created
-        // the file, in the driver's directory, the trust boundary every shared layout
-        // assumes (ADR 0010 bounds the values a peer writes, not whether the file
-        // exists); a truncation is a fault, never silent misbehaviour.
+        // truncate it under the mapping and turn a load into a fault. The caller,
+        // `create_at`, has just created the file, in the driver's directory, the trust
+        // boundary every shared layout assumes (ADR 0010 bounds the values a peer
+        // writes, not whether the file exists); a truncation is a fault, never silent
+        // misbehaviour.
         let map = unsafe { MmapOptions::new().len(length as usize).map_mut(file)? };
         pretouch::writable(&map)?;
         let mapped = Arc::new(Mapped::new(Map::Writer(map), *fields)?);

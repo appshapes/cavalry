@@ -38,7 +38,7 @@ Protocol).
 | --- | --- | --- |
 | `frame.md`, the data frame header | 0 | ADR 0008 |
 | `counters-file.md`, the counters file | 1 | ADR 0012, ADR 0062, ADR 0179 |
-| `log-buffer.md`, the log buffer | 1 | ADR 0013, ADR 0040, ADR 0048, ADR 0066, ADR 0097, ADR 0172 |
+| `log-buffer.md`, the log buffer | 1 | ADR 0013, ADR 0040, ADR 0048, ADR 0066, ADR 0097, ADR 0172, ADR 0175 |
 | `command-ring.md`, the command ring | 1 | ADR 0014, ADR 0018 |
 | `broadcast-buffer.md`, the broadcast buffer | 0 | ADR 0014 |
 | `client-protocol.md`, the client protocol | 11 | ADR 0019, ADR 0025, ADR 0030, ADR 0031, ADR 0040, ADR 0049, ADR 0053, ADR 0059, ADR 0062, ADR 0064, ADR 0065, ADR 0068, ADR 0069, ADR 0072, ADR 0097, ADR 0098, ADR 0099, ADR 0103, ADR 0153, ADR 0154, ADR 0179 |

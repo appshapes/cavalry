@@ -147,13 +147,15 @@ jobs:
       - run: just lint
       - run: just test
       # A driver whose directory has no room for a log (CLAUDE.md, gate 3, "shm
-      # exhaustion"; ADR 0172). The failure is Linux's: making a new log's pages
-      # resident fails on a filesystem that cannot back them, after the file exists.
-      # The runner mounts the small filesystem, 64 MiB as a container's default
-      # /dev/shm is, since a test cannot.
-      # The kernel's release is printed because the failure needs its populate advice,
-      # 5.14 and later: on an earlier one the test dies of a bus error (work item 497).
-      - if: runner.os == 'Linux'
+      # exhaustion"; ADR 0172, ADR 0175). It is Linux's test: the driver asks the
+      # filesystem for a new file's room before it maps it, and is refused. The runner
+      # mounts the small filesystem, 64 MiB as a container's default /dev/shm is, since a
+      # test cannot. The recipe runs the test twice, the second time as a kernel before
+      # 5.14 runs it, without the populate advice, which no runner's kernel is: the
+      # release is printed so that a log says which kernel the first run was of. It then
+      # runs the three tests of the allocation that need a tmpfs with no room.
+      - name: just shm-exhaustion, a driver directory with no room
+        if: runner.os == 'Linux'
         run: |
           uname -r
           sudo mkdir -p /mnt/cavalry-no-room
