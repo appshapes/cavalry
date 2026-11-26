@@ -116,6 +116,12 @@ feature that followed this page, commit by commit.
      well, `cargo check -p <crate> --target x86_64-unknown-freebsd`, since on Linux and
      macOS exactly one arm is live and an arm that is dead or doubled there shows only
      elsewhere.
+   - A new or changed test that waits on a clock, a socket or another process runs
+     twenty times in a row on both of CI's runners before the pull request opens
+     ([Run a test many times in a row](run-a-test-many-times.md)), and the run's link
+     goes in the body. A pull request and `master`'s commit run it on Linux alone, and
+     the macOS gates run each week, so those twenty runs are the only ones on the
+     macOS runner that name the change.
    - A person: `/commit <work item>` runs the four gates, then `git add`, `git commit`,
      `git pull --no-edit` and `git push` to `master`. The message is the review record.
      Subject: `<work item>: <Imperative subject>`. Body: what changed, which invariant by
@@ -151,9 +157,13 @@ feature that followed this page, commit by commit.
 - `git log --oneline --grep '^<work item>:' origin/master` lists the feature's commits,
   each with the prefix.
 - `gh run list --branch master --workflow ci --commit <full sha>` shows the `ci` run
-  green, with `gates (linux)` and `gates (macos)` both passed. `gates (macos)` runs for
-  `master`'s commit and not for the pull request, so this is where a change that
-  breaks macOS alone shows: fix it forward in the same session.
+  green, with its one job, `gates (linux)`, passed. A red one is yours to fix forward
+  in the same session. The run has no macOS job: the macOS gates run each week at
+  `master`'s head and at a release
+  ([ADR 0170](../decisions/0170-run-the-macos-gates-each-week-and-at-a-release-and-not-for-every-commit.md)),
+  so a change that breaks macOS alone and passed the laptop's gates shows in the
+  week's run
+  ([Read the weekly run of the macOS gates](read-the-weekly-run-of-the-macos-gates.md)).
 - If that run reads `cancelled` and `gh run view <run id>` lists no jobs, nothing
   failed: another commit landed on `master` while your run waited. Runs on `master`
   go one at a time with one waiting, and a newer push takes the waiting run's place

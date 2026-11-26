@@ -44,9 +44,9 @@ first one. Why the loop is built this way is in ADR 0004
      pull request merges as one squash commit when the required check passes, and the
      issue closes, so an approval
      given while a check still runs merges nothing that check would stop. A pull
-     request has no `gates (macos)` check: that job runs for `master`'s commit after
-     the merge
-     ([ADR 0073](../decisions/0073-run-the-macos-gates-for-master-and-not-for-pull-requests.md)).
+     request has no `gates (macos)` check: the macOS gates run each week at
+     `master`'s head and at a release
+     ([ADR 0170](../decisions/0170-run-the-macos-gates-each-week-and-at-a-release-and-not-for-every-commit.md)).
      The one required check is `gates (linux)`: no change takes a bench host, and the
      latency gate runs each night on `master`
      ([ADR 0139](../decisions/0139-run-the-latency-gate-each-night-as-a-coarse-check.md)).
@@ -55,8 +55,10 @@ first one. Why the loop is built this way is in ADR 0004
      head, disarms the merge; the reviewer's approval of the new head arms it again.
 
    The `gates` job runs `just lint`, `just test`, `just conformance`, `just loom`,
-   `just miri`, `just docs` and `just lint-docs`, on Linux for a pull request and on
-   Linux and macOS for `master`. The `bench` workflow runs `just bench` and `just
+   `just miri`, `just docs` and `just lint-docs`, on Linux for a pull request and for
+   `master`. The `macos` workflow runs the same job on macOS each Monday and by hand
+   ([Read the weekly run of the macOS gates](read-the-weekly-run-of-the-macos-gates.md)).
+   The `bench` workflow runs `just bench` and `just
    bench-compare` on the two bench hosts, `bench` and `grip`, each night and on demand,
    and is no check of a pull request
    ([Run the bench](run-the-bench.md)).

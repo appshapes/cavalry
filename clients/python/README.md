@@ -637,7 +637,8 @@ and prints the same line.
 
 `just package` does all of this with a driver of its own
 (`scripts/package.sh`, `scripts/package-python.py`), and CI runs it on Linux for every
-pull request and on macOS too for every commit on `master`. It builds the wheel
+pull request and every commit on `master`, and on macOS each week and at a release.
+It builds the wheel
 through pip and again with the backend run as a program, and fails unless the two are
 the same bytes. It checks that the wheel holds the library `cargo` built under the tag
 that a second reader gives it, `objdump` on Linux and `otool` on macOS, and on Linux

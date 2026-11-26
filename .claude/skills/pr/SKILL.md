@@ -230,10 +230,12 @@ gh pr checks <number>
   say which landings it covers, since a run that did not happen cannot be linked.
   When a run that covers several landings is red, the failed job's log says whose
   change it is: fix yours forward, and tell the session whose it is when it is not
-  yours. The run is the first of
-  `gates (macos)` for the change, which a pull request does not have (ADR 0073): a
-  red one there is yours to fix forward, before the work item and before any other work.
-  It has no bench job (ADR 0139). Then comment the commit hash and the run on the work item (`brigade
+  yours. A red run there is yours to fix forward, before the work item and before
+  any other work. It has one job, `gates (linux)`: no bench job (ADR 0139), and no
+  macOS job, since the macOS gates run each week at `master`'s head and at a release
+  (ADR 0170; `docs/how-to/read-the-weekly-run-of-the-macos-gates.md`). The gates you
+  ran on the laptop are the change's macOS result until then, so say in the body
+  what ran there. Then comment the commit hash and the run on the work item (`brigade
   work-item comment <number>`, the text on stdin), and run `just tidy`: it retires the
   branch locally, with its worktree, and GitHub has already deleted it on origin. The
   work item moves to Done only when this was its last pull request and every "Done
