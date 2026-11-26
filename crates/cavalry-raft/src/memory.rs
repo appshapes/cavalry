@@ -828,11 +828,16 @@ impl Io for MemberIo<'_> {
         if !held {
             return Ok(false);
         }
-        // How an earlier replay to the member ended is forgotten.
+        // How an earlier replay to the member id ended is forgotten, whichever of its
+        // runs it went to.
         let from = self.own;
-        self.world
-            .replays
-            .retain(|replay| !(replay.from == from && replay.to == to));
+        let World { disks, replays, .. } = &mut self.world;
+        replays.retain(|replay| {
+            replay.from != from
+                || disks
+                    .get(replay.to)
+                    .is_none_or(|disk| disk.member != member)
+        });
         self.world.replays.push(Replay {
             from,
             to,
@@ -1453,7 +1458,7 @@ impl Cluster {
             .zip(&self.world.disks)
             .filter(|(core, disk)| core.role() == Role::Leader && !disk.halted && !disk.stalled)
             .max_by_key(|(core, _)| core.leadership_term_id())
-            .map(|(core, _)| core.member_id())
+            .map(|(_, disk)| disk.id)
     }
 
     /// Offers `payload` to the leader as its own process does, and returns the
@@ -1876,6 +1881,21 @@ impl Cluster {
     /// it there; what the second run sends reaches its peers, as datagrams from another
     /// host's address do, and they read it as the member id's. `None` for an id that is
     /// no member's, or one that has a second run already.
+    ///
+    /// ```
+    /// use cavalry_raft::ElectionState;
+    /// use cavalry_raft::memory::Cluster;
+    ///
+    /// let mut cluster = Cluster::with_election(&[0, 1, 2], 1).expect("three members");
+    /// cluster.run_ms(2_000);
+    /// let twin = cluster.start_twin(1).expect("a second run of member 1");
+    /// assert_eq!(twin, 1_001);
+    /// cluster.run_ms(2_000);
+    /// // It hears nothing: it canvasses on, with nothing received.
+    /// let second = cluster.member(twin).expect("the second run");
+    /// assert_eq!(second.election_state(), ElectionState::Canvass);
+    /// assert_eq!(cluster.append_position(twin), Some(0));
+    /// ```
     pub fn start_twin(&mut self, member: i32) -> Option<i32> {
         let place = self.members.iter().position(|&id| id == member)?;
         let name = TWIN.saturating_add(member);
@@ -1899,7 +1919,26 @@ impl Cluster {
     /// what is sent to the member id from now on reaches `run`, and so does what is in
     /// flight to it, since a datagram goes where its address is when it arrives. The
     /// run that held the address hears nothing more and its image of the log goes
-    /// silent, while what it sends still reaches its peers.
+    /// silent, while what it sends still reaches its peers. A replay to the member id
+    /// moves with the address, and so do a message a test holds back for it and a
+    /// loss of its floor answers that a test set.
+    ///
+    /// ```
+    /// use cavalry_raft::ElectionState;
+    /// use cavalry_raft::memory::Cluster;
+    ///
+    /// let mut cluster = Cluster::with_election(&[0, 1, 2], 1).expect("three members");
+    /// cluster.run_ms(2_000);
+    /// let leader = cluster.leader().expect("a leader");
+    /// let member = [0, 1, 2].into_iter().find(|&id| id != leader).expect("a follower");
+    /// let twin = cluster.start_twin(member).expect("a second run");
+    /// cluster.move_address(twin);
+    /// cluster.run_ms(5_000);
+    /// // The second run follows the leader now, as the member id.
+    /// let second = cluster.member(twin).expect("the second run");
+    /// assert_eq!(second.election_state(), ElectionState::Closed);
+    /// assert_eq!(second.leader_member_id(), leader);
+    /// ```
     pub fn move_address(&mut self, run: i32) {
         let Some(to) = self.index(run) else {
             return;
@@ -1922,11 +1961,34 @@ impl Cluster {
         }
         self.world.addressed.retain(|&(id, _)| id != member);
         self.world.addressed.push((member, to));
-        let World { net, held_back, .. } = &mut self.world;
+        let World {
+            net,
+            held_back,
+            hold_back,
+            replays,
+            answers_lost,
+            ..
+        } = &mut self.world;
         for flight in net.iter_mut().chain(held_back.iter_mut()) {
             if flight.to == from {
                 flight.to = to;
             }
+        }
+        // A replay to the member id's catch-up endpoint goes to its address too, and so
+        // do the faults a test set on what is sent to the member id.
+        for replay in replays.iter_mut() {
+            if replay.to == from {
+                replay.to = to;
+            }
+        }
+        for held in hold_back.iter_mut() {
+            if held.1 == from {
+                held.1 = to;
+            }
+        }
+        let lost = answers_lost.get(from).copied().unwrap_or(false);
+        if let Some(slot) = answers_lost.get_mut(to) {
+            *slot = lost;
         }
     }
 

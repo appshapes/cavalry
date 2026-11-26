@@ -122,6 +122,12 @@ fn a_member_id_runs_once_on_one_host() {
 /// binds the address it resolved.
 #[test]
 fn a_member_whose_endpoints_are_another_hosts_is_refused_at_its_start() {
+    // A host that binds an address it does not hold (Linux's `ip_nonlocal_bind`) or
+    // that holds this one cannot show the refusal: the test says so and ends.
+    if std::net::UdpSocket::bind(("192.0.2.1", 0)).is_ok() {
+        eprintln!("this host binds 192.0.2.1, so it shows no refusal of another host's address");
+        return;
+    }
     let dir = TestDir::new("not-this-host");
     let (members, consensus) = members_string("192.0.2.1");
     let (driver_dir, log_dir) = (dir.path().join("driver"), dir.path().join("log"));
