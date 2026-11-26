@@ -12,9 +12,23 @@
 # client README's example there against this driver, and shows that the same wheel
 # without its library fails. A client's package joins here with a script of its own.
 #
+# On Linux all of this runs at the floor, glibc 2.28, in the container that
+# scripts/floor.sh starts, which needs Docker (ADR 0178;
+# docs/how-to/build-a-native-artefact-at-the-floor.md).
+#
 # Nothing is published and nothing comes from a package index.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+# On Linux the whole of this runs at the floor, glibc 2.28, in the container that
+# scripts/floor.sh starts: what is built below is linked there, and the package is
+# installed and run there (ADR 0178). On macOS it runs as it is.
+# scripts/floor.sh sets CAVALRY_AT_FLOOR to the floor's glibc, and this system is the
+# floor's container when that is the glibc it has: a variable left in a shell does not
+# keep the run on the host.
+if [ "$(uname -s)" = Linux ] && [ "${CAVALRY_AT_FLOOR:-}" != "$(ldd --version 2>/dev/null | sed -n '1s/.* //p')" ]; then
+    exec scripts/floor.sh bash scripts/package.sh
+fi
 
 if [ -d /dev/shm ]; then base=/dev/shm; else base="${TMPDIR:-/tmp}"; fi
 export CAVALRY_DIR="${base%/}/cavalry-package-$$"
@@ -32,6 +46,13 @@ trap cleanup EXIT
 echo "package: build the driver and the library"
 cargo build --release -p cavalry --bin cavalry
 cargo build --release -p cavalry-ffi --lib
+
+# The floor's check (ADR 0178): neither file may need a newer glibc than the floor's,
+# nor load a library a system of the floor may lack. Here it is true by how they were
+# built; the check is what fails when the image, the toolchain or a dependency moves.
+if [ "$(uname -s)" = Linux ]; then
+    python3 scripts/glibc-floor.py target/release/libcavalry_ffi.so target/release/cavalry
+fi
 
 echo "package: cavalry run, in the background, on $CAVALRY_DIR"
 target/release/cavalry run &

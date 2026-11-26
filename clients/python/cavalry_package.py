@@ -18,8 +18,9 @@ checkout this file sits in, which `cargo build --release -p cavalry-ffi --lib` w
 A wheel with a native library inside is for one platform, and its file name says which.
 The tag is read from the library itself, never from the machine that builds: the least
 macOS a Mach-O library says it runs on, or the newest glibc symbol version an ELF
-library needs. A library this file cannot read, or cannot name a platform for, is
-refused, and no wheel is written. There is no source distribution: the library is Rust,
+library needs, and never an older glibc than 2.28, the oldest Cavalry's own packages
+are built for and run on (ADR 0178). A library this file cannot read, or cannot name a
+platform for, is refused, and no wheel is written. There is no source distribution: the library is Rust,
 and a source distribution would hold none.
 
 The entries are written in one order with one timestamp, so one library and one
@@ -47,6 +48,14 @@ SOURCES = ("cavalry/__init__.py", "cavalry/_abi.py")
 HELP = "see clients/python/README.md#the-package"
 
 _ELF_MACHINES = {62: "x86_64", 183: "aarch64"}
+# The floor: the oldest glibc a tag of this backend names (ADR 0178). Cavalry's packages
+# are built against it and run on it in the package's gate, and on nothing older, so a
+# tag promises nothing older whatever the library asks for. It is also above the oldest
+# tag an installer matches, `manylinux_2_5` on x86_64 and `manylinux_2_17` on aarch64.
+_GLIBC_FLOOR = (2, 28)
+# A library linked with packed relative relocations asks its loader for this version
+# name, which has no number in it and which glibc has from 2.36.
+_GLIBC_NAMES = {b"GLIBC_ABI_DT_RELR": (2, 36)}
 _MACHO_CPUS = {0x0100000C: "arm64", 0x01000007: "x86_64"}
 _ET_DYN = 3
 _SHT_GNU_VERNEED = 0x6FFFFFFE
@@ -87,9 +96,12 @@ def library_path():
 def _elf_platform(data, path):
     """`("libcavalry_ffi.so", "manylinux_X_Y_<machine>")` for a 64-bit little-endian ELF
     library: X.Y is the newest `GLIBC_X.Y` among the symbol versions its version-needs
-    section asks of the libraries it loads, so the oldest glibc it runs on (PEP 600). A
+    section asks of the libraries it loads, so the oldest glibc it runs on (PEP 600),
+    and the floor, 2.28, for a library that asks for less (ADR 0178). A
     version with a third number, `GLIBC_2.3.4`, is written as the next a tag can say,
-    2_4, as a Mach-O library's is. An entry's offset to the next is followed, an offset
+    2_4, as a Mach-O library's is, and `GLIBC_ABI_DT_RELR` is read as the glibc that
+    first has it, 2.36. Any other `GLIBC_` name with no number, `GLIBC_PRIVATE` among
+    them, refuses the library: no tag would be true of it. An entry's offset to the next is followed, an offset
     of zero ends a list whatever its count says, and no list is read past the entries
     its section has room for."""
     if len(data) < 64:
@@ -130,8 +142,17 @@ def _elf_platform(data, path):
                     _, _, _, name, aux_following = struct.unpack_from("<IHHII", data, at)
                     end = data.index(b"\0", strings + name)
                     version = re.fullmatch(rb"GLIBC_(\d+)\.(\d+)(?:\.(\d+))?", data[strings + name:end])
+                    found = _GLIBC_NAMES.get(data[strings + name:end])
                     if version is not None:
                         found = (int(version.group(1)), int(version.group(2)) + (1 if int(version.group(3) or 0) else 0))
+                    elif found is None and data[strings + name:end].startswith(b"GLIBC_"):
+                        unknown = data[strings + name:end].decode("ascii", "replace")
+                        raise PackageError(f"{path} asks its C library for {unknown}, a version name of glibc "
+                                           f"with no number, and this backend does not know which glibc first "
+                                           f"has it, so it has no tag that is true of the library; build "
+                                           f"cavalry-ffi at the floor with scripts/floor.sh, as `just package` "
+                                           f"does; {HELP}")
+                    if found is not None:
                         newest = found if newest is None or found > newest else newest
                     if aux_following == 0:
                         break
@@ -146,6 +167,7 @@ def _elf_platform(data, path):
         raise PackageError(f"{path} asks for no GLIBC symbol version, so it was not linked against glibc, and this "
                            f"backend has a tag for glibc's Linux alone (manylinux); build cavalry-ffi for a "
                            f"`-linux-gnu` target; {HELP}")
+    newest = max(newest, _GLIBC_FLOOR)
     return "libcavalry_ffi.so", f"manylinux_{newest[0]}_{newest[1]}_{_ELF_MACHINES[machine]}"
 
 
