@@ -28,6 +28,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use cavalry_driver::IdleStrategy;
 use cavalry_log::catalog::CatalogReader;
 use cavalry_log::layout::{Descriptor, State as SlotState, locate};
+use cavalry_proto::client_protocol::{CLIENT_GONE_SUFFIX, CLIENT_LOCK_DIRECTORY};
 use cavalry_proto::cluster::{
     CONTROL_TOGGLE_SNAPSHOT, EMPTY_MEMBER, Endpoint, LEADER_HEARTBEAT_TIMEOUT_NS, MAX_MEMBERS,
     STARTUP_CANVASS_TIMEOUT_NS, control_toggle_id, parse_members, quorum,
@@ -40,7 +41,7 @@ use cavalry_shm::counters::generated::{
     CHANNEL_DESTINATIONS, CHANNEL_IMAGES, CHANNEL_PUBLICATIONS, CHANNEL_SOCKET_RCVBUF,
     CHANNEL_SOCKET_SNDBUF, CHANNEL_STATUS, CLIENT_CONDUCTOR_PARKS_OVERDUE,
     CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_COUNTER, COUNTERS, COUNTERS_ALLOCATED,
-    COUNTERS_ALLOCATION_FAILED, IMAGE_CREATED, IMAGE_ENDED, IMAGE_HWM_POSITION,
+    COUNTERS_ALLOCATION_FAILED, COUNTERS_HELD, IMAGE_CREATED, IMAGE_ENDED, IMAGE_HWM_POSITION,
     IMAGE_REBUILD_POSITION, PUBLICATION_LIMIT, PUBLICATION_POSITION, RECORDING_ARMED,
     RECORDING_ARMED_DROPPED, RECORDING_ARMED_FAILED, RECORDING_ARMED_STARTED, RECORDING_BYTES,
     RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_SYNCED_POSITION, RECORDING_WRITE_FAILED,
@@ -70,6 +71,7 @@ use cavalry_shm::counters::generated::{
 use cavalry_shm::counters::generated::{
     DRIVER_REGISTRY_FULL, PUBLICATION_ADD_DEFERRED_WAITING, SUBSCRIPTION_ADD_DEFERRED_WAITING,
 };
+use cavalry_shm::counters::layout::VERSION as COUNTERS_VERSION;
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
 use crate::config::Config;
@@ -96,6 +98,10 @@ const DOC_COUNTERS_FULL: &str = "docs/reference/counters-file.md#when-the-file-i
 /// to do (work item 452).
 const DOC_HELD_ADDS: &str = "docs/how-to/publish-between-two-hosts.md#when-it-does-not-work";
 const DOC_COUNTERS: &str = "docs/reference/counters.md";
+const DOC_RECORDS: &str = "docs/reference/client-protocol.md#the-records-a-client-writes";
+/// How long a client that has gone may hold its lock before doctor names it: every
+/// client that closes holds it for a moment, until its objects are dropped.
+const GONE_CLIENT_SECONDS: i64 = 2;
 /// Where a consensus module's hold on its log directory is stated (ADR 0152).
 const DOC_LOG_DIRECTORY_HELD: &str = "docs/reference/durable-log.md#the-driver";
 const DOC_COUNTERS_REJECTS: &str = "docs/reference/counters-file.md#what-a-reader-rejects";
@@ -951,6 +957,25 @@ fn counters_checks(
             });
             return 1;
         }
+        // A file of a version after this program's: the driver there is of a newer
+        // build. The file's own message is for a client and its driver, which must stop
+        // together, and a restart remakes nothing that is wrong. This program only
+        // reads, and has one thing to do.
+        Err(CountersError::Version { found }) if found > COUNTERS_VERSION => {
+            findings.push(Finding {
+                check: "counters-file",
+                level: if running { Level::Fail } else { Level::Warn },
+                message: format!(
+                    "the counters file at {} is at version {found}, and this `cavalry doctor` \
+                     reads up to version {COUNTERS_VERSION}: the driver there is of a newer \
+                     build of Cavalry than this program, and nothing is wrong with its file; \
+                     run the `cavalry doctor` of the driver's own build",
+                    dir.display()
+                ),
+                doc: DOC_COUNTERS_REJECTS,
+            });
+            return 1;
+        }
         Err(error) => {
             findings.push(Finding {
                 check: "counters-file",
@@ -1011,6 +1036,7 @@ fn counters_checks(
             && def.id != RECORDING_WRITE_FAILED
             && def.id != RECORDING_INVALIDATED
             && def.id != RECORDING_ARMED
+            && def.id != COUNTERS_HELD
     }) {
         checks += 1;
         let Some(value) = read(def.name, def.id, findings) else {
@@ -1022,6 +1048,34 @@ fn counters_checks(
                 level: Level::Warn,
                 message: format!("{} is {value}: {}", def.name, def.doctor),
                 doc: DOC_COUNTERS,
+            });
+        }
+    }
+    // Records held for their writers (ADR 0179). The gauge alone is no finding: it is
+    // above 0 for a moment at every subscription and client that closes. A client
+    // that has gone and whose process still holds its lock is one: the driver has
+    // given its lock file the name `clients/<client id>.gone`, and removes the file
+    // within the lock check interval of the lock being let go.
+    checks += 1;
+    if let Some(held) = read("counters.held", COUNTERS_HELD, findings) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+            });
+        for (client, file) in gone_clients(dir, now) {
+            findings.push(Finding {
+                check: "counters.held",
+                level: Level::Warn,
+                message: format!(
+                    "client {client} closed or was timed out, and its process still holds \
+                     its lock, {CLIENT_LOCK_DIRECTORY}/{file}: a thread of it may still \
+                     store into its counters, so the driver gives their records to nobody. \
+                     counters.held is {held}. The process is stopped, or it keeps an object \
+                     of that client alive: continue or end the process, or drop the client \
+                     and what was made from it, and the records are free within a second"
+                ),
+                doc: DOC_RECORDS,
             });
         }
     }
@@ -4118,6 +4172,29 @@ fn list_of(items: &[&str]) -> String {
     }
 }
 
+/// The clients that have gone and whose lock the driver has not taken for
+/// [`GONE_CLIENT_SECONDS`], each with its file's name: the files
+/// `clients/<client id>.gone` whose name is that old, by the time the file's entry
+/// last changed, in order of client id. `now` is seconds since the Unix epoch.
+fn gone_clients(dir: &Path, now: i64) -> Vec<(i64, String)> {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(entries) = std::fs::read_dir(dir.join(CLIENT_LOCK_DIRECTORY)) else {
+        return Vec::new();
+    };
+    let mut clients: Vec<(i64, String)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            let client = cavalry_shm::client_lock::client_id(name, CLIENT_GONE_SUFFIX)?;
+            let changed = entry.metadata().ok()?.ctime();
+            (now.saturating_sub(changed) >= GONE_CLIENT_SECONDS).then(|| (client, name.to_owned()))
+        })
+        .collect();
+    clients.sort_unstable();
+    clients
+}
+
 fn finish(dir: &Path, mut findings: Vec<Finding>, checks: usize) -> Report {
     let rank = |level: Level| match level {
         Level::Fail => 0,
@@ -5848,6 +5925,108 @@ mod tests {
         ] {
             assert!(found.message.contains(words), "{words}: {}", found.message);
         }
+        assert!(report.ok(), "a warning does not fail: {report}");
+    }
+
+    /// A counters file of a version after this program's is a driver of a newer build,
+    /// and nothing is wrong with it: the finding says to run that build's `doctor`, and
+    /// does not say to stop or restart anything.
+    #[test]
+    fn a_counters_file_of_a_newer_build_says_to_run_that_builds_doctor() {
+        use std::os::unix::fs::FileExt;
+        let dir = TestDir::new("newer-counters");
+        let counters = CountersFile::create(&dir.0, 256).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        drop(counters);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.0.join("counters"))
+            .expect("the counters file");
+        file.write_all_at(&(COUNTERS_VERSION + 1).to_le_bytes(), 8)
+            .expect("the next version");
+        let report = examine(&dir.0);
+        let found: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|finding| finding.check == "counters-file")
+            .collect();
+        assert_eq!(found.len(), 1, "{report}");
+        let message = &found[0].message;
+        for words in [
+            "is at version 2",
+            "reads up to version 1",
+            "run the `cavalry doctor` of the driver's own build",
+        ] {
+            assert!(message.contains(words), "{words}: {message}");
+        }
+        for words in ["restart the driver", "Stop that driver"] {
+            assert!(!message.contains(words), "{words}: {message}");
+        }
+    }
+
+    /// A client that has gone and still holds its lock is named, with the file that
+    /// says so, once it has held it for longer than a closing client does (ADR 0179).
+    /// The gauge alone, which every close moves for a moment, is no finding.
+    #[test]
+    fn a_client_that_has_gone_and_holds_its_lock_is_named_by_its_file() {
+        let dir = TestDir::new("gone-client");
+        let _counters = CountersFile::create(&dir.0, 256).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let clients = dir.0.join(CLIENT_LOCK_DIRECTORY);
+        std::fs::create_dir(&clients).expect("the directory");
+        let gone_name = String::from("41.gone");
+        std::fs::write(clients.join(&gone_name), b"").expect("a gone client's file");
+        std::fs::write(clients.join("40.lock"), b"").expect("a running client's file");
+        std::fs::write(clients.join("notes.gone"), b"").expect("a file that names no client");
+        std::fs::write(clients.join("39-1.gone"), b"").expect("a name that is no client id");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after the epoch")
+            .as_secs();
+        let now = i64::try_from(now).expect("fits");
+        assert!(
+            gone_clients(&dir.0, now).is_empty(),
+            "a file renamed this second is a client that is closing"
+        );
+        assert_eq!(
+            gone_clients(&dir.0, now + GONE_CLIENT_SECONDS + 1),
+            vec![(41, gone_name.clone())]
+        );
+        assert!(gone_clients(&dir.0.join("nowhere"), now + 10).is_empty());
+
+        // The whole report, once the file is old enough.
+        std::thread::sleep(Duration::from_secs(
+            u64::try_from(GONE_CLIENT_SECONDS).expect("positive") + 1,
+        ));
+        let report = examine(&dir.0);
+        let found: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|finding| finding.check == "counters.held")
+            .collect();
+        assert_eq!(found.len(), 1, "{report}");
+        assert_eq!(found[0].level, Level::Warn);
+        let named = format!(
+            "client 41 closed or was timed out, and its process still holds its lock, \
+             clients/{gone_name}"
+        );
+        for words in [
+            named.as_str(),
+            "counters.held is 0",
+            "continue or end the process, or drop the client",
+        ] {
+            assert!(
+                found[0].message.contains(words),
+                "{words}: {}",
+                found[0].message
+            );
+        }
+        assert_eq!(
+            found[0].doc,
+            "docs/reference/client-protocol.md#the-records-a-client-writes"
+        );
         assert!(report.ok(), "a warning does not fail: {report}");
     }
 
