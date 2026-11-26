@@ -45,11 +45,13 @@ committed once a quorum, two of three, has it on disk.
   Until it has caught up, the cluster tolerates one failed member fewer. That is
   safe while each other member holds the log it kept, a new leadership term that the
   leader's sender held back by flow control included, and a report of its earlier run
-  that reaches the leader late included. It is not safe in one case:
-  another member that holds no log
+  that reaches the leader late included. Beside another member that holds no log
   either, because it started late and has not yet caught up, while the member that
-  holds the log is stopped. The two then elect as a new cluster does. A volume spares
-  the wait and both cases.
+  holds the log is stopped, the two elect nothing: the member on the empty directory
+  waits for every member's report, and `cluster.voters_unheard` counts the members it
+  waits for. Once the stopped member runs again, it leads
+  ([ADR 0174](../decisions/0174-have-a-member-that-holds-nothing-vote-only-once-every-voter-has-reported.md)).
+  A volume spares the wait.
 - Every member on this version of Cavalry. A member of a version in which the member
   with the lowest id was the leader casts no vote, so the two are not one cluster,
   and a log directory that version wrote is refused here. To move a cluster from

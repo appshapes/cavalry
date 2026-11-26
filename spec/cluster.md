@@ -1810,7 +1810,9 @@ answer to its present run, and joined the live log, which clears the floor ("A m
 that lost its log"; ADR 0145, ADR 0161, ADR 0163). It waits, taking no leader,
 while another voter is stopped. And beside a member that holds no log either, one
 that never caught up, while the member that holds the log is stopped, the two elect
-as a new cluster does, as "A member that lost its log" says. So a cluster that has
+nothing: the member on the new directory holds nothing, and waits for every voter's
+report, and once the third runs its report holds a log, so the two withhold and it
+leads, as "A member that lost its log" says (ADR 0174). So a cluster that has
 lost a member's log directory starts that member again on a new one and is back to
 its full count once the member has caught up. Where its leader's log no longer begins at position 0, the member cannot catch
 up, and the cluster is brought back to its full count by starting it again as a new
