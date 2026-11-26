@@ -140,7 +140,9 @@ more to write. It takes its client id from the ring's correlation id counter, so
 no two clients of one driver share an id. It creates its lock file through the handle
 on `clients/`, and takes its lock ("The records a client writes"). Then it sends its
 first command. A command ring with no `clients/` beside it is read again, as a file
-that is still being created is (below).
+that is still being created is (below). A `clients/` that is there and cannot be
+opened, or that is a file or a link and no directory, is refused at once, with its
+path.
 
 That order makes everything a client holds one driver's, and its lock file that
 driver's client's, with no clock and no name in the reason. A file is made in no
@@ -160,21 +162,37 @@ makes later is a second handle on one of those it opened then, and never a file
 opened by its name.
 
 A driver that removes `clients/` while a client of the driver before it is making
-its file there can find the directory not empty. It fails to start, with the error
-of that step, and the next start removes the file.
+its file there can find the directory not empty. Such a client makes one file, so
+the driver removes the directory once more. A start that still finds it not empty
+fails, with an error that says to start the driver again, and has created nothing.
 
-The driver learns of a client from the first command that names its client
-id. When a client closes or is timed out, the driver notes it as a client that has
-gone until it has taken that client's lock and has nothing of the client's left to
-free, and then forgets it. A command that names a client that has gone is dropped: the
-driver registers nobody for it and answers nothing. Such a command is certain to come
-from a client that was stopped past its timeout: continued, its conductor sends a
-keepalive before it reads its `client timeout`. Once the driver has taken a client's
-lock, nothing of that client is left to send. A client that the driver cannot ask
-about ("The records a client writes") is forgotten when it goes, so a command that
-arrives from it afterwards is a new client's first command. It is the client that acts on `client timeout`: a client that receives one
-with its own id closes, since its publications and subscriptions are gone. A first command that finds the client registry
-full is answered with error code 10 and registers nothing.
+The driver learns of a client from the first command that names its client id. When
+a client closes or is timed out, the driver notes it as a client that has gone, and
+forgets it when three things hold: it has taken the client's lock, nothing of the
+client's is left to free, and it has read the command ring up to where the ring's
+producers stood when it took the lock. A command that names a client that has gone
+is dropped: the driver registers nobody for it and answers nothing, and
+`client_protocol.dropped_command` counts it. Such a command is certain to come from
+a client that was stopped past its timeout: continued, its conductor sends a
+keepalive before it reads its `client timeout`. A client writes a command before it
+lets go of its lock, so every command of a client is in the ring before the driver
+can take the lock, and the driver has read them all, and dropped them, before it
+forgets the client: no command of a client that has gone registers a client again.
+
+A first command whose client's lock the driver can take is of a client that has
+ended since it wrote the command: its process ended, or everything of it was
+dropped. The driver registers nobody for it, removes the file, drops the command
+and counts it, and notes the client as one that has gone and whose lock is taken, so
+that what else it wrote is dropped the same way.
+
+A client that the driver cannot ask about ("The records a client writes") is
+forgotten when it goes, so a command that arrives from it afterwards is a new
+client's first command. One that went while the driver's list of the clients that
+have gone was full still holds its lock, on a file that was never renamed, and is
+registered with it. It is the client that acts on `client timeout`: a client that
+receives one with its own id closes, since its publications and subscriptions are
+gone. A first command that finds the client registry full is answered with error
+code 10 and registers nothing.
 
 A client that attaches while the driver is still creating its files waits for them (ADR
 0072). The driver creates each of the three files, sizes it and writes its magic last,
@@ -1131,8 +1149,11 @@ driver directory").
 
 A client does not remove its file: only the driver removes a file, after it has
 taken its lock. The one exception is a client whose first command could not be
-written: the driver never learns of it, so it removes the file it made, having
-checked that the name still names that file.
+written, or whose lock the system refused on the file it had made: the driver never
+learns of it, so it removes the file it made, through the handle it made it
+through. A client that is killed between making its file and its first command
+leaves an empty file that the driver never learns of; the driver that starts next
+removes it with the directory.
 
 When a client closes or is timed out, the driver renames its lock file to
 `clients/<client id>.gone`, before it frees anything of the client's. The lock is on
@@ -1167,12 +1188,12 @@ at 0.
 **A client the driver cannot ask about.** The driver can learn that a client is gone
 only by a lock that the client held. Three kinds of client give it nothing to try:
 
-- A client of which the driver finds no lock held when it reads its first command:
-  no file, a file that the driver's own try can lock, or a try that the system fails.
-  A client of this version sends no command without its lock, so this is a lock file
-  that another hand removed or let go of. `client.without_lock` counts it, and
-  `cavalry doctor` warns. It is forgotten when it goes, so a command of its that
-  comes late registers a client again, and is counted again.
+- A client of which the driver finds no lock file when it reads its first command,
+  or whose lock the system fails to try. A client of this version sends no command
+  without its lock, so this is a lock file that another hand removed.
+  `client.without_lock` counts it, and `cavalry doctor` warns. It is forgotten when
+  it goes, so a command of its that comes late registers a client again, and is
+  counted again.
 - A client whose lock file could not be renamed when it went, or was removed by
   another hand afterwards. A file that is not there is no answer. A try that the
   system fails is none either, and is made again at the next interval.
@@ -1349,8 +1370,10 @@ with the replay session id where the correlation id goes. A counter a client add
 client that adds it and written by that client alone (ADR 0062). Static
 `counters.held`, a gauge, and `counters.retired` are the records held for their
 writers and the records put out of use until the driver starts again, and
-`client.without_lock` the clients of which the driver found no lock held at their
+`client.without_lock` the clients of which the driver found no lock file at their
 first command ("The records a client writes"; ADR 0179).
+`client_protocol.dropped_command` counts the commands dropped because their client
+had gone ("The driver directory").
 
 ## Vectors
 

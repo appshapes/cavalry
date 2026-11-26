@@ -915,6 +915,31 @@ fn a_client_takes_its_next_id_when_a_lock_file_of_its_name_is_there() {
     driver.close().expect("the driver closes");
 }
 
+/// A driver's directory whose `clients` is there and is no directory is not a driver
+/// that is starting: the client does not wait the driver timeout for it, and says
+/// which path it could not open. Only a `clients/` that is not there is waited for.
+#[test]
+fn a_client_refuses_at_once_a_lock_directory_that_is_no_directory() {
+    let dir = TestDir::new("clients-is-a-file");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
+    std::fs::remove_dir(dir.path().join("clients")).expect("the directory of the locks goes");
+    std::fs::write(dir.path().join("clients"), b"").expect("a file of its name");
+    let began = Instant::now();
+    let error = match Cavalry::connect_to(dir.path()) {
+        Ok(_) => panic!("a client attached with no directory to make its lock file in"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "refused after {:?}, as a driver that never finished starting is",
+        began.elapsed()
+    );
+    for part in ["open the directory of the clients' locks", "clients"] {
+        assert!(error.contains(part), "{part}: {error}");
+    }
+    driver.close().expect("the driver closes");
+}
+
 /// Publications that come and go under subscriptions that come and go, some dropped
 /// before they polled an image they were told of: every record the driver held is let
 /// go in the end, whoever stored its release word, the subscription's thread, a

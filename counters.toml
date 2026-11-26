@@ -2015,16 +2015,24 @@ id = 209
 name = "counters.retired"
 kind = "counter"
 scope = "static"
-doc = "Records of the counters file that are out of use until the driver starts again: what a client that the driver cannot ask about left held, with no release word, when it closed or was timed out. That is a client that held no lock, one whose lock file was renamed or removed by another hand, and one that went while the driver's list of the clients that have gone, 256, was full. Nothing tells the driver that such a client can no longer store, so it gives the records to nobody."
-doctor = "A client that the driver could not ask about closed or was timed out, and left this many records that the driver cannot give out again before it restarts. Most often the client held no lock (client.without_lock): it could not create or lock its file under clients/ in the driver's directory: check that the driver's directory is on a filesystem that keeps advisory locks and that the client's user may write in clients/. The records count against the counters file's capacity until the driver starts again; see docs/reference/client-protocol.md#the-records-a-client-writes."
+doc = "Records of the counters file that are out of use until the driver starts again: what a client that the driver cannot ask about left held, with no release word, when it closed or was timed out. That is a client whose lock file was not there at its first command, one whose lock file could not be renamed when it went or was removed by another hand, and one that went while the driver's list of the clients that have gone, 256, was full. Nothing tells the driver that such a client can no longer store, so it gives the records to nobody."
+doctor = "A client that the driver could not ask about closed or was timed out, and left this many records that the driver cannot give out again before it restarts. Most often something removed the client's lock file from clients/ in the driver's directory while the client ran (client.without_lock counts the ones gone by a client's first command): keep everything but the driver and its clients out of that directory. Otherwise more than 256 clients had gone at once and still held their locks: cavalry doctor names them. The records count against the counters file's capacity until the driver starts again; see docs/reference/client-protocol.md#the-records-a-client-writes."
 
 [[counter]]
 id = 210
 name = "client.without_lock"
 kind = "counter"
 scope = "static"
-doc = "Clients of which the driver found no lock held on their file in its directory when it read their first command: each is counted once, and again when a command of one that has gone registers it anew. A client takes its lock before its first command and sends none without it, so this counts a lock file that another hand removed or let go of. The driver cannot learn that such a client is gone, so what it leaves held with no release word when it closes or is timed out is put out of use, and counters.retired counts it."
-doctor = "The driver read the first command of a client and found no lock held on that client's file under clients/ in its directory. A client takes that lock before its first command, so something else removed the file or holds the directory: a cleaner that removes old files from the driver's directory, or a second program that uses the directory. The client works. But when it closes or is timed out, every counter's record that it has not let go is out of use until the driver starts again. Keep everything but the driver and its clients out of the driver's directory; see docs/reference/client-protocol.md#the-records-a-client-writes."
+doc = "Clients of which the driver found no lock file in its directory when it read their first command, or whose lock the system failed to try: each is counted once, and again when a command of one that has gone registers it anew. A client takes its lock before its first command and sends none without it, so this counts a lock file that another hand removed. The driver cannot learn that such a client is gone, so what it leaves held with no release word when it closes or is timed out is put out of use, and counters.retired counts it."
+doctor = "The driver read the first command of a client and found no lock file for it under clients/ in its directory. A client makes that file and locks it before its first command, so something else removed it: a cleaner that removes old files from the driver's directory, or a second program that uses the directory. The client works. But when it closes or is timed out, every counter's record that it has not let go is out of use until the driver starts again. Keep everything but the driver and its clients out of the driver's directory; see docs/reference/client-protocol.md#the-records-a-client-writes."
+
+[[counter]]
+id = 211
+name = "client_protocol.dropped_command"
+kind = "counter"
+scope = "static"
+doc = "Commands the driver dropped because the client they named had gone: it had closed or been timed out and the driver had not finished with it, or the driver could take its lock when it read its first command. Nobody is registered for such a command and nothing is answered. A client that was stopped past the client liveness timeout sends one when it is continued, before it reads its client timeout, and a client that ends just after it wrote a command leaves one (spec/client-protocol.md, The driver directory)."
+doctor = ""
 
 [[state_machine]]
 name = "cluster_role"

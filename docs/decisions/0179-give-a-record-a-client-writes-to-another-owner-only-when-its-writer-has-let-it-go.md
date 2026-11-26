@@ -127,9 +127,21 @@ is a second handle on one it opened in that order. A client that cannot make and
 lock its file does not attach: a client without its lock sends no command.
 
 **A command that names a client that has gone is dropped.** The driver knows such a
-client until it has taken its lock and has nothing of its left to free. It registers
-nobody for a command of that id and answers nothing. Until this decision such a
-command was a new client's first, as it is in Aeron.
+client until it has taken its lock, has nothing of its left to free, and has read the
+command ring up to where its producers stood when the lock was taken. A client
+writes a command before it lets go of its lock, so every command of a client that has
+gone is read and dropped before the driver forgets the client, by that order and by
+no wait. The driver registers nobody for such a command and answers nothing, and
+`client_protocol.dropped_command` counts it. A first command whose client's lock the
+driver can take is of a client that ended after it wrote the command, and is dropped
+the same way. Until this decision a command of a client the driver had forgotten was
+a new client's first, as it is in Aeron.
+
+**One dependency.** `cavalry-shm` takes `nix` 0.32 with the feature `fs`, for
+`openat`, `open` with `O_DIRECTORY | O_NOFOLLOW`, and `unlinkat`: the standard
+library makes and removes a file by a path alone. The driver already takes that
+version, so the lock file gains no crate, the `unsafe` the calls need is `nix`'s, and
+none of the three is on a message's path: a client calls them when it attaches.
 
 In `cavalry-client` a handle on such a record is one type, `Owned`. It is not
 `Clone`. Its drop is the one place the word is stored, and its release takes the
@@ -138,9 +150,9 @@ client's shared state, which owns the lock. Nothing else in the crate holds a
 counter's writing handle. `cavalry-shm`'s own `Counter` stays `Clone` for the driver.
 
 The driver can learn that a client is gone only by a lock the client held. Three
-kinds of client give it nothing to try: one of which it finds no lock held at its
+kinds of client give it nothing to try: one of which it finds no lock file at its
 first command, which a client of this version never is, so that it is a file
-another hand removed or let go of; one whose lock file could not be renamed or was
+another hand removed; one whose lock file could not be renamed or was
 removed by another hand; and one that goes while the driver's list of 256 clients
 that have gone is full. Such a
 client's release words are read as any client's. What it leaves held with no word
@@ -154,11 +166,12 @@ message says which side is the older and what to do. So no client of an earlier
 build stores into a record of a driver of this one, and this decision carries no rule
 for one.
 
-Three counters. `counters.held`, a gauge: the records freed and held.
+Four counters. `counters.held`, a gauge: the records freed and held.
 `counters.retired`: the records out of use until the driver starts again.
-`client.without_lock`: the clients of which the driver found no lock held at their
+`client.without_lock`: the clients of which the driver found no lock file at their
 first command, so that `cavalry doctor` warns of a directory that another hand has
-changed. `doctor` also names each
+changed. `client_protocol.dropped_command`: the commands dropped because their
+client had gone. `doctor` also names each
 client that has gone and still holds its lock, by its `.gone` file, once it has had
 that name for 2 s.
 
@@ -256,9 +269,10 @@ that name for 2 s.
   lock tried once an interval; a client without a lock; a record freed after its
   client's lock was taken, which is not held; the held records looked at in turn,
   past one cycle's 64; the list of the clients that have gone at its capacity of
-  256, where the next client's records are put out of use and counted; a lock file
-  removed by another hand, which is no answer; a lock file that nobody holds; and
-  the two of the second read below.
+  256, where the next client's records are put out of use and counted, and a
+  command of that client's that comes late registers it again with its lock; a lock
+  file removed by another hand, which is no answer; a first command of a client
+  that has ended; and those of the second and third reads below.
 - **`doctor`**: `a_client_that_has_gone_and_holds_its_lock_is_named_by_its_file`.
 - **An independent read of the first build** found four faults that every gate,
   twenty runs on both runners and seven mutants had passed over. A handle stored its
@@ -290,8 +304,26 @@ that name for 2 s.
   `cavalry-shm`, on which the whole order stands, and
   `a_lock_is_not_taken_in_the_directory_of_a_driver_that_started_since` in the
   client; `a_client_that_has_gone_is_not_registered_again_by_a_command_that_comes_late`
-  in the driver; and the stopped client's test in `stray_store.rs`, which  now reads both counters at 0. It also found the table of held records without its
+  in the driver; and the stopped client's test in `stray_store.rs`, which now
+  reads both counters at 0. It also found the table of held records without its
   test at capacity: `the_table_of_held_records_is_full_when_the_counters_file_is`.
+- **A third independent read, of the build on the handle**, was asked for every
+  place in the lock's half where two things could be taken for one, a name, a path,
+  a directory, a handle, a restart, an id that starts over, a file number, a process
+  and its fork, and for the fact that keeps each pair apart. It traced the order of
+  the Decision through one restart and two, a start that fails part-way, and a
+  driver killed between `clients/` and its ring, and found it sound in each. It
+  found one place still kept apart by a time: the driver could forget a client that
+  had gone while a command the client wrote was still unread, and that command then
+  registered a second client. That is closed by the ring's position above, with
+  `a_client_whose_lock_is_taken_is_kept_until_its_commands_are_read`. It found that
+  a client's removal of a file it had made and never announced compared file
+  numbers, the fact this decision had rejected: now through the handle. And that a
+  dropped command had no counter. It asked for a test of the order on a client's
+  real attach, which had none:
+  `a_client_stopped_in_its_attach_across_a_restart_attaches_to_the_driver_that_runs`
+  holds a client at three steps of its attach while the driver is closed and
+  another started, and lets it go on.
 - **The upgrade gate** runs a program and the driver it is a client of from one build
   in every round (`conformance/upgrade/run.sh`, "The schedule"), so no round crosses
   this version with a client on one side and its driver on the other. It does run

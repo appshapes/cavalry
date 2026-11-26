@@ -258,8 +258,8 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   `clients/<client id>.gone`. It removes `clients/` with everything else the driver
   before it left, before it creates anything of its own, so a client of that driver
   can make no lock file in this one's directory. And it drops a command that names a
-  client that has gone, so a client that was stopped and is continued is not
-  registered a second time. A thread of a client that is
+  client that has gone, and counts it in `client_protocol.dropped_command`, so a
+  client that was stopped and is continued is not registered a second time. A thread of a client that is
   not run for a while, or a process that was stopped, so stores into a record that
   is still its own.
   `counters.held` is how many records are held, and `counters.retired` how many a

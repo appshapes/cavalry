@@ -48,6 +48,40 @@ pub const DIR_ENV: &str = "CAVALRY_DIR";
 /// bounds the work of a client that waits the whole driver timeout: a thousand reads.
 const ATTACH_POLL: Duration = Duration::from_millis(10);
 
+/// What a test does at a step of this thread's attach.
+#[cfg(test)]
+type AttachStep = Box<dyn FnMut(u8)>;
+
+#[cfg(test)]
+thread_local! {
+    /// What a test does in the middle of this thread's attach, called with the step
+    /// the attach has reached: 1, the handle on `clients/` is open and nothing else;
+    /// 2, the command ring is mapped and its heartbeat was found fresh; 3, the
+    /// client's id is taken and its lock file is not made yet. A test starts another driver in the directory there, which is
+    /// what a client that was stopped at that step finds when it is continued.
+    pub(crate) static ATTACH_STEP: std::cell::RefCell<Option<AttachStep>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The test's step, when a test set one; nothing outside a test.
+#[cfg(test)]
+fn attach_step(step: u8) {
+    ATTACH_STEP.with(|test| {
+        if let Some(test) = test.borrow_mut().as_mut() {
+            test(step);
+        }
+    });
+}
+
+/// The test's step, when a test set one; nothing outside a test.
+#[cfg(not(test))]
+#[inline(always)]
+fn attach_step(_step: u8) {}
+
+/// What a client has once its first command is written: its id, its lock, the
+/// producer that wrote the command, and the conductor's producer.
+type FirstCommand = (i64, crate::owned::ClientLock, Producer, Producer);
+
 /// How many client ids in a row a connecting client takes while it finds a lock file
 /// of each one's name already there, before it gives up with the error of the last.
 /// No client of the driver makes such a file: ids are distinct within a ring. It is
@@ -132,7 +166,22 @@ impl Attached {
         // creates its own. So a lock file that is made says that every file opened
         // between here and there is of the one driver whose `clients/` this is
         // (`spec/client-protocol.md`, "The driver directory").
-        let clients = ClientsDir::open(dir);
+        let clients = match ClientsDir::open(dir) {
+            Ok(clients) => Some(clients),
+            // None there: a driver that is starting, or one of a version before the
+            // lock, whose counters file is refused below with the message that says so.
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
+            // Anything else is no driver starting, and waiting changes nothing.
+            Err(source) => {
+                return Err(Unattached::Refused(ClientError::Io {
+                    what: "open the directory of the clients' locks, in which this client \
+                           makes its lock file",
+                    path: dir.join(cavalry_proto::client_protocol::CLIENT_LOCK_DIRECTORY),
+                    source,
+                }));
+            }
+        };
+        attach_step(1);
         let ring = match CommandRing::open(dir, true) {
             Ok(ring) => ring,
             Err(CommandRingError::NotReady | CommandRingError::TooShort { given: 0 }) => {
@@ -160,6 +209,7 @@ impl Attached {
                 reason: Closed::DriverTimeout,
             }));
         }
+        attach_step(2);
         let broadcast = BroadcastBuffer::open(dir, false).map_err(|error| {
             Unattached::other(broadcast_unfinished(&error), error.into(), heartbeat)
         })?;
@@ -173,7 +223,7 @@ impl Attached {
         // a directory that a driver which starts is emptying: read again. A driver of
         // a version before the lock has none either, and its counters file was
         // refused above, with the message that says so.
-        let Ok(clients) = clients else {
+        let Some(clients) = clients else {
             return Err(Unattached::Creating(Unfinished::CommandRing));
         };
         Ok(Self {
@@ -216,8 +266,9 @@ pub struct Cavalry {
     /// Shared with the recording handles, which check a record before they trust its
     /// value ([`Recording`]).
     counters: Arc<CountersReader>,
-    /// The counters file mapped writable, for the counters this client adds and owns;
-    /// opened at the first [`Cavalry::add_counter`] (ADR 0062).
+    /// The counters file mapped writable, for the counters this client adds and owns
+    /// (ADR 0062): a second handle on the mapping the client opened when it attached,
+    /// and never a second open by the directory's name (ADR 0179).
     counters_writer: CountersWriter,
     responses: spsc::Consumer<Response>,
     registrations: spsc::Producer<Registration>,
@@ -290,18 +341,18 @@ impl Cavalry {
     /// the directory again. A name that is already taken, which no client of this
     /// driver can have made, costs the id: the next one is taken, up to
     /// [`LOCK_NAMES_TRIED`] in all.
-    #[allow(clippy::type_complexity)]
     fn first_command(
         dir: &Path,
         attached: &Attached,
         scratch: &mut [u8],
         taken: &mut usize,
-    ) -> Result<Option<(i64, crate::owned::ClientLock, Producer, Producer)>, ClientError> {
+    ) -> Result<Option<FirstCommand>, ClientError> {
         let mut producer = attached.ring.producer(DRIVER_TIMEOUT)?;
         let conductor_producer = attached.ring.producer(DRIVER_TIMEOUT)?;
         let (client_id, lock) = loop {
             let client_id = producer.next_correlation_id();
-            match crate::owned::ClientLock::take(&attached.clients, dir, client_id) {
+            attach_step(3);
+            match crate::owned::ClientLock::take(&attached.clients, client_id) {
                 Ok(lock) => break (client_id, lock),
                 Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
                 Err(error)
@@ -329,17 +380,25 @@ impl Cavalry {
             client_id,
             correlation_id: producer.next_correlation_id(),
         };
-        let length = keepalive.write(scratch)?;
         // From the command on, the driver knows the client and removes the file when
-        // the client has gone; a command that could not be written leaves a file the
-        // driver never learns of, which is removed here.
-        if let Err(error) = producer.write(
-            keepalive.command_type() as i32,
-            &scratch[..length],
-            epoch_time(),
-        ) {
-            lock.abandon();
-            return Err(error.into());
+        // the client has gone; a command that could not be encoded or written leaves
+        // a file the driver never learns of, which is removed here, through the handle
+        // it was made through.
+        let written = keepalive
+            .write(scratch)
+            .map_err(ClientError::from)
+            .and_then(|length| {
+                producer
+                    .write(
+                        keepalive.command_type() as i32,
+                        &scratch[..length],
+                        epoch_time(),
+                    )
+                    .map_err(ClientError::from)
+            });
+        if let Err(error) = written {
+            lock.abandon(&attached.clients, client_id);
+            return Err(error);
         }
         Ok(Some((client_id, lock, producer, conductor_producer)))
     }
@@ -1893,5 +1952,115 @@ impl std::fmt::Debug for Cavalry {
             .field("client_id", &self.client_id)
             .field("closed", &self.closed())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use cavalry_driver::Driver;
+    use cavalry_shm::counters::generated::{CLIENT_WITHOUT_LOCK, CLUSTER_COMMIT_POSITION};
+
+    use super::*;
+
+    /// A client that is stopped in the middle of its attach while the driver is closed
+    /// and another is started in the directory, and is then continued. Wherever it
+    /// was stopped, it ends as a client of the driver that runs: its mappings, its id
+    /// and its lock file are that driver's, the one lock file in `clients/` is its
+    /// own and is held, and nothing of the earlier driver's client is in the
+    /// directory of the next. The three steps are the three places where a mix of two
+    /// drivers could begin: before the first file is opened, between two of them, and
+    /// between the id and the lock file.
+    #[test]
+    fn a_client_stopped_in_its_attach_across_a_restart_attaches_to_the_driver_that_runs() {
+        for step in 1..=3u8 {
+            let dir = std::env::temp_dir().join(format!(
+                "cavalry-attach-restart-{step}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            let earlier = Driver::start(&dir, dir.join("log")).expect("the earlier driver");
+            // A client of the earlier driver first, so that the id the stopped client
+            // takes from that driver is not the first id of the driver that starts.
+            let ahead = Cavalry::connect_to(&dir).expect("a client of the earlier driver");
+            let ahead_id = ahead.client_id();
+            drop(ahead);
+            let drivers = Rc::new(RefCell::new((Some(earlier), None::<Driver>)));
+            let restart = Rc::clone(&drivers);
+            let at = dir.clone();
+            ATTACH_STEP.with(|test| {
+                *test.borrow_mut() = Some(Box::new(move |reached| {
+                    let mut drivers = restart.borrow_mut();
+                    if reached != step {
+                        return;
+                    }
+                    let Some(earlier) = drivers.0.take() else {
+                        return;
+                    };
+                    earlier.close().expect("the earlier driver closes");
+                    drivers.1 = Some(Driver::start(&at, at.join("log")).expect("the next driver"));
+                }));
+            });
+            let connected = Cavalry::connect_to(&dir);
+            ATTACH_STEP.with(|test| *test.borrow_mut() = None);
+            let mut client = connected.unwrap_or_else(|error| panic!("step {step}: {error}"));
+            assert!(
+                drivers.borrow().1.is_some(),
+                "step {step}: the driver was started again in the middle of the attach"
+            );
+
+            // The one lock file there is this client's, and it is held.
+            let names: Vec<String> = std::fs::read_dir(dir.join("clients"))
+                .expect("the directory of the locks")
+                .map(|entry| {
+                    entry
+                        .expect("an entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            assert_eq!(
+                names,
+                vec![format!("{}.lock", client.client_id())],
+                "step {step}: what the next driver's directory holds"
+            );
+            let tried =
+                std::fs::File::open(dir.join("clients").join(&names[0])).expect("the lock file");
+            assert!(
+                matches!(tried.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+                "step {step}: the client holds its lock"
+            );
+            // It is a client of the driver that runs: that driver answers it.
+            let counter = client
+                .add_counter(CLUSTER_COMMIT_POSITION.0, &1i32.to_le_bytes(), "a counter")
+                .unwrap_or_else(|error| panic!("step {step}: {error}"));
+            assert_eq!(
+                client
+                    .counters()
+                    .read(CLIENT_WITHOUT_LOCK.record())
+                    .expect("a static counter"),
+                0,
+                "step {step}: the driver found the client's lock held at its first command"
+            );
+            // Ids begin again with each driver. The earlier driver gave its first id
+            // to the client above and its second to that client's keepalive, so an id
+            // from its ring is two or more above the first. The driver that runs gave
+            // its first id to this client, or to this client's attempt that found the
+            // directory gone and its second to this client.
+            assert!(
+                client.client_id() <= ahead_id + 1,
+                "step {step}: id {} is from the ring of the earlier driver, whose first was \
+                 {ahead_id}",
+                client.client_id()
+            );
+            counter.close();
+            client.close().expect("the client closes");
+            let next = drivers.borrow_mut().1.take().expect("the next driver");
+            next.close().expect("the next driver closes");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

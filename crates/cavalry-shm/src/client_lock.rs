@@ -24,8 +24,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use cavalry_proto::client_protocol::{CLIENT_LOCK_DIRECTORY, CLIENT_LOCK_SUFFIX};
-use nix::fcntl::{OFlag, openat};
+use nix::fcntl::{OFlag, open, openat};
 use nix::sys::stat::Mode;
+use nix::unistd::{UnlinkatFlags, unlinkat};
 
 /// A handle on `clients/` of a driver's directory: on the directory that had that name
 /// when [`ClientsDir::open`] ran, whatever the name is given to afterwards.
@@ -35,18 +36,19 @@ pub struct ClientsDir {
 }
 
 impl ClientsDir {
-    /// Opens `dir/clients`. An error of kind `NotFound` is a directory with none: a
-    /// driver that is starting, or one of a version before the lock.
+    /// Opens `dir/clients`, which must be a directory itself and no link to one: the
+    /// system refuses anything else. An error of kind `NotFound` is a directory with
+    /// none: a driver that is starting, or one of a version before the lock.
     pub fn open(dir: &Path) -> io::Result<Self> {
         let path = dir.join(CLIENT_LOCK_DIRECTORY);
-        let dir = File::open(&path)?;
-        if !dir.metadata()?.is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotADirectory,
-                format!("{} is not a directory", path.display()),
-            ));
-        }
-        Ok(Self { dir })
+        let dir = open(
+            &path,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )?;
+        Ok(Self {
+            dir: File::from(dir),
+        })
     }
 
     /// Creates the lock file of client `client_id`, `<client id>.lock`, empty, in the
@@ -63,6 +65,17 @@ impl ClientsDir {
             Mode::from_bits_truncate(0o666),
         )?;
         Ok(File::from(file))
+    }
+
+    /// Removes the lock file of client `client_id` from the directory this handle is
+    /// on. For the client that made the file and sent no command, so that the driver
+    /// never learned of it: nothing else removes a lock file but the driver. Through
+    /// the handle, the name is the one this client made, in the directory it made it
+    /// in; by a path it could be the file of another driver's client of the same id.
+    pub fn remove(&self, client_id: i64) -> io::Result<()> {
+        let name = format!("{client_id}{CLIENT_LOCK_SUFFIX}");
+        unlinkat(&self.dir, name.as_str(), UnlinkatFlags::NoRemoveDir)?;
+        Ok(())
     }
 }
 
@@ -132,6 +145,28 @@ mod tests {
         assert!(path(&dir, 41, CLIENT_LOCK_SUFFIX).is_file());
         let again = clients.create(41).expect_err("the name is taken");
         assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
+        clients.remove(41).expect("removed through the handle");
+        assert!(!path(&dir, 41, CLIENT_LOCK_SUFFIX).exists());
+        assert_eq!(
+            clients.remove(41).expect_err("no such name").kind(),
+            io::ErrorKind::NotFound
+        );
+        // A file, and a link to a directory, are no `clients/`.
+        let other = dir.join("other");
+        std::fs::create_dir(&other).expect("a directory");
+        std::fs::write(other.join(CLIENT_LOCK_DIRECTORY), b"").expect("a file of that name");
+        assert!(
+            ClientsDir::open(&other).is_err(),
+            "a file is not a directory"
+        );
+        let linked = dir.join("linked");
+        std::fs::create_dir(&linked).expect("a directory");
+        std::os::unix::fs::symlink(
+            dir.join(CLIENT_LOCK_DIRECTORY),
+            linked.join(CLIENT_LOCK_DIRECTORY),
+        )
+        .expect("a link");
+        assert!(ClientsDir::open(&linked).is_err(), "a link is not followed");
         assert_eq!(
             ClientsDir::open(&dir.join("nowhere"))
                 .expect_err("no such directory")
@@ -162,6 +197,18 @@ mod tests {
             assert_eq!(refused.kind(), io::ErrorKind::NotFound, "client {id}");
             assert!(!path(&dir, id, CLIENT_LOCK_SUFFIX).exists());
         }
+        // Nor does it remove one there: the next driver's client 1 keeps its file.
+        let next_client = ClientsDir::open(&dir).expect("the next client's handle");
+        next_client.create(1).expect("the next driver's client 1");
+        assert_eq!(
+            earlier
+                .remove(1)
+                .expect_err("removed in a directory that is gone")
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert!(path(&dir, 1, CLIENT_LOCK_SUFFIX).is_file());
+        next_client.remove(1).expect("removed by its own client");
         assert_eq!(
             std::fs::read_dir(dir.join(CLIENT_LOCK_DIRECTORY))
                 .expect("the new directory")

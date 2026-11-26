@@ -68,7 +68,9 @@ use cavalry_shm::counters::generated::{
     SUBSCRIPTION_ADD_DEFERRED, SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT,
     SUBSCRIPTION_ADD_DEFERRED_WAITING, SUBSCRIPTION_LINGERS_ENDED, SUBSCRIPTION_POSITION,
 };
-use cavalry_shm::counters::generated::{CLIENT_WITHOUT_LOCK, COUNTERS_HELD, COUNTERS_RETIRED};
+use cavalry_shm::counters::generated::{
+    CLIENT_PROTOCOL_DROPPED_COMMAND, CLIENT_WITHOUT_LOCK, COUNTERS_HELD, COUNTERS_RETIRED,
+};
 use cavalry_shm::counters::{Counter, CounterId, CountersError, CountersFile, Scope};
 use cavalry_shm::log::layout as log_layout;
 use cavalry_shm::log::{HeaderFields, LogBuffers, LogType, UnblockOutcome as LogUnblock};
@@ -234,11 +236,29 @@ pub(crate) fn prepare_dir(dir: &Path) -> Result<DirLock, DriverError> {
             .map_err(|source| io("read the driver's directory", source))?
             .is_dir();
         if is_dir {
-            std::fs::remove_dir_all(&path)
+            // A client of the driver that has gone, which is making its lock file at
+            // this moment, can add a file to `clients/` between the emptying and the
+            // removal. It makes one file and no more, so the directory is removed
+            // once more; a start that still finds it not empty fails, and nothing of
+            // this driver's has been created yet.
+            std::fs::remove_dir_all(&path).or_else(|first| {
+                if first.kind() == std::io::ErrorKind::DirectoryNotEmpty {
+                    std::fs::remove_dir_all(&path)
+                } else {
+                    Err(first)
+                }
+            })
         } else {
             std::fs::remove_file(&path)
         }
-        .map_err(|source| io("remove what the last driver left in the directory", source))?;
+        .map_err(|source| {
+            io(
+                "remove what the last driver left in the directory (a client of that \
+                 driver that is still attaching can add a file while the directory is \
+                 emptied: start the driver again)",
+                source,
+            )
+        })?;
     }
     Ok(DirLock { _dir: lock })
 }
@@ -279,6 +299,26 @@ struct Gone {
     client_id: i64,
     /// Whether the driver has taken the client's lock.
     taken: bool,
+    /// The command ring's producer position, loaded after the driver took the lock:
+    /// every command the client wrote is before it. A client writes a command before
+    /// it lets go of its lock, so none of its commands is written after the lock was
+    /// taken; the driver forgets the client only when it has read the ring to here,
+    /// and so drops every command of the client's that was still unread. 0 until the
+    /// lock is taken.
+    read_to: i64,
+}
+
+/// What a command's client is to the driver when the command is read.
+#[derive(Debug, PartialEq, Eq)]
+enum Touch {
+    /// A registered client, this command's among them when it was the client's first.
+    Known,
+    /// The first command of a client, and the client registry is full.
+    Full,
+    /// The first command of a client whose lock the driver could take: everything of
+    /// that client was dropped, or its process ended, after it wrote the command.
+    /// Nobody is registered, and the command is dropped.
+    Ended,
 }
 
 /// What one try at a client's lock found.
@@ -853,6 +893,7 @@ struct Statics {
     counters_held: Counter,
     counters_retired: Counter,
     client_without_lock: Counter,
+    dropped_command: Counter,
     client_timed_out: Counter,
     rejected_command: Counter,
     errors: Counter,
@@ -900,6 +941,7 @@ impl Statics {
             counters_held: get(COUNTERS_HELD)?,
             counters_retired: get(COUNTERS_RETIRED)?,
             client_without_lock: get(CLIENT_WITHOUT_LOCK)?,
+            dropped_command: get(CLIENT_PROTOCOL_DROPPED_COMMAND)?,
             client_timed_out: get(CLIENT_TIMED_OUT)?,
             rejected_command: get(CLIENT_PROTOCOL_REJECTED_COMMAND)?,
             errors: get(CLIENT_PROTOCOL_ERRORS)?,
@@ -1464,20 +1506,30 @@ impl Conductor {
         // writes").
         let client_id = command.client_id();
         if self.gone.iter().any(|gone| gone.client_id == client_id) {
+            self.statics.dropped_command.increment();
             return;
         }
-        if !self.touch_client(client_id, now) {
-            self.statics.registry_full.increment();
-            self.send_error(
-                correlation_id,
-                ErrorCode::ResourceTemporarilyUnavailable,
-                &format!(
-                    "the driver's client registry holds {} clients and is full; close a client \
-                     that is not used; see {ERRORS_DOC}",
-                    spec::MAX_CLIENTS
-                ),
-            );
-            return;
+        match self.touch_client(client_id, now) {
+            Touch::Known => {}
+            // The client wrote this command and then let go of its lock: it dropped
+            // everything, or its process ended. Nothing of it is left to answer.
+            Touch::Ended => {
+                self.statics.dropped_command.increment();
+                return;
+            }
+            Touch::Full => {
+                self.statics.registry_full.increment();
+                self.send_error(
+                    correlation_id,
+                    ErrorCode::ResourceTemporarilyUnavailable,
+                    &format!(
+                        "the driver's client registry holds {} clients and is full; close a \
+                         client that is not used; see {ERRORS_DOC}",
+                        spec::MAX_CLIENTS
+                    ),
+                );
+                return;
+            }
         }
         match command {
             Command::AddPublication {
@@ -1918,9 +1970,9 @@ impl Conductor {
         self.send(&Event::OperationSuccess { correlation_id });
     }
 
-    /// Records that `client_id` sent a command now; registers a new client, or returns
-    /// false when the client registry is full.
-    fn touch_client(&mut self, client_id: i64, now: i64) -> bool {
+    /// Records that `client_id` sent a command now, and registers a client at its
+    /// first command. The answer is [`Touch`].
+    fn touch_client(&mut self, client_id: i64, now: i64) -> Touch {
         if let Some(client) = self
             .clients
             .iter_mut()
@@ -1928,29 +1980,55 @@ impl Conductor {
         {
             client.last_seen = now;
             client.last_seen_epoch = self.epoch.at(now);
-            return true;
+            return Touch::Known;
         }
         if self.clients.len() >= spec::MAX_CLIENTS {
-            return false;
+            return Touch::Full;
         }
         let last_seen_epoch = self.epoch.at(now);
-        // A client takes its lock before its first command, so at that command the
-        // driver cannot take it. A file that is not there, or a lock the driver takes,
-        // is a client that holds none.
-        let locks = matches!(
-            self.try_client_lock(&self.client_lock_path(client_id)),
-            LockTry::Held
-        );
-        if !locks {
-            self.statics.client_without_lock.increment();
-        }
+        // A client takes its lock before its first command and keeps it for as long
+        // as anything of it exists, so the driver's try finds it held. A lock the
+        // driver takes is a client of which nothing is left. No file, or a try that the
+        // system fails, is a file that another hand removed or a directory that keeps
+        // no locks: the client is registered as one the driver cannot ask about.
+        let path = self.client_lock_path(client_id);
+        let locks = match self.try_client_lock(&path) {
+            LockTry::Held => true,
+            LockTry::Taken => {
+                self.client_ended(client_id, &path);
+                return Touch::Ended;
+            }
+            LockTry::NoFile | LockTry::Unknown => {
+                self.statics.client_without_lock.increment();
+                false
+            }
+        };
         self.clients.push(Client {
             id: client_id,
             last_seen: now,
             last_seen_epoch,
             locks,
         });
-        true
+        Touch::Known
+    }
+
+    /// A client whose lock the driver took when it read the client's first command:
+    /// the client wrote the command, and then everything of it was dropped or its
+    /// process ended. The driver removes the file and notes the client as one that has
+    /// gone and whose lock is taken, so that every other command it wrote is dropped
+    /// as this one is, until the ring is read past them. With no place in the list
+    /// the file is left where it is: each later command of the client finds its lock
+    /// free in turn, and is dropped the same way.
+    fn client_ended(&mut self, client_id: i64, path: &Path) {
+        if self.gone.len() >= spec::MAX_CLIENTS {
+            return;
+        }
+        let _ = std::fs::remove_file(path);
+        self.gone.push(Gone {
+            client_id,
+            taken: true,
+            read_to: self.consumer.producer_position(),
+        });
     }
 
     /// The client of subscription `subscription_id`, when the subscription is registered.
@@ -2073,7 +2151,9 @@ impl Conductor {
         let mut work = 0;
         let mut index = 0;
         while index < self.gone.len() {
-            let Gone { client_id, taken } = self.gone[index];
+            let Gone {
+                client_id, taken, ..
+            } = self.gone[index];
             if !taken {
                 let path = self.client_gone_path(client_id);
                 match self.try_client_lock(&path) {
@@ -2081,6 +2161,9 @@ impl Conductor {
                     LockTry::Taken => {
                         let _ = std::fs::remove_file(&path);
                         self.gone[index].taken = true;
+                        // Loaded after the lock was taken: every command the client
+                        // wrote is before it.
+                        self.gone[index].read_to = self.consumer.producer_position();
                         let mut held = 0;
                         while held < self.held.len() {
                             if self.held[held].client_id == client_id {
@@ -2099,7 +2182,13 @@ impl Conductor {
                     }
                 }
             }
-            if self.gone[index].taken && !self.owes_a_record(client_id) {
+            // Forgotten when its lock is taken, nothing of its is still to be freed, and
+            // every command it wrote has been read: from then on a command with its id
+            // could only be a new client's.
+            if self.gone[index].taken
+                && !self.owes_a_record(client_id)
+                && self.consumer.consumer_position() >= self.gone[index].read_to
+            {
                 self.gone.swap_remove(index);
             } else {
                 index += 1;
@@ -2141,6 +2230,7 @@ impl Conductor {
         self.gone.push(Gone {
             client_id,
             taken: false,
+            read_to: 0,
         });
         true
     }
@@ -19686,7 +19776,7 @@ mod clocks {
         let t0 = now_nanos();
         let timeout = spec::nanos(spec::CLIENT_LIVENESS_TIMEOUT);
 
-        assert!(conductor.touch_client(9, t0));
+        assert_eq!(conductor.touch_client(9, t0), Touch::Known);
         conductor.epoch.step(HOUR);
         conductor.duty_cycle(t0 + 1_000_000);
         assert_eq!(
@@ -19718,7 +19808,7 @@ mod clocks {
         let timeout = spec::nanos(spec::CLIENT_LIVENESS_TIMEOUT);
         let step = 15 * SECOND;
 
-        assert!(conductor.touch_client(9, t0));
+        assert_eq!(conductor.touch_client(9, t0), Touch::Known);
         conductor.epoch.step(-step);
         // Silent for the fifteen seconds its epoch clock takes to pass its last send.
         conductor.duty_cycle(t0 + step);
@@ -19728,7 +19818,10 @@ mod clocks {
             "fifteen seconds of silence on the nano clock, none on the epoch clock"
         );
         // Its keepalives are back: it lives on from there.
-        assert!(conductor.touch_client(9, t0 + step + SECOND / 2));
+        assert_eq!(
+            conductor.touch_client(9, t0 + step + SECOND / 2),
+            Touch::Known
+        );
         conductor.duty_cycle(t0 + step + timeout);
         assert_eq!(conductor.clients.len(), 1);
 
@@ -19750,8 +19843,8 @@ mod held {
 
     use cavalry_shm::counters::CountersWriter;
     use cavalry_shm::counters::generated::{
-        CLIENT_WITHOUT_LOCK, CLUSTER_COMMIT_POSITION, COUNTERS_ALLOCATED,
-        COUNTERS_ALLOCATION_FAILED, COUNTERS_HELD, COUNTERS_RETIRED,
+        CLIENT_PROTOCOL_DROPPED_COMMAND, CLIENT_WITHOUT_LOCK, CLUSTER_COMMIT_POSITION,
+        COUNTERS_ALLOCATED, COUNTERS_ALLOCATION_FAILED, COUNTERS_HELD, COUNTERS_RETIRED,
     };
 
     use super::recording::Harness;
@@ -19776,7 +19869,7 @@ mod held {
     /// Adds a counter for `client_id` and returns its record.
     fn add(h: &mut Harness, client_id: i64, correlation_id: i64) -> u32 {
         let now = h.now;
-        assert!(h.conductor.touch_client(client_id, now));
+        assert_eq!(h.conductor.touch_client(client_id, now), Touch::Known);
         h.conductor.add_counter(
             client_id,
             correlation_id,
@@ -19810,7 +19903,7 @@ mod held {
     fn a_second_later(h: &mut Harness, client_id: i64) {
         h.now += SECOND;
         let now = h.now;
-        assert!(h.conductor.touch_client(client_id, now));
+        assert_eq!(h.conductor.touch_client(client_id, now), Touch::Known);
         h.cycle();
     }
 
@@ -19953,6 +20046,7 @@ mod held {
         h.conductor.gone.push(Gone {
             client_id: 7,
             taken: true,
+            read_to: 0,
         });
         let late = record(&mut h);
         let now = h.now;
@@ -20063,6 +20157,21 @@ mod held {
         h.now += 100 * SECOND;
         h.cycle();
         assert!(held(&h, record), "it is given to nobody");
+        // That client is continued and sends a command. The driver has forgotten it,
+        // so the command registers a client: one that holds its lock, on the file that
+        // was never renamed. Nothing of the first registration is given away by it.
+        keepalive(&mut h, last, 60_000);
+        let again = h
+            .conductor
+            .clients
+            .iter()
+            .find(|client| client.id == last)
+            .expect("registered again");
+        assert!(again.locks);
+        assert_eq!(h.counter(CLIENT_WITHOUT_LOCK), 0);
+        assert_eq!(h.counter(CLIENT_PROTOCOL_DROPPED_COMMAND), 0);
+        assert!(held(&h, record));
+        assert_eq!(h.counter(COUNTERS_RETIRED), 1);
         // The others' processes end: every one of their records is let go.
         drop(locks);
         h.now += spec::nanos(spec::LOCK_CHECK_INTERVAL) + MS;
@@ -20092,23 +20201,83 @@ mod held {
         assert!(held(&h, record));
     }
 
-    /// A lock file that is there and that nobody holds, at a client's first command:
-    /// the driver's try takes the lock, so the client holds none, as one with no file.
+    /// A lock the driver can take when it reads a client's first command: the client
+    /// wrote the command and then dropped everything, or its process ended. Nobody is
+    /// registered for it, the command is dropped and counted, the file is removed, and
+    /// no client is counted as one without a lock.
     #[test]
-    fn a_lock_file_that_nobody_holds_is_a_client_without_a_lock() {
-        let mut h = Harness::new("held-unlocked-file");
+    fn a_first_command_of_a_client_that_has_ended_registers_nobody() {
+        let mut h = Harness::new("held-ended");
         drop(lock(&h, 7));
-        let record = add(&mut h, 7, 100);
-        assert_eq!(h.counter(CLIENT_WITHOUT_LOCK), 1);
-        assert!(!h.conductor.clients[0].locks);
+        keepalive(&mut h, 7, 100);
+        assert!(h.conductor.clients.is_empty(), "nobody is registered");
+        assert_eq!(h.counter(CLIENT_PROTOCOL_DROPPED_COMMAND), 1);
+        assert_eq!(h.counter(CLIENT_WITHOUT_LOCK), 0);
         assert!(
-            h.conductor.client_lock_path(7).exists(),
-            "the driver's try removes nothing"
+            !h.conductor.client_lock_path(7).exists(),
+            "the driver took the lock and removed the file"
         );
+        // Another command it wrote before it ended is dropped the same way.
+        keepalive(&mut h, 7, 102);
+        assert!(h.conductor.clients.is_empty());
+        assert_eq!(h.counter(CLIENT_PROTOCOL_DROPPED_COMMAND), 2);
+        assert_eq!(h.counter(CLIENT_WITHOUT_LOCK), 0);
+        // The ring holds nothing unread, so the driver forgets the client at its next
+        // look.
+        h.now += spec::nanos(spec::LOCK_CHECK_INTERVAL) + MS;
+        h.cycle();
+        assert!(h.conductor.gone.is_empty());
+        assert_eq!(h.counter(COUNTERS_HELD), 0);
+        assert_eq!(h.counter(COUNTERS_RETIRED), 0);
+    }
+
+    /// The driver takes a gone client's lock while a command the client wrote is still
+    /// unread in the ring: the client wrote it, dropped everything and so let go of its
+    /// lock, all before the driver read on. The driver keeps the client until it has
+    /// read the ring past where its tail was when the lock was taken, so that command
+    /// is dropped and registers nobody. A wait would not do: how long a command stays
+    /// unread has no bound that the driver knows.
+    #[test]
+    fn a_client_whose_lock_is_taken_is_kept_until_its_commands_are_read() {
+        let mut h = Harness::new("held-unread");
+        let held_by_client = lock(&h, 7);
+        keepalive(&mut h, 7, 100);
+        assert_eq!(h.counter(CLIENT_WITHOUT_LOCK), 0);
         let now = h.now;
         h.conductor.remove_client(7, now);
-        assert_eq!(h.counter(COUNTERS_RETIRED), 1);
-        assert!(held(&h, record));
+        assert_eq!(h.conductor.gone.len(), 1);
+        // The client's last command, written to the ring and not yet read, and then
+        // its lock let go.
+        let ring = CommandRing::open(h.dir.path(), true).expect("the ring");
+        let mut producer = ring.producer(spec::DRIVER_TIMEOUT).expect("a producer");
+        let command = Command::ClientKeepalive {
+            client_id: 7,
+            correlation_id: 200,
+        };
+        let mut bytes = [0u8; 64];
+        let length = command.write(&mut bytes).expect("a keepalive");
+        producer
+            .write(command.command_type() as i32, &bytes[..length], h.now)
+            .expect("written");
+        drop(held_by_client);
+        // The locks are tried before the ring is read on.
+        h.now += spec::nanos(spec::LOCK_CHECK_INTERVAL) + MS;
+        let now = h.now;
+        assert_eq!(h.conductor.try_locks(now), 1, "the lock is taken");
+        assert!(!h.conductor.client_gone_path(7).exists());
+        assert_eq!(
+            h.conductor.gone.len(),
+            1,
+            "kept: a command of the client's is unread"
+        );
+        // The ring is read: the command is dropped, and nobody is registered.
+        h.cycle();
+        assert!(h.conductor.clients.is_empty());
+        assert_eq!(h.counter(CLIENT_PROTOCOL_DROPPED_COMMAND), 1);
+        assert_eq!(h.counter(CLIENT_WITHOUT_LOCK), 0);
+        // And now the client is forgotten.
+        h.now += spec::nanos(spec::LOCK_CHECK_INTERVAL) + MS;
+        h.cycle();
         assert!(h.conductor.gone.is_empty());
     }
 
@@ -20149,6 +20318,7 @@ mod held {
         h.now += 2 * spec::nanos(spec::CLIENT_LIVENESS_TIMEOUT);
         h.cycle();
         assert_eq!(h.counter(CLIENT_WITHOUT_LOCK), 0);
+        assert_eq!(h.counter(CLIENT_PROTOCOL_DROPPED_COMMAND), 2);
         assert_eq!(h.counter(COUNTERS_RETIRED), 0);
         assert_eq!(h.counter(COUNTERS_HELD), 1);
         assert!(held(&h, record));
@@ -20182,7 +20352,7 @@ mod held {
         let mut correlation_id = 100;
         let refused = loop {
             let now = h.now;
-            assert!(h.conductor.touch_client(7, now));
+            assert_eq!(h.conductor.touch_client(7, now), Touch::Known);
             h.conductor.add_counter(
                 7,
                 correlation_id,
