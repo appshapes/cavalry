@@ -419,13 +419,15 @@ committed once a quorum, two of three, has it on disk.
   cluster member stopped`.
 - `WARN run.member_refused` in `doctor`, beside `FAIL driver-heartbeat`: the driver
   that made this directory closed because its cluster member's start failed. The
-  member never ran, so none of its own counters were added: this count, which `cavalry
-  run` adds to the driver's file before it closes the driver, is the only sign in the
-  directory. Read the line the process printed after the driver started, beginning
-  `cavalry run: member refused (` or `cavalry run: member stopped (`, which an entry
-  above explains by the reason in its brackets; under systemd, `journalctl -u` with
-  the unit reads it again. Correct what it names, then start `cavalry run` again with
-  the same directories.
+  member never ran a duty cycle, so none of its own counters is in the directory:
+  this count, which `cavalry run` adds to the driver's file before it closes the
+  driver, is the only sign there. Read the line the process printed after the driver
+  started; under systemd, `journalctl -u` with the unit reads it again. A line
+  beginning `cavalry run: member refused (` or `cavalry run: member stopped (` names
+  the reason in its brackets, which an entry above explains. A line beginning
+  `cavalry run: the cluster member's thread could not start` means the host had no
+  thread to give the member: free one. Correct what the line names, then start
+  `cavalry run` again with the same directories.
 - `WARN cluster-no-leader`: the member is in an election and has no leader to follow.
   The message says which state its election is in and why it began, from
   `cluster.election_cause`. A leader needs the votes of two of three members. At a
