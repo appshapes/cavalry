@@ -2370,7 +2370,8 @@ before that read hands its program an entry, whatever the program does, so that
 telling its member of a timer sends its driver no command and waits for none: a
 new `cavalry:ipc` log is 192 MiB, every page of which the driver touches as it
 creates it and the service's client touches again as it maps it (ADR 0027), tens
-of milliseconds (ADR 0168). A read that opens no log adds nothing. What it has to
+of milliseconds (ADR 0168). A service that has not opened its member's log adds
+nothing. What it has to
 tell is a timer that an entry it took left pending, a
 cancel, or the timers of the snapshot it started from, which it has to tell when
 it has read its history, though it reads no entry. A driver that refuses that
@@ -2691,7 +2692,7 @@ that a reader of a counters file knows which transition it saw.
 | a service's timers | at most 1,024 pending in one service; a schedule of another id beyond them is refused to the program ("The service", "Timers") |
 | unsent cancels | at most 1,024 cancel timers that a service holds for a consensus module stream that has not taken them; the oldest is dropped for the next and counted |
 | the member's timers | at most 2,048 that a member holds, twice a service's; a schedule timer beyond them replaces a timer whose event the member appended, and with none the member removes every timer and is sent the pending ones again ("The service", "Timers") |
-| timer refresh interval | 1 s: how often a service that has read its history sends its member every pending timer again, by the service's monotonic clock; what a member's timers lack or hold wrongly is put right within it |
+| timer refresh interval | 1 s: how often a service that has read its history sends its member every pending timer again, by the service's monotonic clock, and how long after its driver refused its counters or its publication to its member a service asks for them again ("What a service tells its member"; ADR 0168); what a member's timers lack or hold wrongly is put right within it |
 | timer events | at most 10 that a leader appends in one duty cycle |
 
 Timeouts are measured on a monotonic clock of the process that measures them, a

@@ -87,11 +87,12 @@ Nothing was run on the bench hosts, other sessions' gates ran on the laptop
 during some of it, and no run's number is a bound.
 
 - **What the publication costs.** The independent read of this change measured
-  it with a driver in the measuring process: the driver's creation of a 192 MiB
-  log took 9.8 to 11.5 ms, the client's writable open of it 6.5 to 7.4 ms, and a
-  read-only open 6.3 to 7.1 ms. `add_exclusive_publication("cavalry:ipc")` took
-  17.6 to 41.0 ms in 16 calls, where a `cavalry:udp` publication of 64 KiB terms
-  took 0.5 to 10.1 ms and an `add counter` 0.2 to 6.0 ms. My own first
+  it. By direct calls, with no driver: the creation of a 192 MiB log took 9.8 to
+  11.5 ms, a writable open of it 6.5 to 7.4 ms, and a read-only open 6.3 to 7.1
+  ms. With a driver in the measuring process:
+  `add_exclusive_publication("cavalry:ipc")` took 17.6 to 41.0 ms in 16 calls,
+  where a `cavalry:udp` publication of 64 KiB terms took 0.5 to 10.1 ms and an
+  `add counter` 0.2 to 6.0 ms. My own first
   measurement was inside a service's first telling of a timer, in four test
   runs: the five counters took 1.5 to 2.6 ms together, and the publication 27,
   28, 168 and 363 ms. The read did not reproduce the two larger, and nothing
@@ -99,14 +100,17 @@ during some of it, and no run's number is a bound.
 - **A first timer, before and after.** Before, the event of a timer that a
   program scheduled as due at once at its first schedule was stamped 38 to 68 ms
   after its message, in the five clients' rounds as they were run for work item
-  419. After, in ten runs of each client's runner: 16 to 25 ms in the Python
+  419. After, in ten runs of each client's runner, at commit 580c0d0a of this
+  change's branch, before the ask was paced, which the path they measure does
+  not pass through: 16 to 25 ms in the Python
   round, 16 to 27 ms in the Node round, 15 to 22 ms in the Go round, 15 to 24 ms
   in the JVM round and 18 to 24 ms in the .NET round. That is 50 first timers
   and a maximum of 27 ms. A service has one first timer in its life, so there
   is no p99.99 of it to give.
 - **A later timer.** `conformance/python/cluster.py` now sends 200 messages at
   the end of its round, one at a time, at each of which every program schedules
-  one more timer, due at once. In one run with 10,000 of them the leader stamped
+  one more timer, due at once. In one run with 10,000 of them, at commit
+  5036f7ce, with the paced ask, the leader stamped
   the event, after the message's own time, nearest rank: p50 20 ms, p99 28 ms,
   p99.99 38 ms, max 38 ms. The histogram, milliseconds and counts: 9: 1, 11: 3,
   12: 3, 13: 6, 14: 49, 15: 209, 16: 511, 17: 857, 18: 1,164, 19: 1,456, 20:
@@ -135,13 +139,24 @@ during some of it, and no run's number is a bound.
   and limit are records, was added on the way. A service that reads history
   tells its member nothing meanwhile.
 - `a_refused_add_is_the_polls_error_once_an_interval_and_is_made_good`, in the
-  same file, fills the driver's counters so that the first of the five is
-  refused. The poll that opens the log returns error code 10 with its entry
-  taken, and the driver counts one refused command. No poll in the next 600 ms
-  asks again or reports anything. The first poll a second after the refusal asks
-  once more and is refused once more. With room again, the service adds what is
-  missing and its member is told of the timer it kept. No test holds a refused
-  publication with the counters taken, which runs the same lines.
+  same file, fills the driver's counters so that the third of the five is
+  refused. The poll that opens the log returns error code 10, and the driver
+  counts one refused command. No poll in the next 600 ms asks again or reports
+  anything. Three entries are committed and the service is not polled until a
+  second after the refusal: one poll then asks once more, is refused once more,
+  and returns that error with the three entries taken. The two counters that
+  the driver took are kept and none is added twice. With room again and one more
+  entry committed, one poll a second later adds what is missing and hands that
+  entry over with the five counters there, which is how the test holds that the
+  adds come before the entries. The member is then told what the service kept: a
+  cancel, which no refresh would send again, and the timer that is pending.
+- `a_refused_publication_is_the_polls_error_and_is_added_once_the_driver_has_room`
+  fills the driver's publications: the five counters are there, one of each, the
+  poll's error is the refusal, nothing is told, and the first ask with room adds
+  the publication.
+- `a_program_is_handed_its_first_entry_with_the_services_counters_there` holds
+  that much for a first entry. The poll that opens the log may hand over no
+  entry, its replay not yet written, so it does not hold the order by itself.
 
 ## Consequences
 
@@ -174,8 +189,17 @@ during some of it, and no run's number is a bound.
   and each ask may leave another: work item 492, found by reading the driver
   for this decision and not run. The paced ask is one a second where it was one
   a poll.
-- A driver that refuses a counter, its 256 in use, is the same error of the same
-  reads, error code 10, counted in `driver.registry_full`.
+- A driver that refuses one of the five counters, one to five of its 256 left,
+  is the same error of the same reads, error code 10, counted in
+  `driver.registry_full`. With none left it refuses the service's first counter,
+  of its dropped replies, at the open of the log, as it did before this
+  decision: that poll hands over nothing, and every poll opens the log again and
+  is refused again, at no bounded rate. That is work item 494, found and
+  measured by the read of this change.
+- A program that polls on while the driver refuses is given one error a second
+  and no error from the polls between, so a poll that succeeded does not say
+  that the service holds its counters and its publication. A program that ends
+  on a poll's error, and is started again by a supervisor, asks at each start.
 - A service's gauge `cluster.service_timers` is in the counters file from its
   first open, for a program with no timer too, and while the service reads its
   history, where it was there only once a snapshot, a timer or a passed-over
@@ -188,8 +212,9 @@ during some of it, and no run's number is a bound.
 - The publication a service's snapshots are recordings of is still added at its
   first snapshot, and is a log of 192 MiB. A snapshot is no message's path.
 - A session's egress publication is still added in a poll that hands entries
-  over, at the session's opening: a `cavalry:udp` log of 48 MiB, touched the same
-  way. This decision is of the timers' publication alone.
+  over, at the session's opening and where the service's answering changes, up
+  to one for each open session in one poll: a `cavalry:udp` log of 48 MiB each,
+  touched the same way. This decision is of the timers' publication alone.
 - What is left of the time between a message and the event of a timer it
   scheduled as due at once is the same for a first timer and a later one: the
   entry's commit, its replay to the service, the telling and the leader's duty
@@ -203,7 +228,8 @@ during some of it, and no run's number is a bound.
 - Work item 462, which this decision was made in; work item 419, whose rounds
   showed it; work item 478, the term length of a `cavalry:ipc` channel; work item
   492, a log left as a file where the driver could not create it; work item 493,
-  the time an entry takes to reach its service.
+  the time an entry takes to reach its service; work item 494, a service whose
+  driver has no counter left.
 - `spec/cluster.md`, "Members and streams", "Snapshots", "A service's snapshot",
   and "The service", "Timers", "What a service tells its member"; `spec/c-abi.md`,
   "Handles".

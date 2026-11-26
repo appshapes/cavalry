@@ -2073,9 +2073,10 @@ impl ClusterService {
     /// publication its snapshots are recordings of, which the call returns as
     /// [`ClusterError::Client`]. The service's counters and its publication to its
     /// member were added when it first opened its member's log (ADR 0168); where
-    /// the driver refused one then, the call adds it before anything else, the
-    /// counters first, and a refusal of a counter is the one failure that is not
-    /// counted: there is no counter yet to count it in. The call returns it as [`ClusterError::Client`], and the next
+    /// the driver refused one then, the call adds it: a counter before anything
+    /// else, and the publication to its member after the one of its snapshots. A
+    /// refusal of a counter is the one failure that is not counted: there is no
+    /// counter yet to count it in. The call returns it as [`ClusterError::Client`], and the next
     /// call adds them again.
     ///
     /// ```
