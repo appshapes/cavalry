@@ -120,14 +120,20 @@ fn a_closed_follower_answers_no_canvass_position_that_holds_a_log() {
 
 /// A member whose own log is empty answers no canvass position, even one whose log is
 /// empty too and in a state other than canvass and nominate. Two members that hold no
-/// log never answer each other's answers. Member 0 has voted for member 1 in term 0,
-/// with no log, and waits in follower ballot.
+/// log never answer each other's answers. Member 0 has heard both other members, each
+/// with no log, as a member that holds nothing must before it votes (work item 476).
+/// It has voted for member 1 in term 0, with no log, and waits in follower ballot.
 #[test]
 fn a_member_whose_log_is_empty_answers_no_canvass_position() {
     let mut io = Stub::new();
     let mut member = elector(3);
     member.do_work(at(1), &mut io).expect("no fault");
     assert_eq!(member.election_state(), ElectionState::Canvass);
+    for other in [1, 2] {
+        member
+            .on_message(at(2), &empty(other), &mut io)
+            .expect("no fault");
+    }
     let request = Message::RequestVote {
         log_leadership_term_id: -1,
         log_position: 0,

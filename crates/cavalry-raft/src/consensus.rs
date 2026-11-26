@@ -20,9 +20,9 @@ use cavalry_proto::cluster::{
     ClusterAction, ELECTION_STATUS_INTERVAL_NS, ELECTION_TIMEOUT_NS, LEADER_HEARTBEAT_INTERVAL_NS,
     LEADER_HEARTBEAT_TIMEOUT_NS, LIVE_ADD_MAX_WINDOW, LogReport, MAX_MEMBERS, MemberPosition,
     Message, PROTOCOL_VERSION, STARTUP_CANVASS_TIMEOUT_NS, TermAction, TermFields, TermSpan,
-    TimeUnit, Vote, VoteRequest, ballot, candidate, canvass_position_action, clears_vote_floor,
-    commit_position, new_leadership_term_action, next_fields, quorum, request_vote, takes_leader,
-    votes_in_term, withheld_vote, withholds,
+    TimeUnit, Vote, VoteRequest, ballot, candidacy_term, candidate, canvass_position_action,
+    clears_vote_floor, commit_position, new_leadership_term_action, next_fields, quorum,
+    request_vote, takes_leader, votes_in_term, withheld_vote, withholds,
 };
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
@@ -75,7 +75,9 @@ pub enum ElectionState {
     /// moves it on too.
     Canvass = 1,
     /// Waits a random delay of up to half the election timeout, canvassing still, then
-    /// stores candidate term + 1 and votes for itself.
+    /// stores the term it stands in, candidate term + 1 or, for a member that holds
+    /// nothing, the term above each term named ([`candidacy_term`]), and votes for
+    /// itself.
     Nominate = 2,
     /// A candidate asks every other member for its vote, and leads the term at once
     /// when a quorum has voted for it and every member it has heard is among them, or
@@ -655,10 +657,13 @@ pub struct Counts {
     /// vote, and the member's own does not (ADR 0134).
     pub standby_vote_requests: u64,
     /// `cluster.votes_withheld`: a request vote the member answered with nothing
-    /// because it withholds its vote, its log empty beside a member that holds one or a
+    /// because it withholds its vote, its log empty beside a member that holds one, or
+    /// holding nothing, its log empty and no candidate term stored (work item 476), or a
     /// vote floor held, and not every voter had reported a log the candidate's is at
     /// least, or a voter other than the candidate had named the request's term or a
-    /// later one (ADR 0145, ADR 0161).
+    /// later one (ADR 0145, ADR 0161). A member that holds nothing and answers with
+    /// nothing only because a voter has not reported, no log heard and no floor held,
+    /// counts nothing here: `cluster.voters_unheard` shows that wait (ADR 0174).
     pub votes_withheld: u64,
     /// `cluster.leaders_withheld`: a new leadership term the member, a voter with its
     /// log empty, ignored where it would otherwise have taken the sender as its leader:
@@ -2250,7 +2255,11 @@ impl Consensus {
             term: request.log_leadership_term_id,
             position: request.log_position,
         };
-        if self.withholds(Some(candidate_log)) {
+        // A member that holds nothing, its log empty and no candidate term stored, votes
+        // by that one case even when it does not withhold, in a cluster of empty logs
+        // once every voter has reported: the term condition keeps it from a second vote
+        // in a term it voted in before it lost its log (work item 476; ADR 0174).
+        if self.withholds(Some(candidate_log)) || self.holds_nothing() {
             let mut reports = self.reports(self.own_report());
             if let Some(slot) = self
                 .other(candidate_member_id)
@@ -2271,7 +2280,23 @@ impl Consensus {
                 )
             });
             if !withheld_vote(self.count, &reports, candidate_log) || !fresh {
-                count(&mut self.counts.votes_withheld);
+                // A member that holds nothing and waits for a voter it has not heard,
+                // with no log heard and no floor held, answers with nothing and counts
+                // nothing: `cluster.voters_unheard` shows that wait, and
+                // `cluster.votes_withheld` the refusals that keep a committed entry, or
+                // one vote to a term (ADR 0174). The wait is decided from the inputs of
+                // the case itself, the candidate's request taken as its report: a
+                // refusal by the term condition is counted, though the candidate has
+                // sent no report of its own.
+                let waiting = self.holds_nothing()
+                    && self.vote_floor < 0
+                    && !self.log_heard(Some(candidate_log))
+                    && self.other(candidate_member_id).is_some_and(|candidate| {
+                        self.waits_for_voter(&reports, candidate, request.candidate_term_id)
+                    });
+                if !waiting {
+                    count(&mut self.counts.votes_withheld);
+                }
                 return Ok(());
             }
         }
@@ -2675,11 +2700,31 @@ impl Consensus {
 
     /// Whether this member withholds its vote and its candidacy (`spec/cluster.md`,
     /// "A member that lost its log"; ADR 0145): its log empty while a member's report
-    /// in this election, or `candidate`, the log of a request it answers, holds a log;
-    /// or a vote floor held, which it clears once it has joined a leader's live log in
-    /// this run with its append position at or past the floor and at or past a floor
-    /// answer (ADR 0161, ADR 0163).
+    /// in this election, or `candidate`, the log of a request it answers, holds a log,
+    /// or, while it holds no candidate term either, while a voter has not reported in
+    /// this election (work item 476); or a vote floor held, which it clears once it has
+    /// joined a leader's live log in this run with its append position at or past the
+    /// floor and at or past a floor answer (ADR 0161, ADR 0163). A member that holds
+    /// nothing votes by the one guarded case whether it withholds or not.
     fn withholds(&self, candidate: Option<LogReport>) -> bool {
+        let log_heard = self.log_heard(candidate);
+        // Every other voter of the members string has reported in this election: until
+        // then a member that holds nothing, its log empty and no candidate term stored,
+        // withholds too, since a candidate it voted for before it lost its log names
+        // that term only in a report (work item 476).
+        withholds(
+            self.own_report(),
+            self.vote_floor,
+            log_heard,
+            self.unheard_voters() == 0,
+            self.candidate_term,
+        )
+    }
+
+    /// Whether a member's report in this election, or `candidate`, the log of a request
+    /// this member answers, holds a log: log leadership term id 0 or more, or a position
+    /// above 0.
+    fn log_heard(&self, candidate: Option<LogReport>) -> bool {
         let holds = |log: &LogReport| log.term >= 0 || log.position > 0;
         let reported = self
             .peers
@@ -2693,8 +2738,7 @@ impl Consensus {
                     position: peer.position,
                 })
             });
-        let log_heard = reported || candidate.as_ref().is_some_and(holds);
-        withholds(self.own_report(), self.vote_floor, log_heard)
+        reported || candidate.as_ref().is_some_and(holds)
     }
 
     /// The lowest log position of the floor answers this member took since it last
@@ -2775,6 +2819,66 @@ impl Consensus {
             self.answered.min(answer.log_position)
         };
         self.answered_term = answer.leadership_term_id;
+    }
+
+    /// The voters of this member's members string, other than itself, that it has not
+    /// heard report in its present election: 0 once each has. A member whose log is
+    /// empty, beside members whose logs are empty too, stands and votes only once this
+    /// is 0 (`spec/cluster.md`, "A member that lost its log"; work item 476).
+    pub fn voters_unheard(&self) -> i64 {
+        if !self.holds_nothing() {
+            return 0;
+        }
+        i64::try_from(self.unheard_voters()).unwrap_or(i64::MAX)
+    }
+
+    /// Whether the guarded case refuses the request vote of the voter at `candidate`, for
+    /// `term`, only for want of a report (ADR 0174): a voter other than this member and
+    /// the candidate has no report in `reports`, where the request stands as the
+    /// candidate's, and no voter other than the two has named `term` or a later one in
+    /// this election. A voter that named such a term refuses the vote by the term
+    /// condition whatever the voter not heard would report, and that refusal is a
+    /// withheld vote.
+    fn waits_for_voter(
+        &self,
+        reports: &[Option<LogReport>; MAX_MEMBERS],
+        candidate: usize,
+        term: i64,
+    ) -> bool {
+        let others = || {
+            (0..self.count.min(MAX_MEMBERS))
+                .filter(|&index| index != self.own && index != candidate)
+        };
+        let unheard = others().any(|index| reports.get(index).is_some_and(Option::is_none));
+        let named = others().any(|index| {
+            self.terms_named
+                .get(index)
+                .copied()
+                .flatten()
+                .is_some_and(|named| named >= term)
+        });
+        unheard && !named
+    }
+
+    /// The voters other than this member that it has not heard report in this election.
+    fn unheard_voters(&self) -> usize {
+        self.peers
+            .iter()
+            .take(self.count)
+            .enumerate()
+            .filter(|&(index, peer)| index != self.own && !peer.reported)
+            .count()
+    }
+
+    /// Whether this member holds nothing: its log empty and no candidate term stored, as
+    /// a member whose log directory was lost, or a new cluster's member that has not
+    /// voted, holds none. Such a member may have voted before it lost its directory and
+    /// forgotten it, so it stands and votes only once every voter has reported, and then
+    /// by the one guarded case (work item 476). A member that holds a candidate term
+    /// holds one at or above every term it could have voted in, and votes only in a
+    /// term above it (ADR 0174).
+    fn holds_nothing(&self) -> bool {
+        self.log_empty() && self.candidate_term < 0
     }
 
     /// The vote floor this member holds, −1 for none: the end of the log of the leader
@@ -2870,14 +2974,27 @@ impl Consensus {
 
     /// State 2. Canvass position goes on; when the delay has ended the member takes
     /// candidate term + 1, stores it before it sends anything, votes for itself and
-    /// asks for the others' votes in candidate ballot. A fault at the store leaves it
-    /// here, and the next cycle stores the same term again.
+    /// asks for the others' votes in candidate ballot. A member that holds nothing takes
+    /// the term above each term a member named in this election too, where that is
+    /// higher, so that it gives itself no second vote in a term it voted in before it
+    /// lost its log ([`candidacy_term`]; ADR 0174). A member that withholds when the
+    /// delay ends, having heard a report that holds a log during it, goes back to canvass
+    /// and stores nothing, so that it is no candidate while it withholds, in the delay
+    /// as in canvass. A fault at the store leaves it here, and the next cycle stores that
+    /// term, or a higher one named since, again.
     fn nominate<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         let work = self.send_canvass_position(clock, io);
         if clock.now_ns < self.nomination_deadline_ns {
             return Ok(work);
         }
-        let term = self.candidate_term.saturating_add(1);
+        if self.withholds(None) {
+            return Ok(work.saturating_add(self.step(ElectionState::Canvass, clock)));
+        }
+        let term = candidacy_term(
+            self.own_report(),
+            self.candidate_term,
+            self.terms_named.get(..self.members).unwrap_or(&[]),
+        );
         io.store_candidate_term(term)?;
         self.candidate_term = term;
         self.votes = [None; MAX_MEMBERS];

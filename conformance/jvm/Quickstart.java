@@ -538,6 +538,25 @@ public final class Quickstart {
                 + " with error " + commitAfterCloseCode + "; expected -1 and ERROR with ERR_NULL (" + Abi.ERR_NULL
                 + "), and -1 with ERR_NO_CLAIM (" + Abi.ERR_NO_CLAIM + ")");
         }
+        // The subscription's images after its close, the other place where the ABI refuses
+        // them: the count is -1, and the list and the image at an index each throw that
+        // refusal, ERR_NULL, with no empty list and no null (work item 468; a runner asks
+        // since work item 477).
+        List<String> closed = new ArrayList<>();
+        closed.add(String.valueOf(subscription.imageCount()));
+        for (java.util.function.Supplier<Object> ask : asks) {
+            try {
+                closed.add("answered " + ask.get());
+            } catch (CavalryException refusedClosed) {
+                closed.add(refusedClosed.function() + " " + refusedClosed.code());
+            }
+        }
+        String refusedClosed = "cavalry_subscription_image_count " + Abi.ERR_NULL;
+        if (!closed.equals(List.of("-1", refusedClosed, refusedClosed))) {
+            fail(name + ": after the subscription's close its image count, its list of images and its image at an index gave "
+                + closed + "; expected -1, and a CavalryException of cavalry_subscription_image_count with ERR_NULL ("
+                + Abi.ERR_NULL + ") for each of the other two");
+        }
         say(name + ": a poll from inside a handler of its own subscription returned -1 with ERR_POLLING, the image count there"
             + " was -1 and the list of images and the image at an index each threw CavalryException with that code, and the"
             + " outer handler saw"
@@ -546,7 +565,8 @@ public final class Quickstart {
             + " claim's commit, abort and reserved value after it returned -1 with ERR_NO_CLAIM; a close"
             + " from inside the handler threw CavalryException with ERR_POLLING, kept the subscription open for message 18, and"
             + " the close after the poll closed it; after the closes, poll and tryClaim were refused by the ABI with ERR_NULL"
-            + " and commit with ERR_NO_CLAIM");
+            + " and commit with ERR_NO_CLAIM, and the subscription's image count was -1 and the list of images and the"
+            + " image at an index each threw CavalryException with ERR_NULL");
     }
 
     static List<Integer> range(int from, int to) {

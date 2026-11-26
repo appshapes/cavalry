@@ -177,9 +177,15 @@ jobs:
       # client's wheel, built with the shared library inside by the package's own
       # backend, installed into a new environment outside the checkout, and the
       # client README's example run there; then the same wheel without its library,
-      # which must fail. The runner's own Python 3 and its venv; nothing from a
-      # package index. On Linux for every change and on macOS each week and at a
-      # release, as the job's other steps are (ADR 0170).
+      # which must fail. Nothing from a package index. On Linux for every change and
+      # on macOS each week and at a release, as the job's other steps are (ADR 0170).
+      # On Linux the step runs at the floor, glibc 2.28 (ADR 0178): scripts/floor.sh
+      # starts a container of the image it names by digest, with the runner's own
+      # Rust toolchain and the image's Python 3.12, and the library and the driver
+      # are linked, checked by scripts/glibc-floor.py and run there. It is the one
+      # step that needs the runner's Docker and a registry, quay.io: the pull is
+      # 556 MB and took 10 s on this runner, and the step 18 s more with nothing
+      # built (run 45827238634). On macOS it uses the runner's own Python 3.
       - run: just package
       - run: just replay-check
       # The harness on a shared runner is a report (ADR 0016): the table is in the log

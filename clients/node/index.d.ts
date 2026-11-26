@@ -250,8 +250,20 @@ export class Subscription {
   readonly streamId: number;
   poll(handler: FragmentHandler, fragmentLimit: number | bigint): number;
   fault(): { code: number; sessionId: number; position: number };
+  /** How many images the subscription has, or -1 where the ABI refuses the call: from inside
+   * a handler of this subscription's own poll, with CAVALRY_ERR_POLLING as the thread's
+   * error, and after this subscription's own `close()`, with CAVALRY_ERR_NULL. It does not
+   * throw. */
   imageCount(): number;
+  /** The image at `index`, or null for an index past the count. Where the ABI refuses the
+   * call, from inside a handler of this subscription's own poll or after this subscription's
+   * own `close()`, it throws `CavalryError` with the ABI's code, CAVALRY_ERR_POLLING or
+   * CAVALRY_ERR_NULL, as `images` does: null is never a refusal. */
   imageAtIndex(index: number | bigint): Image | null;
+  /** Every image, valid until the next poll or close. Where the ABI refuses the count, from
+   * inside a handler of this subscription's own poll or after this subscription's own
+   * `close()`, it throws `CavalryError` with the ABI's code, CAVALRY_ERR_POLLING or
+   * CAVALRY_ERR_NULL: a refusal is no empty array (README, "What it must never do"). */
   images(): Image[];
   readonly isConnected: boolean;
   readonly isClosed: boolean;

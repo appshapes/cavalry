@@ -441,11 +441,26 @@ def edges(client):
                  f"CAVALRY_ERR_NO_CLAIM ({_abi.CAVALRY_ERR_NO_CLAIM}), since the close zeroed the claim struct")
     poll_or_fail(name, subscription, unexpected, 17, 17)  # the close aborted the claim: padding, never a fragment
     subscription.close()
+    # After its own close the wrapper hands the ABI a null handle, the other place where
+    # the ABI refuses a subscription's images: the count is -1, and the list and the image
+    # at an index each raise that refusal, CAVALRY_ERR_NULL, with no empty list and no
+    # None (work item 468; a runner asks since work item 477).
+    closed = [subscription.image_count()]
+    for ask in (subscription.images, lambda: subscription.image_at_index(0)):
+        try:
+            closed.append(("answered", ask()))
+        except cavalry.CavalryError as refused_closed:
+            closed.append((refused_closed.function, refused_closed.code))
+    if closed != [-1] + [("cavalry_subscription_image_count", _abi.CAVALRY_ERR_NULL)] * 2:
+        fail(f"{name}: after the subscription's close its image count, its list of images and its image at an index "
+             f"gave {closed}; expected -1, and a CavalryError of cavalry_subscription_image_count with "
+             f"CAVALRY_ERR_NULL ({_abi.CAVALRY_ERR_NULL}) for each of the other two")
     print(f"conformance/python: {name}: a poll from inside a handler of its own subscription returned -1 with "
           f"CAVALRY_ERR_POLLING, the image count there was -1 and the list of images and the image at an index "
           f"each raised CavalryError with that code, and the outer handler saw messages 13 to 15; a try_claim with a claim outstanding "
           f"returned ERROR with CAVALRY_ERR_CLAIM_OUTSTANDING, claim stayed the first view and its commit released it; "
-          f"a close with a claim outstanding released its view")
+          f"a close with a claim outstanding released its view; after the subscription's close its image count was "
+          f"-1 and the list of images and the image at an index each raised CavalryError with CAVALRY_ERR_NULL")
 
 
 def latency(client):

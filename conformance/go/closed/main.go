@@ -23,6 +23,7 @@ import (
 	"time"
 
 	cavalry "github.com/appshapes/cavalry/clients/go"
+	"github.com/appshapes/cavalry/conformance/go/linked"
 )
 
 const (
@@ -51,6 +52,7 @@ func codeOf(err error) int32 {
 }
 
 func main() {
+	linked.Check() // linked with the library run.sh has just built, or it stops here
 	if len(os.Args) != 2 {
 		fail("usage: closed <the driver's process id>")
 	}

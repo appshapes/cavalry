@@ -38,14 +38,15 @@ use cavalry_proto::udp::{LINGER, MTU_LENGTH_DEFAULT, SOCKET_RCVBUF_LENGTH, UDP_T
 use cavalry_shm::command_ring::{CommandRing, CommandRingError, layout::DRIVER_CLOSED};
 use cavalry_shm::counters::generated::{
     CHANNEL_DESTINATIONS, CHANNEL_IMAGES, CHANNEL_PUBLICATIONS, CHANNEL_SOCKET_RCVBUF,
-    CHANNEL_SOCKET_SNDBUF, CHANNEL_STATUS, CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_COUNTER,
-    COUNTERS, COUNTERS_ALLOCATED, COUNTERS_ALLOCATION_FAILED, IMAGE_CREATED, IMAGE_ENDED,
-    IMAGE_HWM_POSITION, IMAGE_REBUILD_POSITION, PUBLICATION_LIMIT, PUBLICATION_POSITION,
-    RECORDING_ARMED, RECORDING_ARMED_DROPPED, RECORDING_ARMED_FAILED, RECORDING_ARMED_STARTED,
-    RECORDING_BYTES, RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_SYNCED_POSITION,
-    RECORDING_WRITE_FAILED, SENDER_BYTES_UNSENT, SENDER_FLOW_CONTROL_RECEIVERS,
-    SENDER_FLOW_CONTROL_RECEIVERS_FULL, SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT,
-    SENDER_JOINS_REFUSED, SENDER_LIMIT, SENDER_POSITION, SUBSCRIPTION_POSITION,
+    CHANNEL_SOCKET_SNDBUF, CHANNEL_STATUS, CLIENT_CONDUCTOR_PARKS_OVERDUE,
+    CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_COUNTER, COUNTERS, COUNTERS_ALLOCATED,
+    COUNTERS_ALLOCATION_FAILED, IMAGE_CREATED, IMAGE_ENDED, IMAGE_HWM_POSITION,
+    IMAGE_REBUILD_POSITION, PUBLICATION_LIMIT, PUBLICATION_POSITION, RECORDING_ARMED,
+    RECORDING_ARMED_DROPPED, RECORDING_ARMED_FAILED, RECORDING_ARMED_STARTED, RECORDING_BYTES,
+    RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_SYNCED_POSITION, RECORDING_WRITE_FAILED,
+    SENDER_BYTES_UNSENT, SENDER_FLOW_CONTROL_RECEIVERS, SENDER_FLOW_CONTROL_RECEIVERS_FULL,
+    SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT, SENDER_JOINS_REFUSED, SENDER_LIMIT, SENDER_POSITION,
+    SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_CONTROL_TOGGLE,
@@ -63,7 +64,8 @@ use cavalry_shm::counters::generated::{
     CLUSTER_SERVICE_TIMERS, CLUSTER_SNAPSHOTS_FAILED, CLUSTER_SNAPSHOTS_PASSED_OVER,
     CLUSTER_STANDBY, CLUSTER_STANDBY_VOTE_REQUESTS, CLUSTER_TIMERS, CLUSTER_TIMERS_CLEARED,
     CLUSTER_TRUNCATION_OWED, CLUSTER_TRUNCATIONS_FAULTED, CLUSTER_TRUNCATIONS_REFUSED,
-    CLUSTER_VOTE_FLOOR, CLUSTER_VOTE_FLOORS_CLEARED, CLUSTER_VOTERS, CLUSTER_VOTES_WITHHELD,
+    CLUSTER_VOTE_FLOOR, CLUSTER_VOTE_FLOORS_CLEARED, CLUSTER_VOTERS, CLUSTER_VOTERS_UNHEARD,
+    CLUSTER_VOTES_WITHHELD,
 };
 use cavalry_shm::counters::generated::{
     DRIVER_REGISTRY_FULL, PUBLICATION_ADD_DEFERRED_WAITING, SUBSCRIPTION_ADD_DEFERRED_WAITING,
@@ -1023,6 +1025,40 @@ fn counters_checks(
             });
         }
     }
+    // A client's conductor that its watch woke (ADR 0177): a counter each such client
+    // adds for itself, at its first overdue park, so most clients have none. One
+    // finding for each client that has one above 0, named by the client id in its key.
+    checks += 1;
+    if let Some(def) = COUNTERS
+        .iter()
+        .find(|def| def.id == CLIENT_CONDUCTOR_PARKS_OVERDUE)
+    {
+        for id in 0..reader.capacity() {
+            let Some(fields) = reader.record(id).ok().flatten() else {
+                continue;
+            };
+            if fields.type_id() != def.id.0 {
+                continue;
+            }
+            let Some(client) = fields
+                .key()
+                .get(..8)
+                .and_then(|key| <[u8; 8]>::try_from(key).ok())
+                .map(i64::from_le_bytes)
+            else {
+                continue;
+            };
+            let value = reader.read(id).unwrap_or(0);
+            if value > 0 {
+                findings.push(Finding {
+                    check: def.name,
+                    level: Level::Warn,
+                    message: format!("client {client}'s {} is {value}: {}", def.name, def.doctor),
+                    doc: DOC_COUNTERS,
+                });
+            }
+        }
+    }
     // The adds held behind an endpoint that is closing each take a slot of their
     // registry until they run (ADR 0049, ADR 0153, ADR 0154), so a registry can refuse
     // an add with code 10 while fewer are registered than it holds. A wait is a
@@ -1275,6 +1311,10 @@ struct MemberCounters {
     /// counters file holds no such record, as for a member of a build older than the
     /// counter.
     vote_floor: Option<i64>,
+    /// `cluster.voters_unheard`: the voters the member has not heard report in its
+    /// present election (work item 476); `None` while the counters file holds no such
+    /// record, as for a member of a build older than the counter.
+    voters_unheard: Option<i64>,
     /// `cluster.truncation_owed`: the position of the truncation the member owes, −1
     /// for none (ADR 0148); `None` while the counters file holds no such record, as
     /// for a member of a build older than the counter.
@@ -1712,6 +1752,8 @@ fn cluster_checks(
             member.protocol_version = Some(value);
         } else if type_id == CLUSTER_VOTE_FLOOR.0 {
             member.vote_floor = Some(value);
+        } else if type_id == CLUSTER_VOTERS_UNHEARD.0 {
+            member.voters_unheard = Some(value);
         } else if type_id == CLUSTER_TRUNCATION_OWED.0 {
             member.truncation_owed = Some(value);
         } else if type_id == CLUSTER_VOTE_FLOORS_CLEARED.0 {
@@ -1957,6 +1999,21 @@ fn no_leader_message(member: &MemberCounters, state: i64, cluster: Option<&Clust
     } else {
         ""
     };
+    // A member that holds nothing, its log empty and no candidate term stored, as a new
+    // cluster's members before their first vote, neither stands nor votes until it has
+    // heard every voter (work item 476), and the gauge counts the voters it waits for:
+    // 0 for any other member. A standby casts no vote and stands for nothing anyway.
+    let unheard = match member.voters_unheard {
+        Some(unheard) if unheard > 0 && member.standby != Some(1) => format!(
+            " It holds nothing, its log empty and no candidate term stored, as a new \
+             cluster's members do before their first vote and as a lost log directory \
+             leaves a member, and it has not heard {unheard} of the other {who}s in this \
+             election: such a member neither stands nor votes until it has heard every \
+             {who}, so a new cluster elects no leader until each of its members has \
+             started. Start or restart the {who}s it has not heard."
+        ),
+        _ => String::new(),
+    };
     let replicated = if state == 1 {
         " A member that has replicated a term it missed from a leader's recordings also \
          canvasses again, with no leader, in the same election: it waits there for that \
@@ -1970,11 +2027,13 @@ fn no_leader_message(member: &MemberCounters, state: i64, cluster: Option<&Clust
         "member {id} follows no leader: its election is in {}{began}. The members elect \
          their leader: each canvasses, one that no member which reported is ahead of \
          nominates itself after a delay of up to half a second, and it leads once {of} has \
-         voted for it. At its start a member waits in canvass up to {startup} s for every \
-         {who} to report, and moves to nominate at once when all have. If this member stays \
-         without a leader, fewer than a quorum of the {who}s run or reach each other: run \
+         voted for it. At its start a member that holds a log or a candidate term waits \
+         in canvass up to {startup} s for every {who} to report, and moves to nominate at \
+         once when all have; one that holds nothing, its log empty and no candidate term \
+         stored, waits for every {who}, with no bound. If this member stays without a \
+         leader, fewer than a quorum of the {who}s run or reach each other: run \
          doctor on each member's host, and check that each reaches the consensus endpoint \
-         of every other, the third field of its entry in {members}.{standby}{replicated}{}",
+         of every other, the third field of its entry in {members}.{unheard}{standby}{replicated}{}",
         election_state_name(state),
         failed_elections_text(member)
     )
@@ -4082,7 +4141,8 @@ mod tests {
     use cavalry_shm::command_ring::CommandRing;
     use cavalry_shm::counters::CountersFile;
     use cavalry_shm::counters::generated::{
-        CLIENT_TIMED_OUT, RECORDING_CUT_TO_SYNCED, RUN_MEMBER_GIVEN_UP, RUN_MEMBER_REFUSED,
+        CLIENT_TIMED_OUT, DRIVER_PARKS_OVERDUE, RECORDING_CUT_TO_SYNCED, RUN_MEMBER_GIVEN_UP,
+        RUN_MEMBER_REFUSED,
     };
 
     struct TestDir(PathBuf);
@@ -5754,6 +5814,94 @@ mod tests {
         );
     }
 
+    /// A driver thread that did not come back from a timed wait, and that the driver's
+    /// watch woke (ADR 0176): doctor says from the counter alone what happened, what it
+    /// cost, that a few a day on a Mac need nothing done, and the page that says how to
+    /// probe the machine.
+    #[test]
+    fn a_park_the_watch_ended_is_explained_from_its_counter() {
+        let dir = TestDir::new("parks-overdue");
+        let counters = CountersFile::create(&dir.0, 256).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let parks = counters
+            .counter(DRIVER_PARKS_OVERDUE.record())
+            .expect("static");
+        parks.increment();
+        parks.increment();
+        let report = examine(&dir.0);
+        let found = finding(&report, "driver.parks_overdue");
+        assert_eq!(found.level, Level::Warn);
+        assert!(
+            found.message.starts_with(
+                "driver.parks_overdue is 2: A thread of this driver did not come back from a \
+                 timed wait and was woken by the driver's watch"
+            ),
+            "{}",
+            found.message
+        );
+        for words in [
+            "a stall of up to 300 ms past its timeout",
+            "nothing to do",
+            "docs/how-to/find-a-wait-that-does-not-return.md",
+            "could not run the driver's threads",
+        ] {
+            assert!(found.message.contains(words), "{words}: {}", found.message);
+        }
+        assert!(report.ok(), "a warning does not fail: {report}");
+    }
+
+    /// A client's conductor that did not come back from a timed wait, and that the
+    /// client's watch woke (ADR 0177): doctor says from the client's own counter which
+    /// client, what happened, what it cost, and the page that says how to probe the
+    /// machine. A client whose counter reads 0 is not named.
+    #[test]
+    fn a_clients_conductor_that_its_watch_woke_is_explained_from_the_clients_counter() {
+        let dir = TestDir::new("client-parks-overdue");
+        let mut counters = CountersFile::create(&dir.0, 256).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        for (client, value) in [(41i64, 3), (42i64, 0)] {
+            counters
+                .allocate(
+                    CLIENT_CONDUCTOR_PARKS_OVERDUE,
+                    &client.to_le_bytes(),
+                    &format!("client.conductor_parks_overdue {client}"),
+                )
+                .expect("room")
+                .store_release(value);
+        }
+        let report = examine(&dir.0);
+        let found: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|finding| finding.check == "client.conductor_parks_overdue")
+            .collect();
+        assert_eq!(found.len(), 1, "one client above 0: {report}");
+        assert_eq!(found[0].level, Level::Warn);
+        assert!(
+            found[0].message.starts_with(
+                "client 41's client.conductor_parks_overdue is 3: A client's conductor did \
+                 not come back from a timed wait and was woken by the client's watch"
+            ),
+            "{}",
+            found[0].message
+        );
+        for words in [
+            "a stall of up to 300 ms past its timeout",
+            "nothing to do",
+            "docs/how-to/find-a-wait-that-does-not-return.md",
+            "could not run the client's threads",
+        ] {
+            assert!(
+                found[0].message.contains(words),
+                "{words}: {}",
+                found[0].message
+            );
+        }
+        assert!(report.ok(), "a warning does not fail: {report}");
+    }
+
     /// A recovery that cut a recording to what it had synced, after a crash of any kind
     /// (ADR 0144): doctor says from the counter alone what was dropped, that nothing a
     /// client was told is durable was, and what to look for when it recurs.
@@ -6861,6 +7009,62 @@ mod tests {
     const THREE_MEMBERS: &str = "0,127.0.0.1:9000,127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003,127.0.0.1:9004\
                                  |1,127.0.0.1:9010,127.0.0.1:9011,127.0.0.1:9012,127.0.0.1:9013,127.0.0.1:9014\
                                  |2,127.0.0.1:9020,127.0.0.1:9021,127.0.0.1:9022,127.0.0.1:9023,127.0.0.1:9024";
+
+    /// A member of a new cluster that holds nothing, its log empty and no candidate term
+    /// stored, and that has not heard every voter, is told it neither stands nor votes
+    /// until it has, and to start or restart the voter it has not heard (work item 476).
+    /// The core counts the voters it waits for only for such a member: one whose gauge
+    /// reads 0, as a member that holds a log reads, is told nothing of it, and nor is a
+    /// standby, which casts no vote.
+    #[test]
+    fn a_new_clusters_member_that_has_not_heard_every_voter_is_told_to_start_it() {
+        let cluster = Cluster::of(Some(THREE_MEMBERS)).expect("the members string parses");
+        let waiting = |append: i64, unheard: i64| {
+            [
+                (CLUSTER_ROLE, 0),
+                (CLUSTER_ELECTION_STATE, 1),
+                (CLUSTER_LEADERSHIP_TERM_ID, -1),
+                (CLUSTER_LEADER_MEMBER_ID, -1),
+                (CLUSTER_ELECTION_CAUSE, 0),
+                (CLUSTER_PROTOCOL_VERSION, 768),
+                (CLUSTER_APPEND_POSITION, append),
+                (CLUSTER_VOTERS_UNHEARD, unheard),
+            ]
+        };
+        let no_leader = |findings: Vec<Finding>| {
+            findings
+                .into_iter()
+                .find(|found| found.check == "cluster-no-leader")
+                .expect("a cluster-no-leader finding")
+                .message
+        };
+        let (_, findings) =
+            cluster_findings_in("new-cluster-waits", 0, Some(&cluster), &waiting(0, 1));
+        let message = &no_leader(findings);
+        assert!(
+            message.contains(
+                "It holds nothing, its log empty and no candidate term stored, as a new \
+                 cluster's members do before their first vote and as a lost log directory \
+                 leaves a member, and it has not heard 1 of the other members in this \
+                 election: such a member neither stands nor votes until it has heard every \
+                 member"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains("Start or restart the members it has not heard."),
+            "{message}"
+        );
+        let (_, findings) =
+            cluster_findings_in("holds-a-log-waits", 0, Some(&cluster), &waiting(4096, 0));
+        let message = &no_leader(findings);
+        assert!(!message.contains("It holds nothing"), "{message}");
+        let mut standby = waiting(0, 1).to_vec();
+        standby.push((CLUSTER_STANDBY, 1));
+        let (_, findings) = cluster_findings_in("standby-waits", 0, Some(&cluster), &standby);
+        let message = &no_leader(findings);
+        assert!(!message.contains("It holds nothing"), "{message}");
+    }
 
     /// A member that has no leader is told where its election stands, why it began,
     /// from its gauge, and what elects a leader, and never that a member leads without
@@ -8782,9 +8986,10 @@ mod tests {
         // It is the voters that report in canvass and that make the quorum.
         assert!(
             no_leader.contains(
-                "for every voter to report, and moves to nominate at once when all have. If \
-                 this member stays without a leader, fewer than a quorum of the voters run \
-                 or reach each other"
+                "for every voter to report, and moves to nominate at once when all have; one \
+                 that holds nothing, its log empty and no candidate term stored, waits for \
+                 every voter, with no bound. If this member stays without a leader, fewer \
+                 than a quorum of the voters run or reach each other"
             ),
             "{no_leader}"
         );

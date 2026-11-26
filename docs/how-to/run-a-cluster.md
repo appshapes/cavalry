@@ -45,11 +45,13 @@ committed once a quorum, two of three, has it on disk.
   Until it has caught up, the cluster tolerates one failed member fewer. That is
   safe while each other member holds the log it kept, a new leadership term that the
   leader's sender held back by flow control included, and a report of its earlier run
-  that reaches the leader late included. It is not safe in one case:
-  another member that holds no log
+  that reaches the leader late included. Beside another member that holds no log
   either, because it started late and has not yet caught up, while the member that
-  holds the log is stopped. The two then elect as a new cluster does. A volume spares
-  the wait and both cases.
+  holds the log is stopped, the two elect nothing: the member on the empty directory
+  waits for every member's report, and `cluster.voters_unheard` counts the members it
+  waits for. Once the stopped member runs again, it leads
+  ([ADR 0174](../decisions/0174-have-a-member-that-holds-nothing-vote-only-once-every-voter-has-reported.md)).
+  A volume spares the wait.
 - Every member on this version of Cavalry. A member of a version in which the member
   with the lowest id was the leader casts no vote, so the two are not one cluster,
   and a log directory that version wrote is refused here. To move a cluster from
@@ -91,10 +93,20 @@ committed once a quorum, two of three, has it on disk.
    ```
 
    Each prints `cavalry run: driver started on ...` and then `cavalry run: cluster
-   member <id> started`. Start all three within a minute. Three members that have
-   heard one another elect a leader within a second. Two that run while the third
-   is not started wait 60 s for it, the startup canvass timeout, and then elect one
-   of the two; the third joins when it starts and catches up from the leader.
+   member <id> started`. Start all three, from one build of `cavalry`: a build from
+   before work item 476 votes at a new cluster's start as this one does not, and
+   nothing tells the two apart. A new cluster elects its first leader only
+   once every member has started: three members that have heard one another elect a
+   leader within a second, and two that run while the third has not started wait
+   for it, for as long as it takes. Before its first vote a member of a new cluster
+   holds nothing, its log empty and no
+   [candidate term](../glossary.md) stored, and it votes only once it has heard
+   every member (work item 476).
+   Once every member has followed the first leader, a member that stops or starts
+   late no longer holds the others back: two of three elect while the third is
+   stopped, and the third catches up from the leader when it starts. If the first
+   leader stops before every member has followed it, the others can wait for it:
+   start it again.
 
 4. Ask each member what it is:
 
@@ -430,9 +442,13 @@ committed once a quorum, two of three, has it on disk.
   `cavalry run` again with the same directories.
 - `WARN cluster-no-leader`: the member is in an election and has no leader to follow.
   The message says which state its election is in and why it began, from
-  `cluster.election_cause`. A leader needs the votes of two of three members. At a
-  start, members that have not heard every other member wait 60 s for it, the
-  startup canvass timeout, before two of them elect. Run `doctor` on each member's
+  `cluster.election_cause`. A leader needs the votes of two of three members. A
+  member that holds nothing, its log empty and no candidate term stored, as a new
+  cluster's members do before their first vote, waits until it has heard every other
+  member, for as long as that takes: start the member it has not heard, a first
+  leader that stopped among them. At a start, a member that holds a log or a
+  candidate term waits 60 s, the startup canvass timeout, for a member it has not
+  heard, before two of them elect. Run `doctor` on each member's
   host, and check that each host reaches the `consensus` endpoint of every other,
   the second port of each entry in step 1. In canvass the message has one more
   sentence, for a member that has replicated a term it missed: it canvasses again

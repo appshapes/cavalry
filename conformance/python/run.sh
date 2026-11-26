@@ -43,6 +43,24 @@ echo "conformance/python: build the driver and the library"
 cargo build --release -p cavalry --bin cavalry
 cargo build --release -p cavalry-ffi --lib
 
+# The Python client loads the library at the path in CAVALRY_FFI_LIBRARY when that is set,
+# before it looks in the checkout. A value from the caller's shell, as one left after a
+# packaged library was tried by hand, would have this runner test that library and say
+# ok of it. So the runner names the library it has just built (work item 504). The README's
+# example is the one program that runs without it, as the reader runs it, so that the
+# client's own search for the checkout's library is tested too (readme.py).
+case "$(uname -s)" in Darwin) suffix=dylib ;; *) suffix=so ;; esac
+export CAVALRY_FFI_LIBRARY="$PWD/target/release/libcavalry_ffi.$suffix"
+# One thing comes before the variable for the Python client: a library packaged beside
+# the module, as in a wheel (clients/python/README.md, "The package"). A checkout has
+# none; one left there would be loaded and not the library built above, so the runner
+# stops and says so.
+packaged=$(find clients/python/cavalry -maxdepth 1 -name 'libcavalry_ffi.*' | head -n 1)
+if [ -n "$packaged" ]; then
+    echo "conformance/python: $packaged is beside the module, and the client loads it before any other: this runner would test it and not the library it has just built. Remove it." >&2
+    exit 1
+fi
+
 echo "conformance/python: cavalry run, in the background, on $CAVALRY_DIR"
 target/release/cavalry run &
 driver_pid=$!

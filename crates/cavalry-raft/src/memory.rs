@@ -90,6 +90,32 @@ const REPLAY_CONNECT_TIMEOUT_NS: u64 = 5_000_000_000;
 /// cluster has would be more than a test needs.
 pub const MAX_HELD_BACK: usize = 8;
 
+/// The most consensus messages the in-memory cluster holds in held streams at once
+/// ([`Cluster::hold_stream`]): one sent while that many are held is lost, as a datagram
+/// the network drops is, and counted in [`Cluster::held_stream_losses`]. Its sender
+/// takes it as sent.
+pub const MAX_HELD_STREAM: usize = 1_024;
+
+/// The most votes the in-memory cluster records for [`Cluster::votes_cast`]: one cast
+/// past that many is not recorded, and is counted in [`Cluster::votes_unrecorded`].
+pub const MAX_VOTES_CAST: usize = 65_536;
+
+/// A vote a member cast, as [`Cluster::votes_cast`] records it when the member writes
+/// it: a vote for a candidate, or a candidate's vote for itself, which its request vote
+/// carries (work item 476).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct VoteCast {
+    /// The member id that cast it, the one its messages name.
+    pub voter: i32,
+    /// The term it was cast in.
+    pub term: i64,
+    /// The run it went to, as [`Cluster::member`] names it: the run that held the
+    /// candidate's member id's address when the vote was written.
+    pub candidate: i32,
+    /// That run's number, [`Cluster::run`], when the vote was written.
+    pub run: i64,
+}
+
 /// One consensus message between two members.
 struct Flight {
     deliver_at_ns: u64,
@@ -359,9 +385,51 @@ struct World {
     /// The member ids whose address a test moved to another run, each with the place
     /// of the run that holds it now ([`Cluster::move_address`]).
     addressed: Vec<(i32, usize)>,
+    /// The pairs, `(from, to)` by place, whose stream a test holds
+    /// ([`Cluster::hold_stream`]), and every message sent on them since, in the order
+    /// sent: at most [`MAX_HELD_STREAM`].
+    held_streams: Vec<(usize, usize)>,
+    stream_queue: Vec<Flight>,
+    /// The messages a held stream lost: sent while [`MAX_HELD_STREAM`] were held, or
+    /// released while the in-flight queue was full.
+    stream_losses: u64,
+    /// Every vote cast, in the order written: at most [`MAX_VOTES_CAST`]. It grows as
+    /// votes are cast, where the other bounded tables are reserved whole: a search's run
+    /// casts some hundreds, and every cluster a test builds would hold 1.5 MiB for the
+    /// bound it seldom nears. [`Cluster::votes_unrecorded`] counts what it cannot hold.
+    votes_cast: Vec<VoteCast>,
+    /// The votes cast past [`MAX_VOTES_CAST`], not recorded.
+    votes_unrecorded: u64,
 }
 
 impl World {
+    /// Records a vote the member at place `own` writes in `term` for the run at place
+    /// `candidate`, its own for a request vote, once: a candidate writes one request
+    /// vote to each member, and its vote for itself is recorded at the first.
+    fn record_vote(&mut self, own: usize, term: i64, candidate: usize) {
+        let (Some(voter), Some(to), Some(&run)) = (
+            self.disks.get(own).map(|disk| disk.member),
+            self.disks.get(candidate).map(|disk| disk.id),
+            self.runs.get(candidate),
+        ) else {
+            return;
+        };
+        let cast = VoteCast {
+            voter,
+            term,
+            candidate: to,
+            run,
+        };
+        if self.votes_cast.last() == Some(&cast) {
+            return;
+        }
+        if self.votes_cast.len() < MAX_VOTES_CAST {
+            self.votes_cast.push(cast);
+        } else {
+            self.votes_unrecorded = self.votes_unrecorded.saturating_add(1);
+        }
+    }
+
     /// The place of the run that a message to member id `member` reaches: the run that
     /// holds the member id's address, the member's own until a test moves it.
     fn to(&self, member: i32) -> Option<usize> {
@@ -409,6 +477,12 @@ fn unheard_since(disks: &[Disk], cuts: &[Cut], from: usize, to: usize) -> Option
     own.chain(between).min()
 }
 
+/// The place of the member that sent `flight`, as `session_of` writes it in the
+/// session's top byte.
+fn sender_of(flight: &Flight) -> usize {
+    usize::try_from((flight.session >> 24) & 0xFF).unwrap_or(usize::MAX)
+}
+
 /// One member's [`Io`], for the length of one call into its core.
 struct MemberIo<'a> {
     world: &'a mut World,
@@ -442,8 +516,40 @@ impl Io for MemberIo<'_> {
         let Ok(length) = message.write(&mut buffer) else {
             return false;
         };
+        // A vote is cast when it is written, whether it arrives or not.
+        match *message {
+            Message::Vote {
+                candidate_term_id,
+                vote: true,
+                ..
+            } => self.world.record_vote(self.own, candidate_term_id, to),
+            Message::RequestVote {
+                candidate_term_id, ..
+            } => self
+                .world
+                .record_vote(self.own, candidate_term_id, self.own),
+            _ => {}
+        }
         let run = self.world.runs.get(self.own).copied().unwrap_or(0);
         let session = session_of(self.own, to, run);
+        // A stream a test holds keeps every message written on it from then on, in the
+        // order written, as a sender keeps the frames its receiver's image is a receiver
+        // window behind for, and sends them to the next image (`spec/udp.md`, "The
+        // sender"): none is lost at the receiver's start, as a datagram on its way is.
+        if self.world.held_streams.contains(&(self.own, to)) {
+            if self.world.stream_queue.len() < MAX_HELD_STREAM {
+                self.world.stream_queue.push(Flight {
+                    deliver_at_ns: 0,
+                    to,
+                    bytes: buffer.get(..length).unwrap_or(&[]).to_vec(),
+                    run,
+                    session,
+                });
+            } else {
+                self.world.stream_losses = self.world.stream_losses.saturating_add(1);
+            }
+            return true;
+        }
         // The message a test holds back is written and not sent, as a sender holds a
         // frame back while its receiver's image is a receiver window behind, and it
         // reaches the member when the test releases it.
@@ -1052,6 +1158,11 @@ impl Cluster {
                 max_delay_ms: 0,
                 random: 0x9E37_79B9_7F4A_7C15,
                 addressed: Vec::new(),
+                held_streams: Vec::with_capacity(member_ids.len().saturating_mul(member_ids.len())),
+                stream_queue: Vec::with_capacity(MAX_HELD_STREAM),
+                stream_losses: 0,
+                votes_cast: Vec::new(),
+                votes_unrecorded: 0,
             },
         })
     }
@@ -2260,6 +2371,133 @@ impl Cluster {
             .retain(|&(_, armed_to, _)| armed_to != to);
     }
 
+    /// Holds the stream from member `from` to member `to`, as a sender holds the frames
+    /// its receiver's image is a receiver window behind for (`spec/udp.md`, "The
+    /// sender"; work item 476): every consensus message `from` sends `to` from now on is
+    /// kept, in the order written, at most [`MAX_HELD_STREAM`] of them across every
+    /// held stream, and none reaches `to` until [`Cluster::release_stream`]. A start of
+    /// `to` again, [`Cluster::wipe`] or [`Cluster::restart`], loses none of them: they
+    /// reach its new run, as a sender sends its unsent frames to the next image. Unlike
+    /// [`Cluster::hold_back_new_leadership_term`], which holds one message while those
+    /// written after it pass, a held stream keeps the order a stream has.
+    pub fn hold_stream(&mut self, from: i32, to: i32) {
+        let index = |id: i32| self.world.disks.iter().position(|disk| disk.id == id);
+        if let (Some(from), Some(to)) = (index(from), index(to))
+            && !self.world.held_streams.contains(&(from, to))
+        {
+            self.world.held_streams.push((from, to));
+        }
+    }
+
+    /// Lets the stream from `from` to `to` go: the messages it kept are sent now, in the
+    /// order written, each to arrive at the next step, and what `from` sends `to` next
+    /// goes as any message does.
+    pub fn release_stream(&mut self, from: i32, to: i32) {
+        let index = |id: i32| self.world.disks.iter().position(|disk| disk.id == id);
+        let (Some(from), Some(to)) = (index(from), index(to)) else {
+            return;
+        };
+        self.world.held_streams.retain(|&pair| pair != (from, to));
+        self.send_held(from, to, usize::MAX);
+    }
+
+    /// Sends the first `count` messages the stream from `from` to `to` kept, in the order
+    /// written, each to arrive at the next step, and keeps holding the rest and what
+    /// `from` sends `to` next, as a sender sends the frames it held to a receiver's new
+    /// image one receiver window at a time (`spec/udp.md`, "The sender"; ADR 0174).
+    /// [`Cluster::held_stream_count`] says how many it keeps.
+    pub fn release_stream_first(&mut self, from: i32, to: i32, count: usize) {
+        let index = |id: i32| self.world.disks.iter().position(|disk| disk.id == id);
+        if let (Some(from), Some(to)) = (index(from), index(to)) {
+            self.send_held(from, to, count);
+        }
+    }
+
+    /// How many messages the stream from `from` to `to` keeps, of its sender's present
+    /// run: 0 for a stream not held.
+    pub fn held_stream_count(&self, from: i32, to: i32) -> usize {
+        let index = |id: i32| self.world.disks.iter().position(|disk| disk.id == id);
+        let (Some(from), Some(to)) = (index(from), index(to)) else {
+            return 0;
+        };
+        let run = self.world.runs.get(from).copied().unwrap_or(0);
+        self.world
+            .stream_queue
+            .iter()
+            .filter(|flight| flight.to == to && sender_of(flight) == from && flight.run == run)
+            .count()
+    }
+
+    /// Sends the first `count` messages the stream from place `from` to place `to` kept,
+    /// and drops what an earlier run of the sender wrote on it: a message that run wrote
+    /// went with that run's publication, as a process that stops takes its unsent
+    /// frames with it.
+    fn send_held(&mut self, from: usize, to: usize, count: usize) {
+        let now_ns = self.world.clock.now_ns;
+        let run = self.world.runs.get(from).copied().unwrap_or(0);
+        let queue = std::mem::take(&mut self.world.stream_queue);
+        // Reserved whole, as the queue was at the start: a hold after this release
+        // pushes into it without growing it.
+        let mut kept = Vec::with_capacity(MAX_HELD_STREAM);
+        let mut sent = 0;
+        for mut flight in queue {
+            if flight.to != to || sender_of(&flight) != from {
+                kept.push(flight);
+            } else if flight.run != run {
+                // An earlier run's message: dropped, and no loss of a held stream.
+            } else if sent >= count {
+                kept.push(flight);
+            } else if self.world.net.len() < IN_FLIGHT_CAPACITY {
+                flight.deliver_at_ns = now_ns.saturating_add(STEP_NS);
+                self.world.net.push_back(flight);
+                sent += 1;
+            } else {
+                self.world.stream_losses = self.world.stream_losses.saturating_add(1);
+                sent += 1;
+            }
+        }
+        self.world.stream_queue = kept;
+    }
+
+    /// The messages held streams lost: one sent while [`MAX_HELD_STREAM`] were held, or
+    /// one released while the in-flight queue held [`IN_FLIGHT_CAPACITY`]. A message an
+    /// earlier run of its sender wrote, which goes with that run, is no loss of this
+    /// count's.
+    pub fn held_stream_losses(&self) -> u64 {
+        self.world.stream_losses
+    }
+
+    /// Every vote the members cast, in the order written, at most [`MAX_VOTES_CAST`]:
+    /// each vote for a candidate, and each candidate's vote for itself, which its
+    /// request vote carries. A vote is recorded when it is written, so one lost or held
+    /// on its way is recorded too, and a member id's votes stay recorded across a
+    /// [`Cluster::wipe`], which the member's new run forgets (work item 476).
+    ///
+    /// ```
+    /// use cavalry_raft::memory::Cluster;
+    ///
+    /// let mut cluster = Cluster::with_election(&[0, 1, 2], 1).expect("three members");
+    /// cluster.run_ms(2_000);
+    /// let leader = cluster.leader().expect("a leader");
+    /// let term = cluster.member(leader).expect("a member").leadership_term_id();
+    /// let for_leader = cluster
+    ///     .votes_cast()
+    ///     .iter()
+    ///     .filter(|vote| vote.term == term && vote.candidate == leader)
+    ///     .count();
+    /// assert!(for_leader >= 2, "its own vote and a quorum's");
+    /// assert_eq!(cluster.votes_unrecorded(), 0);
+    /// ```
+    pub fn votes_cast(&self) -> &[VoteCast] {
+        &self.world.votes_cast
+    }
+
+    /// The votes cast past [`MAX_VOTES_CAST`], which [`Cluster::votes_cast`] does not
+    /// hold.
+    pub fn votes_unrecorded(&self) -> u64 {
+        self.world.votes_unrecorded
+    }
+
     /// Holds back the next floor answer member `from` sends to member `to`: it is
     /// written, kept out of the in-flight queue, and reaches `to` when the test releases
     /// it with [`Cluster::release_held_back`], naming the session of the run it
@@ -2412,5 +2650,49 @@ mod tests {
             [in_flight_to(&cluster, 0), in_flight_to(&cluster, 2)],
             others
         );
+    }
+
+    /// The record of votes holds its bound, `MAX_VOTES_CAST` (invariant 3; work item
+    /// 476). Of `MAX_VOTES_CAST + 1` votes, each in a term of its own so that none
+    /// repeats the one before it, the first `MAX_VOTES_CAST` are recorded, and the one
+    /// past the bound is counted in `votes_unrecorded` and not pushed.
+    #[test]
+    fn the_record_of_votes_holds_its_bound() {
+        let mut cluster = Cluster::with_election(&[0, 1, 2], 1).expect("three members");
+        assert!(cluster.votes_cast().is_empty(), "no vote before a run");
+        let bound = i64::try_from(MAX_VOTES_CAST).expect("a term");
+        for term in 0..=bound {
+            cluster.world.record_vote(0, term, 1);
+        }
+        assert_eq!(cluster.votes_cast().len(), MAX_VOTES_CAST);
+        assert_eq!(cluster.votes_unrecorded(), 1);
+        assert_eq!(
+            cluster.votes_cast().last().map(|vote| vote.term),
+            Some(bound - 1),
+            "the last vote recorded is the last within the bound"
+        );
+    }
+
+    /// The queue of held streams stays reserved whole, at `MAX_HELD_STREAM`, after a
+    /// release, as it was built: a hold after it pushes into the queue without growing
+    /// it (invariant 3; work item 476). A release in parts and a whole release each
+    /// rebuild the queue.
+    #[test]
+    fn the_queue_of_held_streams_stays_reserved_after_a_release() {
+        let mut cluster = Cluster::with_election(&[0, 1, 2], 1).expect("three members");
+        cluster.run_ms(2_000);
+        let leader = cluster.leader().expect("a leader");
+        let follower = if leader == 0 { 1 } else { 0 };
+        cluster.hold_stream(leader, follower);
+        cluster.run_ms(500);
+        assert!(
+            cluster.held_stream_count(leader, follower) > 1,
+            "the leader's messages to the follower are held"
+        );
+        cluster.release_stream_first(leader, follower, 1);
+        assert!(cluster.world.stream_queue.capacity() >= MAX_HELD_STREAM);
+        cluster.release_stream(leader, follower);
+        assert_eq!(cluster.held_stream_count(leader, follower), 0);
+        assert!(cluster.world.stream_queue.capacity() >= MAX_HELD_STREAM);
     }
 }

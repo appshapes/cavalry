@@ -2884,11 +2884,26 @@ pub fn candidate(
 /// them the record of its votes. It does too for as long as it holds a vote floor,
 /// `vote_floor` 0 or more, −1 for none: the floor it stored when it took a leader with
 /// its log empty, which it holds until [`clears_vote_floor`] says it has caught up. A
-/// member whose log is empty while no member holds a log is one of a new cluster, and
-/// it votes.
-pub const fn withholds(own: LogReport, vote_floor: i64, log_heard: bool) -> bool {
+/// member whose log is empty while no member holds a log is one of a new cluster. If it
+/// holds no candidate term either, `candidate_term` −1, as a member whose log directory
+/// was lost holds none, it withholds too until `all_reported`: every other voter of its
+/// members string has reported in this election. One that lost its log in the
+/// cluster's first ballot may have voted there, and a candidate it voted for names the
+/// term only in a report (work item 476). Once every voter has reported, it votes by
+/// the one case in which a member that withholds votes ([`withheld_vote`],
+/// [`votes_in_term`]). A member that holds a candidate term holds one at or above every
+/// term it could have voted in, kept, or stored while it held nothing by standing
+/// ([`candidacy_term`]) or by that case, and it votes only in a term above it, so it is
+/// not held back so.
+pub const fn withholds(
+    own: LogReport,
+    vote_floor: i64,
+    log_heard: bool,
+    all_reported: bool,
+    candidate_term: i64,
+) -> bool {
     let empty = own.term < 0 && own.position == 0;
-    (empty && log_heard) || vote_floor >= 0
+    (empty && (log_heard || (candidate_term < 0 && !all_reported))) || vote_floor >= 0
 }
 
 /// Whether a member clears its vote floor (`spec/cluster.md`, "A member that lost its
@@ -2987,6 +3002,29 @@ pub fn votes_in_term(
         && heard.iter().take(voters).enumerate().all(|(index, named)| {
             index == own || index == candidate || named.is_some_and(|named| named < term)
         })
+}
+
+/// The term a member takes when it nominates itself and votes for itself
+/// (`spec/cluster.md`, state 2, nominate; ADR 0174): its `candidate_term` + 1, or, for a
+/// member that holds nothing, its log `own` empty and `candidate_term` −1, the term
+/// above each term a member named in this election too, `heard[i]` the highest term
+/// member `i` named or `None`, where that is higher. Such a member may have voted in a
+/// term before it lost its log directory, and a voter it voted for, or one whose vote it
+/// took, stored that term first and names it or a later one in every report the member
+/// reads in its present run (work item 476). Standing above each term named, it gives
+/// itself no second vote in a term, and a vote held for a candidacy of its earlier run
+/// matches none of its present ballots. A brand-new cluster, every term named −1, stands
+/// in term 0 as before.
+pub fn candidacy_term(own: LogReport, candidate_term: i64, heard: &[Option<i64>]) -> i64 {
+    let next = candidate_term.saturating_add(1);
+    let holds_nothing = own.term < 0 && own.position == 0 && candidate_term < 0;
+    if !holds_nothing {
+        return next;
+    }
+    heard
+        .iter()
+        .flatten()
+        .fold(next, |term, &named| term.max(named.saturating_add(1)))
 }
 
 /// The fields of a request vote a reader answers.

@@ -59,6 +59,7 @@ import (
 	"time"
 
 	cavalry "github.com/appshapes/cavalry/clients/go"
+	"github.com/appshapes/cavalry/conformance/go/linked"
 )
 
 const (
@@ -490,6 +491,7 @@ func all(services []*served, has func(*served) bool) bool {
 }
 
 func main() {
+	linked.Check() // linked with the library run.sh has just built, or it stops here
 	if len(os.Args) != 4 {
 		fail("usage: cluster <cluster directory> <members string> <response channel>")
 	}

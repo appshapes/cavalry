@@ -4,6 +4,8 @@
 
 #![allow(dead_code)]
 
+use std::collections::HashMap;
+
 use cavalry_proto::cluster::quorum;
 use cavalry_raft::memory::Cluster;
 use cavalry_raft::{ElectionState, Role};
@@ -15,6 +17,13 @@ use cavalry_raft::{ElectionState, Role};
 /// below the append positions of a quorum, a quorum of the members the leader's own
 /// members string gives a vote (ADR 0134), no member's commit position falls, and no
 /// two members lead one term, running or stopped.
+///
+/// Across the whole run, and across a wipe, which a member's new run forgets (work item
+/// 476): one term is led by one run of one member, never by two members nor by two
+/// runs of one; and a member id that voted in a term for one run votes in it for
+/// another only once the first can no longer lead it, being wiped or started again, or
+/// out of its ballot for the term without leading it. The votes are those
+/// [`Cluster::votes_cast`] records as they are written.
 pub struct Safety {
     ids: Vec<i32>,
     committed: Vec<u8>,
@@ -25,6 +34,12 @@ pub struct Safety {
     /// below counts the member at that position until it holds as much again. The
     /// vote floor is what keeps that commit (ADR 0145).
     appended_before_wipe: Vec<i64>,
+    /// The run that led each term: its member and its run number.
+    leaders: HashMap<i64, (i32, i64)>,
+    /// The run each member id last voted for in each term, and that run's number.
+    votes: HashMap<(i32, i64), (i32, i64)>,
+    /// How many of [`Cluster::votes_cast`] this check has read.
+    votes_read: usize,
 }
 
 impl Safety {
@@ -34,10 +49,78 @@ impl Safety {
             committed: Vec::new(),
             last_commit: vec![0; ids.len()],
             appended_before_wipe: vec![0; ids.len()],
+            leaders: HashMap::new(),
+            votes: HashMap::new(),
+            votes_read: 0,
         }
     }
 
+    /// Forgets the terms led and the votes cast, as a cluster whose every member lost
+    /// its log directory forgets them: a test that wipes them all and means to show
+    /// what the check of the committed log says next calls it.
+    pub fn forget_terms(&mut self) {
+        self.leaders.clear();
+        self.votes.clear();
+    }
+
+    /// One term, one run of one member to lead it; a second vote of a member id in a
+    /// term only once the run it first voted for can no longer lead the term.
+    fn check_terms(&mut self, cluster: &Cluster) {
+        for &id in &self.ids {
+            let Some(member) = cluster.member(id) else {
+                continue;
+            };
+            if member.role() != Role::Leader {
+                continue;
+            }
+            let term = member.leadership_term_id();
+            let run = cluster.run(id).expect("a member");
+            let first = *self.leaders.entry(term).or_insert((id, run));
+            assert_eq!(
+                first,
+                (id, run),
+                "term {term} led by member {} in its run {} and by member {id} in its run \
+                 {run}",
+                first.0,
+                first.1
+            );
+        }
+        let cast = cluster.votes_cast();
+        for vote in cast.get(self.votes_read..).unwrap_or(&[]) {
+            let key = (vote.voter, vote.term);
+            let now = (vote.candidate, vote.run);
+            let Some(&(candidate, run)) = self.votes.get(&key) else {
+                self.votes.insert(key, now);
+                continue;
+            };
+            if (candidate, run) == now {
+                continue;
+            }
+            let can_lead = cluster.run(candidate) == Some(run)
+                && cluster
+                    .member(candidate)
+                    .is_some_and(|first| match first.role() {
+                        Role::Leader => first.leadership_term_id() == vote.term,
+                        Role::Candidate => {
+                            cluster.record_of_terms(candidate).map(|(_, term)| term)
+                                == Some(vote.term)
+                        }
+                        Role::Follower => false,
+                    });
+            assert!(
+                !can_lead,
+                "member {} voted in term {} for member {candidate}'s run {run}, which can \
+                 still lead it, and then for member {}'s run {}",
+                vote.voter, vote.term, vote.candidate, vote.run
+            );
+            self.votes.insert(key, now);
+        }
+        self.votes_read = cast.len();
+        assert_eq!(cluster.votes_unrecorded(), 0, "votes went unrecorded");
+    }
+
     pub fn check(&mut self, cluster: &Cluster) {
+        self.check_terms(cluster);
         let mut led: Vec<i64> = self
             .ids
             .iter()
