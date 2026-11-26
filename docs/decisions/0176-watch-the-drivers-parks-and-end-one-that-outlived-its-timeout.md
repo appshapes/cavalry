@@ -111,12 +111,20 @@ sleeps on a caller's own thread. Each is a later change of work item 338.
 
 - **The tests**, in `cavalry-driver`:
   - `the_watch_ends_a_park_that_outlived_its_timeout_for_each_thread`: five drivers
-    with a watch, in each of which one thread alone parks for an hour where it would
-    park for its timeout. The counter rises in each, so the watch unparked that
-    thread.
-  - `the_conductor_ends_the_watchs_park_when_it_outlived_its_timeout`: the watch's
-    first park lasts an hour and no other thread is held. A watch that is parked
-    counts nothing, so the count is the conductor's.
+    with a watch, in each of which one thread's first park lasts an hour where it
+    would last its timeout. That thread's slot holds the park's due time for as long
+    as the thread is parked, and the test waits for the slot to change, which it does
+    only when that thread has been woken and gone on. A count alone would not prove
+    it: the watch counts by the slot, so a watch that unparked the wrong thread would
+    count all the same. With two threads' handles swapped in the watch's list, the
+    test fails and names the thread: `the watch did not end the park of the Sender:
+    it is still parked`.
+  - `the_conductor_ends_the_watchs_park_and_counts_it_once`: the watch's first park
+    lasts an hour and no other thread is held, under backoff and under busy-spin. A
+    watch that is parked counts nothing, so the count is the conductor's. It is
+    exactly 1 after a further 500 ms, in which a conductor that counted at every look
+    would have counted again many times, so each park is counted once. Counted at
+    every pass, it read 23.
   - `a_driver_without_a_watch_counts_no_overdue_park_though_a_thread_is_held`, and
     `close_ends_every_thread_though_no_park_would_time_out`, which now holds all five
     of the stop's unparks, since a park of a second is held for an hour too.
