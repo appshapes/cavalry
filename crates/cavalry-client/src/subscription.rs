@@ -9,11 +9,12 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
+use crate::owned::Owned as Counter;
 use cavalry_proto::client_protocol::{Command, NULL_POSITION};
 use cavalry_proto::frame::DataFrameHeader;
 use cavalry_shm::command_ring::Producer;
-use cavalry_shm::counters::Counter;
 use cavalry_shm::log::{Action, LogBuffers, LogError, Positions, TermReader};
 use cavalry_shm::spsc;
 
@@ -62,7 +63,20 @@ pub(crate) struct Registration {
     pub(crate) registration_id: i64,
     pub(crate) images: spsc::Producer<ImageEvent>,
     pub(crate) retired: spsc::Consumer<Retired>,
+    /// The correlation id of the subscription's `remove subscription`, which the
+    /// subscription stores before it sends the command: [`NOT_REMOVED`] until then,
+    /// and [`REMOVAL_NOT_SENT`] when the command could not be written. The conductor
+    /// keeps the registration until it reads the driver's answer to that command, and
+    /// releases every record the driver announces for it meanwhile (ADR 0179).
+    pub(crate) removal: Arc<AtomicI64>,
 }
+
+/// [`Registration::removal`] while the subscription has sent no `remove subscription`.
+pub(crate) const NOT_REMOVED: i64 = -1;
+/// [`Registration::removal`] when the subscription is gone and its `remove
+/// subscription` could not be written: the driver keeps the subscription until the
+/// client closes, and the conductor keeps the registration as long.
+pub(crate) const REMOVAL_NOT_SENT: i64 = -2;
 
 /// Why a poll could not go on. A fault names the image it retired; the subscription
 /// keeps its other images and the next poll continues with them. A poll that faults
@@ -229,6 +243,9 @@ impl Image {
     }
 
     fn retire(self) -> Retired {
+        // On the thread that polls, between two polls: nothing stores this image's
+        // position after this (ADR 0179). The mapping is dropped elsewhere.
+        self.position.release();
         Retired {
             _log: self.log,
             _position: self.position,
@@ -262,6 +279,11 @@ pub struct Subscription {
     next: usize,
     /// Whether `remove subscription` was sent, so that `close` and `Drop` send it once.
     removed: bool,
+    /// Whether this subscription has stored its images' release words: at its removal,
+    /// or at the first poll that found its client closed.
+    released: bool,
+    /// Shared with the conductor's registration: the removal's correlation id.
+    removal: Arc<AtomicI64>,
     scratch: Vec<u8>,
 }
 
@@ -276,6 +298,7 @@ impl Subscription {
         producer: Producer,
         incoming: spsc::Consumer<ImageEvent>,
         retired: spsc::Producer<Retired>,
+        removal: Arc<AtomicI64>,
     ) -> Self {
         Self {
             registration_id,
@@ -289,7 +312,36 @@ impl Subscription {
             retired,
             next: 0,
             removed: false,
+            released: false,
+            removal,
             scratch: vec![0u8; 64],
+        }
+    }
+
+    /// Whether the client is closed. The first call that finds it so stores the
+    /// release word of every image this subscription holds, and of every image queued
+    /// for it: this thread polls, and stores, no more, and says so (ADR 0179).
+    fn closed(&mut self) -> bool {
+        if self.shared.closed().is_none() {
+            return false;
+        }
+        self.release_images();
+        true
+    }
+
+    /// Stores the release word of every image position this subscription holds or was
+    /// handed, once. The caller polls no more.
+    fn release_images(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        for image in &self.images {
+            image.position.release();
+        }
+        // What the conductor queued and no poll took: the handle's drop is its release.
+        while let Some(event) = self.incoming.poll() {
+            drop(event);
         }
     }
 
@@ -311,7 +363,7 @@ impl Subscription {
     where
         F: FnMut(&[u8], &DataFrameHeader),
     {
-        if self.shared.closed().is_some() {
+        if self.closed() {
             return Err(Fault::Closed);
         }
         self.apply_events()?;
@@ -380,7 +432,7 @@ impl Subscription {
     where
         F: FnMut(&[u8], &DataFrameHeader),
     {
-        if self.shared.closed().is_some() {
+        if self.closed() {
             return Err(Fault::Closed);
         }
         self.apply_events()?;
@@ -429,7 +481,7 @@ impl Subscription {
     where
         F: FnMut(&[u8], &DataFrameHeader) -> Action,
     {
-        if self.shared.closed().is_some() {
+        if self.closed() {
             return Err(Fault::Closed);
         }
         self.apply_events()?;
@@ -499,7 +551,7 @@ impl Subscription {
     where
         F: FnMut(&[u8], &DataFrameHeader) -> Action,
     {
-        if self.shared.closed().is_some() {
+        if self.closed() {
             return Err(Fault::Closed);
         }
         self.apply_events()?;
@@ -544,7 +596,7 @@ impl Subscription {
         session_id: i32,
         fragment_limit: usize,
     ) -> Result<usize, Fault> {
-        if self.shared.closed().is_some() {
+        if self.closed() {
             return Err(Fault::Closed);
         }
         self.apply_events()?;
@@ -676,6 +728,7 @@ impl Subscription {
     }
 
     fn retire_parts(&mut self, log: LogBuffers, position: Counter) {
+        position.release();
         let retired = Retired {
             _log: log,
             _position: position,
@@ -736,17 +789,30 @@ impl Subscription {
             return;
         }
         self.removed = true;
+        // The release words first: nothing polls this subscription again, and the
+        // driver gives none of its records to another owner before it reads them
+        // (ADR 0179). Then the command, with its correlation id where the conductor
+        // reads it, so that the conductor keeps the registration, and releases what
+        // the driver still announces for it, until the driver has answered.
+        self.release_images();
+        let correlation_id = self.producer.next_correlation_id();
         let command = Command::RemoveSubscription {
             client_id: self.client_id,
-            correlation_id: self.producer.next_correlation_id(),
+            correlation_id,
             registration_id: self.registration_id,
         };
-        if let Ok(length) = command.write(&mut self.scratch) {
-            let _ = self.producer.write(
-                command.command_type() as i32,
-                &self.scratch[..length],
-                epoch_time(),
-            );
+        let sent = command.write(&mut self.scratch).is_ok_and(|length| {
+            self.removal.store(correlation_id, Ordering::Release);
+            self.producer
+                .write(
+                    command.command_type() as i32,
+                    &self.scratch[..length],
+                    epoch_time(),
+                )
+                .is_ok()
+        });
+        if !sent {
+            self.removal.store(REMOVAL_NOT_SENT, Ordering::Release);
         }
         self.images.clear();
     }

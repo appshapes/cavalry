@@ -5,9 +5,9 @@
 use std::fmt;
 use std::sync::Arc;
 
+use crate::owned::Owned as Cell;
 use cavalry_proto::client_protocol::Command;
 use cavalry_shm::command_ring::Producer;
-use cavalry_shm::counters::Counter as Cell;
 
 use crate::conductor::{Shared, epoch_time};
 use crate::error::ClientError;
@@ -18,9 +18,14 @@ use crate::error::ClientError;
 /// that maps the counters file, reads it.
 ///
 /// The driver frees the counter when the handle is closed or dropped, and when the
-/// client closes or is timed out; the record may then be allocated to another counter.
-/// So every store first checks that the client is open, one acquire load, and stores
-/// nothing once it is closed. Nothing here allocates or locks.
+/// client closes or is timed out. It gives the record to another counter only when
+/// this handle has stored the record's release word, which it does when it is closed
+/// or dropped, or when nothing of the client is left, which the client's lock says
+/// (`spec/client-protocol.md`, "The records a client writes"; ADR 0179). So a store
+/// that passed the check below just before the client closed lands in a record that
+/// is still this handle's. Every store first checks that the client is open, one
+/// acquire load, and stores nothing once it is closed. Nothing here allocates or
+/// locks.
 pub struct Counter {
     cell: Cell,
     shared: Arc<Shared>,
@@ -137,6 +142,9 @@ impl Counter {
             return;
         }
         self.removed = true;
+        // The release word first: this handle stores nothing after it, and the driver
+        // gives the record to no other owner before it reads the word (ADR 0179).
+        self.cell.release();
         let command = Command::RemoveCounter {
             client_id: self.client_id,
             correlation_id: self.producer.next_correlation_id(),

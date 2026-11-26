@@ -20,8 +20,10 @@ use cavalry_proto::client_protocol::{Command, Event};
 use cavalry_shm::broadcast::{BroadcastError, Receiver};
 use cavalry_shm::command_ring::layout::DRIVER_CLOSED;
 use cavalry_shm::command_ring::{CommandRing, CommandRingError, Producer};
+use cavalry_shm::counters::CountersWriter;
 use cavalry_shm::counters::generated::{CLIENT_CONDUCTOR_PARKS_OVERDUE, SUBSCRIPTION_POSITION};
-use cavalry_shm::counters::{Counter, CountersWriter};
+
+use crate::owned::Owned as Counter;
 use cavalry_shm::log::{LogBuffers, LogDirectory, LogError};
 use cavalry_shm::spsc;
 
@@ -126,6 +128,10 @@ pub(crate) struct Shared {
     /// Stored before the command is written and loaded after its answer is read, so the
     /// ring and the broadcast buffer order the two: see [`Conductor::events`].
     pending: AtomicI64,
+    /// The client's lock, where it could take one. Everything of the client that can
+    /// store into a counter holds this state, so the lock is let go when the last of
+    /// them is dropped (`spec/client-protocol.md`, "The records a client writes").
+    _lock: Option<crate::owned::ClientLock>,
 }
 
 /// The client's state word in a 128-byte slot of its own: a publisher loads it on
@@ -136,11 +142,12 @@ pub(crate) struct Shared {
 struct StateSlot(AtomicI32);
 
 impl Shared {
-    pub(crate) fn new(now: i64) -> Self {
+    pub(crate) fn new(now: i64, lock: Option<crate::owned::ClientLock>) -> Self {
         Self {
             state: StateSlot(AtomicI32::new(0)),
             last_sent: AtomicI64::new(now),
             pending: AtomicI64::new(NO_PENDING),
+            _lock: lock,
         }
     }
 
@@ -345,7 +352,7 @@ fn own_answer(
                 .ok()
                 .and_then(|id| counters.counter(id).ok())
             {
-                Some(counter) => OverduePublished::Counter(counter, 0),
+                Some(counter) => OverduePublished::Counter(Counter::new(counter), 0),
                 None => OverduePublished::Refused,
             };
         }
@@ -616,6 +623,23 @@ impl Conductor {
                 // The answer to the conductor's own `add counter`, which is nobody's
                 // pending command and which `event` passes over (ADR 0177).
                 own_answer(overdue, counters, type_id, message);
+                // The driver's answer to a `remove subscription`, which is nobody's
+                // pending command either: its registration can be forgotten, since
+                // the driver announces nothing more for it (ADR 0179).
+                if registry.removing() {
+                    match Event::parse(type_id, message) {
+                        Ok(Event::OperationSuccess { correlation_id }) => {
+                            registry.removed(correlation_id);
+                        }
+                        Ok(Event::Error {
+                            offending_correlation_id,
+                            ..
+                        }) => {
+                            registry.removed(offending_correlation_id);
+                        }
+                        _ => {}
+                    }
+                }
                 outcome = event(
                     client_id,
                     shared.pending(),
@@ -732,6 +756,12 @@ impl Conductor {
             return Ok(());
         };
         if registration.images.peer_dropped() {
+            // The subscription's handle is gone and the driver has yet to answer its
+            // removal: the record this event names is this client's all the same, and
+            // nothing will poll it. Its release word is stored here, by its id.
+            if let Ok(record) = u32::try_from(position_counter_id) {
+                let _ = self.counters.release(record);
+            }
             return Ok(());
         }
         let event = announced(
@@ -815,7 +845,7 @@ fn announced(
         Err(_) => return Err(Closed::Corrupt),
     };
     let position = if named {
-        counters.counter(record).ok()
+        counters.counter(record).ok().map(Counter::new)
     } else {
         None
     };
@@ -827,7 +857,18 @@ fn announced(
             position,
             source_identity,
         },
-        _ => ImageEvent::Gone { session_id },
+        // The image is not added. The record the event named is this client's from the
+        // event on, and the driver gives it to nobody until its release word is
+        // stored: by the handle's drop when one was taken, and by the record's id
+        // when none was (`spec/client-protocol.md`, "The records a client writes").
+        (_, Some(position)) => {
+            drop(position);
+            ImageEvent::Gone { session_id }
+        }
+        (_, None) => {
+            let _ = counters.release(record);
+            ImageEvent::Gone { session_id }
+        }
     })
 }
 
@@ -874,7 +915,16 @@ impl Registry {
                 drop(retired);
                 work += 1;
             }
-            if self.subscriptions[index].images.peer_dropped() {
+            // A registration whose subscription sent `remove subscription` stays until
+            // the driver has answered it (`removed`): until then the driver may
+            // announce an image for it, whose record `image_available` releases. So
+            // does one whose removal could not be written, which the driver keeps
+            // until the client closes. One whose halves were dropped with no removal,
+            // an `add subscription` the driver refused, has nothing to wait for.
+            if self.subscriptions[index].images.peer_dropped()
+                && self.subscriptions[index].removal.load(Ordering::Acquire)
+                    == crate::subscription::NOT_REMOVED
+            {
                 self.subscriptions.swap_remove(index);
                 work += 1;
             } else {
@@ -890,6 +940,29 @@ impl Registry {
         self.subscriptions
             .iter()
             .any(|registration| registration.registration_id == registration_id)
+    }
+
+    /// Forgets the registration whose `remove subscription` had correlation id
+    /// `correlation_id`, which the driver has now answered: it announces nothing more
+    /// for that subscription. Returns whether one was forgotten.
+    pub(crate) fn removed(&mut self, correlation_id: i64) -> bool {
+        let found = self.subscriptions.iter().position(|registration| {
+            registration.removal.load(Ordering::Acquire) == correlation_id
+        });
+        match found {
+            Some(index) => {
+                self.subscriptions.swap_remove(index);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether a registration waits for the answer to its removal.
+    pub(crate) fn removing(&self) -> bool {
+        self.subscriptions
+            .iter()
+            .any(|registration| registration.removal.load(Ordering::Acquire) >= 0)
     }
 
     /// The registration of the subscription with `registration_id`.
@@ -1546,14 +1619,32 @@ mod tests {
             subscription.poll(|_, _| {}, 16).expect("polls");
         }
 
-        // The next publication on the stream: its image's position for this subscriber
-        // is in the record that was freed, the first free one.
+        // The next publication on the stream. The record that was freed is held for the
+        // subscriber, whose thread has not said that it is done with it: the next
+        // image's position is in another record, and the held one is no counter to a
+        // reader and is counted in `counters.held`.
+        let held = || {
+            counters
+                .read(cavalry_shm::counters::generated::COUNTERS_HELD.record())
+                .expect("counters.held")
+        };
+        assert_eq!(
+            held(),
+            1,
+            "the ended image's position is held for its writer"
+        );
         let mut second = publisher
             .add_publication(CHANNEL, STREAM)
             .expect("the second");
-        wait_within("the next image's position was not allocated", || {
-            (records_of(SUBSCRIPTION_POSITION.0) == [record]).then_some(())
+        let next = wait_within("the next image's position was not allocated", || {
+            let positions = records_of(SUBSCRIPTION_POSITION.0);
+            (positions.len() == 1).then(|| positions[0])
         });
+        assert_ne!(
+            next, record,
+            "the record the subscriber's thread still stores into went to the next image"
+        );
+        let record = next;
         let limit = *records_of(PUBLICATION_LIMIT.0).first().expect("its limit");
         // The subscriber's thread polls its old image on: its conductor is held, so it
         // has not been told that the image ended.
@@ -1589,8 +1680,20 @@ mod tests {
              the subscriber then read {delivered} of them, fault {fault:?}"
         );
         assert_eq!(seen, vec![0], "{report}");
+        assert_eq!(
+            window_limit,
+            i64::from(cavalry_driver::spec::IPC_PUBLICATION_WINDOW),
+            "the publisher is held at its window while nothing is read: {report}"
+        );
+        assert_eq!(written * 1024, 32 * 1024 * 1024, "{report}");
         assert_eq!(delivered, written, "{report}");
         assert!(fault.is_none(), "{report}");
+        // The subscriber's thread has polled since its conductor went on: it took the
+        // ended image out and stored its release word, and the driver let the record go.
+        wait_within("the ended image's record was not let go", || {
+            subscription.poll(|_, _| {}, 16).expect("polls");
+            (held() == 0).then_some(())
+        });
 
         drop(second);
         drop(subscription);
@@ -2142,6 +2245,9 @@ mod tests {
                 registration_id,
                 images,
                 retired: retired_consumer,
+                removal: Arc::new(std::sync::atomic::AtomicI64::new(
+                    crate::subscription::NOT_REMOVED,
+                )),
             },
             incoming,
             retired,

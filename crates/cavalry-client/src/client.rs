@@ -284,6 +284,12 @@ impl Cavalry {
         let client_id = producer.next_correlation_id();
         let receiver = broadcast.receiver()?;
         let counters = Arc::new(counters);
+        // The client's lock, before its first command: the driver tries it when it
+        // reads that command, and a client that holds it is one whose records are
+        // given back out when the driver holds it in turn (`spec/client-protocol.md`,
+        // "The records a client writes"; ADR 0179). A client that cannot take it
+        // attaches all the same.
+        let lock = crate::owned::ClientLock::take(&dir, client_id);
 
         let mut scratch = vec![0u8; COMMAND_SCRATCH];
         let keepalive = Command::ClientKeepalive {
@@ -297,7 +303,7 @@ impl Cavalry {
             epoch_time(),
         )?;
 
-        let shared = Arc::new(Shared::new(nano_time()));
+        let shared = Arc::new(Shared::new(nano_time(), lock));
         let (response_producer, responses) = spsc::queue::<Response>(RESPONSE_QUEUE);
         let (registrations, registration_consumer) =
             spsc::queue::<Registration>(REGISTRATION_QUEUE);
@@ -436,10 +442,14 @@ impl Cavalry {
         let (retired, retired_consumer) = spsc::queue::<Retired>(RETIRE_QUEUE);
         // Registered before the command goes, so that the first image, which follows the
         // answer, finds its subscription; the conductor drains this queue every cycle.
+        let removal = Arc::new(std::sync::atomic::AtomicI64::new(
+            crate::subscription::NOT_REMOVED,
+        ));
         let mut registration = Registration {
             registration_id: correlation_id,
             images,
             retired: retired_consumer,
+            removal: Arc::clone(&removal),
         };
         let deadline = Instant::now() + RESPONSE_TIMEOUT;
         loop {
@@ -482,6 +492,7 @@ impl Cavalry {
                     self.ring.producer(DRIVER_TIMEOUT)?,
                     incoming,
                     retired,
+                    removal,
                 );
                 if !refused {
                     return Ok(subscription);
@@ -931,7 +942,7 @@ impl Cavalry {
                     });
                 };
                 Ok(Counter::new(
-                    cell,
+                    crate::owned::Owned::new(cell),
                     Arc::clone(&self.shared),
                     producer,
                     self.client_id,

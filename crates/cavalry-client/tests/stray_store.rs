@@ -21,7 +21,9 @@ use std::time::{Duration, Instant};
 
 use cavalry_client::{Cavalry, Fault, Offer};
 use cavalry_driver::Driver;
-use cavalry_shm::counters::generated::{CLUSTER_COMMIT_POSITION, SUBSCRIPTION_POSITION};
+use cavalry_shm::counters::generated::{
+    CLUSTER_COMMIT_POSITION, COUNTERS_HELD, SUBSCRIPTION_POSITION,
+};
 
 /// The child's directory, when this process is the child.
 const CHILD_DIR: &str = "CAVALRY_STRAY_STORE_DIR";
@@ -173,58 +175,86 @@ fn a_client_that_was_stopped_does_not_store_into_a_record_another_client_owns() 
         },
     );
     let mut owner = Cavalry::connect_to(dir.path()).expect("the second client connects");
-    // The driver gives an add the first record that is free, so the second client
-    // adds counters, and keeps them, until one is in the record the child's position
-    // was in.
+    let held = |client: &Cavalry| {
+        client
+            .counters()
+            .read(COUNTERS_HELD.record())
+            .expect("counters.held")
+    };
+    assert!(
+        held(&owner) >= 1,
+        "the stopped client's position is held for its writer"
+    );
+    // The driver gives an add the first record that is free, lowest first. The second
+    // client waits out the counter reuse timeout and then adds counters, and keeps
+    // them: none of them may be in the record the stopped client's thread can still
+    // store into, however long that client has been stopped.
+    std::thread::sleep(Duration::from_millis(1_500));
     let mut others = Vec::new();
-    let counter = wait(
-        "the freed record is allocated again",
+    for key in 0..16i32 {
+        let counter = owner
+            .add_counter(
+                CLUSTER_COMMIT_POSITION.0,
+                &key.to_le_bytes(),
+                "cluster.commit_position of the second client",
+            )
+            .expect("added");
+        assert_ne!(
+            counter.id(),
+            record,
+            "add {key} was given record {record}, which the stopped client's thread stores \
+             its position, {position}, into when it goes on"
+        );
+        counter.store_release(OWNERS_VALUE).expect("stored");
+        others.push(counter);
+    }
+
+    // Continued: the child's thread polls on and stores, into the record that is still
+    // its own, until its conductor reads `client timeout`.
+    signal(pid, "CONT");
+    line.clear();
+    said.read_line(&mut line).expect("the child's last line");
+    let status = child.0.wait().expect("the child ends");
+    assert!(status.success(), "the child: {line}");
+    assert!(line.contains("subscriber: closed"), "{line}");
+    for counter in &others {
+        assert_eq!(
+            counter.get(),
+            OWNERS_VALUE,
+            "the second client's counter in record {} after the stopped client went on; \
+             the child said: {line}",
+            counter.id()
+        );
+    }
+    // The child's process has ended, so its lock is free: the driver takes it, lets the
+    // record go, and after the counter reuse timeout gives it to the next add.
+    wait(
+        "the driver lets the stopped client's record go once its process has ended",
+        Duration::from_secs(10),
+        || (held(&owner) == 0).then_some(()),
+    );
+    let again = wait(
+        "the record is given out again",
         Duration::from_secs(10),
         || {
-            let key = i32::try_from(others.len()).expect("a few");
             let counter = owner
                 .add_counter(
                     CLUSTER_COMMIT_POSITION.0,
-                    &key.to_le_bytes(),
+                    &99i32.to_le_bytes(),
                     "cluster.commit_position of the second client",
                 )
                 .expect("added");
             if counter.id() == record {
                 return Some(counter);
             }
-            others.push(counter);
-            assert!(others.len() < 32, "no add took record {record}");
-            std::thread::sleep(Duration::from_millis(100));
+            counter.close();
+            std::thread::sleep(Duration::from_millis(200));
             None
         },
     );
-    counter.store_release(OWNERS_VALUE).expect("stored");
+    assert_eq!(again.get(), 0, "an allocation sets the value to 0");
 
-    // Continued: the child's thread polls on, and its conductor reads `client timeout`.
-    signal(pid, "CONT");
-    let mut seen = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        let value = counter.get();
-        if seen.last() != Some(&value) {
-            seen.push(value);
-        }
-        std::hint::spin_loop();
-    }
-    line.clear();
-    said.read_line(&mut line).expect("the child's last line");
-    let status = child.0.wait().expect("the child ends");
-    assert!(status.success(), "the child: {line}");
-    assert!(line.contains("subscriber: closed"), "{line}");
-    assert_eq!(
-        seen,
-        vec![OWNERS_VALUE],
-        "the second client's counter, record {record}, read {seen:?} after the stopped \
-         client went on: its owner stored {OWNERS_VALUE} and nothing else, and the \
-         stopped client's position was {position}; the child said: {line}"
-    );
-
-    counter.close();
+    again.close();
     drop(others);
     drop(publication);
     owner.close().expect("the second client closes");
