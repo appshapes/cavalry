@@ -1078,7 +1078,7 @@ fn counters_checks(
                          nobody. counters.held is {held}. The process is stopped, or it keeps \
                          an object of that client alive: continue or end the process, or drop \
                          the client and what was made from it, and the records are free \
-                         within a second"
+                         within the lock check interval and the counter reuse timeout"
                     ),
                     doc: DOC_RECORDS,
                 });
@@ -5959,9 +5959,11 @@ mod tests {
             .collect();
         assert_eq!(found.len(), 1, "{report}");
         let message = &found[0].message;
+        let found_version = format!("is at version {}", COUNTERS_VERSION + 1);
+        let readable = format!("reads up to version {COUNTERS_VERSION}");
         for words in [
-            "is at version 2",
-            "reads up to version 1",
+            found_version.as_str(),
+            readable.as_str(),
             "run the `cavalry doctor` of the driver's own build",
         ] {
             assert!(message.contains(words), "{words}: {message}");
@@ -5988,20 +5990,22 @@ mod tests {
         std::fs::write(clients.join("40.lock"), b"").expect("a running client's file");
         std::fs::write(clients.join("notes.gone"), b"").expect("a file that names no client");
         std::fs::write(clients.join("39-1.gone"), b"").expect("a name that is no client id");
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("after the epoch")
-            .as_secs();
-        let now = i64::try_from(now).expect("fits");
+        // The time is the file's own, so the bound is exact and no stall moves it.
+        let changed = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(clients.join(&gone_name))
+                .expect("the gone client's file")
+                .ctime()
+        };
         assert!(
-            gone_clients(&dir.0, now).is_empty(),
-            "a file renamed this second is a client that is closing"
+            gone_clients(&dir.0, changed + GONE_CLIENT_SECONDS - 1).is_empty(),
+            "a file renamed less than the bound ago is a client that is closing"
         );
         assert_eq!(
-            gone_clients(&dir.0, now + GONE_CLIENT_SECONDS + 1),
+            gone_clients(&dir.0, changed + GONE_CLIENT_SECONDS),
             vec![(41, gone_name.clone())]
         );
-        assert!(gone_clients(&dir.0.join("nowhere"), now + 10).is_empty());
+        assert!(gone_clients(&dir.0.join("nowhere"), changed + 10).is_empty());
 
         // The whole report, once the file is old enough.
         std::thread::sleep(Duration::from_secs(
@@ -6023,6 +6027,7 @@ mod tests {
             named.as_str(),
             "counters.held is 0",
             "continue or end the process, or drop the client",
+            "free within the lock check interval and the counter reuse timeout",
         ] {
             assert!(
                 found[0].message.contains(words),
