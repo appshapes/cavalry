@@ -93,6 +93,13 @@ the two crates where `unsafe` is permitted.
   clock reads. The counters file is at version 1 for it, and a reader of either
   version refuses the other's file with a message that says which side is the older
   (`spec/counters-file.md`, "Metadata record" and "Value slot"; ADR 0179).
+- Makes a client's lock file through a handle on `clients/` of the driver's
+  directory, `client_lock::ClientsDir`, and never by a path: no file is made in a
+  directory that has been removed, so a client of the driver before a restart makes
+  none in the directory of the driver that started. `share` on the command ring and
+  on a counters writer gives a second handle on one mapping, where a second open by
+  name could map another driver's file (`spec/client-protocol.md`, "The driver
+  directory" and "The records a client writes"; ADR 0179).
 
 In Aeron, this is the log buffer layout and the CnC file, which Agrona provides
 ([glossary](../../docs/glossary.md)).

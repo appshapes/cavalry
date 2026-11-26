@@ -263,6 +263,16 @@ impl CommandRing {
         self.mapped.fields
     }
 
+    /// A second handle on this mapping, for a second thread of one process: the same
+    /// file by construction, where a second [`CommandRing::open`] would map whatever
+    /// file the directory names by then, which is another driver's once a driver has
+    /// started there again.
+    pub fn share(&self) -> Self {
+        Self {
+            mapped: Arc::clone(&self.mapped),
+        }
+    }
+
     /// The ring's capacity in bytes.
     pub fn capacity(&self) -> u32 {
         self.mapped.fields.capacity()
