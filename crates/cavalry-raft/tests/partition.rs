@@ -28,9 +28,10 @@ use std::time::{Duration, Instant};
 
 use cavalry_client::{Cavalry, CommittedLog};
 use cavalry_driver::Driver;
+use cavalry_proto::cluster::CONSENSUS_STREAM_ID;
 use cavalry_raft::{ConsensusModule, ElectionState, RaftError, Refused, Role};
 use cavalry_shm::counters::CountersReader;
-use cavalry_shm::counters::generated::RECORDING_SYNCED_POSITION;
+use cavalry_shm::counters::generated::{RECORDING_SYNCED_POSITION, SUBSCRIPTION_POSITION};
 
 mod ports;
 mod relay;
@@ -115,6 +116,59 @@ fn run_until(members: &mut [Member], what: &str, mut done: impl FnMut(&[Member])
 
 fn states(members: &[Member]) -> Vec<String> {
     members.iter().map(|m| format!("{:?}", m.module)).collect()
+}
+
+/// Waits, with no duty cycle run, until each member's driver holds an image of every
+/// other member's consensus stream, which the drivers connect on their own threads.
+/// A canvass position sent before its receiver's image is up is lost. A member that
+/// holds nothing votes for a leader and takes one only once it has heard every voter
+/// (ADR 0174). Without this wait, the member started last can miss the only canvass
+/// position of a member that votes at once and sends no more, and it cannot follow
+/// until that member holds a log and answers it (`cluster.rs`, the same wait).
+fn await_consensus_images(members: &[Member]) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let others = members.len().saturating_sub(1);
+    while !members.iter().all(|member| {
+        let counters = CountersReader::open(&member.dir).expect("the counters file opens");
+        (0..counters.capacity())
+            .filter(|&id| {
+                matches!(
+                    counters.record(id),
+                    Ok(Some(record)) if record.type_id() == SUBSCRIPTION_POSITION.0
+                        && record.key().get(12..16)
+                            == Some(&CONSENSUS_STREAM_ID.to_le_bytes()[..])
+                )
+            })
+            .count()
+            >= others
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "the members' consensus images did not connect: {:?}",
+            states(members)
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Whether every member but the one at `late` leads, or has left canvass behind a
+/// leader: voted for it or taken it. A member that holds nothing takes a leader only
+/// once it has voted it in or heard every voter (ADR 0145, ADR 0174), so a member
+/// still in canvass may wait for a report of the one held still, which a member that
+/// has taken its leader sends no more: the two could then close nothing
+/// (`cluster.rs`, the same test).
+fn the_others_follow(members: &[Member], late: usize) -> bool {
+    members.iter().enumerate().all(|(index, m)| {
+        index == late
+            || m.module.role() == Role::Leader
+            || !matches!(
+                m.module.election_state(),
+                ElectionState::Init
+                    | ElectionState::Canvass
+                    | ElectionState::Nominate
+                    | ElectionState::CandidateBallot
+            )
+    })
 }
 
 /// True when every member of `members` has closed its election in one term above
@@ -485,14 +539,20 @@ fn a_follower_whose_catch_up_ended_ahead_of_its_live_recording_runs_on() {
     let relay = Relay::start(&free_ports(15), NO_FAULTS);
     let mut members = start(dir.path(), &relay);
 
-    // One follower stands still from the moment it has taken the leader's term, and
-    // the two others close their elections without it (`cluster.rs`,
+    // One follower stands still from the moment it has taken the leader's term at
+    // position 0, once the third has voted for that leader or taken it, and the two
+    // others close their elections without it (`cluster.rs`,
     // `run_until_led_with_a_late_follower`).
+    await_consensus_images(&members);
     let mut late = None;
     run_until(&mut members, "a member took a leader's term", |members| {
         late = members
             .iter()
-            .position(|m| m.module.election_state() == ElectionState::FollowerLogInit);
+            .position(|m| {
+                m.module.election_state() == ElectionState::FollowerLogInit
+                    && m.module.append_position() == 0
+            })
+            .filter(|&late| the_others_follow(members, late));
         late.is_some()
     });
     members.swap(late.expect("a member in follower log init"), 2);
