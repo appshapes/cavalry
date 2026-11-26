@@ -1149,6 +1149,122 @@ fn a_recording_of_another_sessions_image_is_never_told_and_never_counted() {
     assert!(pair.member.io.kept.is_empty());
 }
 
+/// Work item 510: an image of another session than the leader's that stands on the
+/// member's `log` endpoint, and took the armed recording, is passed over once the
+/// election asks for the leader's session and the leader's image stands. That other
+/// image is a publication the leader gave up with an earlier term, lingering at the
+/// endpoint when the member subscribed, or as here a publication of the test's own. A
+/// recording is armed while the other's runs, so that the driver, which records the
+/// lowest image not yet recorded first, takes the leader's, and the other's recording
+/// is stopped, no part of the log. The election is told the leader's image where it
+/// joins, the module names the leader's recording, and the member that leaves the log
+/// keeps that recording and not the other. A member's start builds its log from that
+/// record, which never names the other (ADR 0108). Before, the module noted the other
+/// image alone, and the election waited for the leader heartbeat timeout.
+#[test]
+fn an_image_of_another_session_is_passed_over_for_the_leaders_once_asked() {
+    let mut pair = pair("passed-over-asked");
+    pair.member.io.join_log().expect("subscribed and armed");
+    let mut stranger = Cavalry::connect_to(&pair.leader_driver_dir).expect("the stranger");
+    let channel = pair.member.io.log_endpoint_channel.clone();
+    let _stray = stranger
+        .add_exclusive_publication(&channel, LOG_STREAM_ID)
+        .expect("the stray publication");
+    let (stray_recording, stray_session) =
+        pair.observe("the stray image takes the armed recording", |io| {
+            io.held
+                .as_ref()
+                .map(|held| (held.recording.recording_id(), held.recording.session_id()))
+        });
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    assert_ne!(log.session_id, stray_session);
+    let start = pair.observe("the leader's image is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    assert_eq!(start, 0);
+    let held = pair.member.io.held.as_ref().expect("a recording is held");
+    assert_eq!(held.recording.session_id(), log.session_id);
+    let recording_id = pair
+        .member
+        .log_recording_id()
+        .expect("the recording is named");
+    assert_ne!(recording_id, stray_recording);
+    let catalog = CatalogReader::open(&pair.member_log_dir).expect("the catalog opens");
+    assert!(
+        catalog
+            .stop_position(stray_recording)
+            .expect("the slot is read")
+            .is_some(),
+        "the other image's recording is stopped"
+    );
+    let one = pair.append(b"one", 0);
+    pair.observe(
+        "the member's append position reaches the entry's end",
+        |io| (io.append_position() == one).then_some(()),
+    );
+    until_stopped("the log is left", || pair.member.io.leave_log());
+    assert_eq!(
+        pair.member.io.kept.iter().copied().collect::<Vec<_>>(),
+        vec![Kept {
+            recording_id,
+            start: 0,
+            stop: one,
+        }]
+    );
+}
+
+/// The other order (work item 510): the other session's image goes before the
+/// leader's arrives, as a publication a leader gave up with an earlier term does once
+/// its linger ends. The module passes it over when it goes: it stops the recording the
+/// image took, which is no part of the log, and awaits the next image with a recording
+/// armed, and the leader's image that arrives then is noted, recorded and told where
+/// it joins. Before, the image noted was gone, no other was noted until the member left
+/// the log, and the election waited for the leader heartbeat timeout: the failure of
+/// `crates/cavalry/tests/cli.rs` that work item 510 found.
+#[test]
+fn an_image_of_another_session_that_goes_first_is_passed_over_for_the_leaders() {
+    let mut pair = pair("passed-over-gone");
+    pair.member.io.join_log().expect("subscribed and armed");
+    let mut stranger = Cavalry::connect_to(&pair.leader_driver_dir).expect("the stranger");
+    let channel = pair.member.io.log_endpoint_channel.clone();
+    let stray = stranger
+        .add_exclusive_publication(&channel, LOG_STREAM_ID)
+        .expect("the stray publication");
+    let (stray_recording, _) = pair.observe("the stray image takes the armed recording", |io| {
+        io.held
+            .as_ref()
+            .map(|held| (held.recording.recording_id(), held.recording.session_id()))
+    });
+    stray.close().expect("the stray publication closes");
+    pair.observe("the stray image is passed over", |io| {
+        (matches!(io.image, LogImage::Awaited) && io.held.is_none() && io.armed.is_some())
+            .then_some(())
+    });
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let start = pair.observe("the leader's image is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    assert_eq!(start, 0);
+    let held = pair.member.io.held.as_ref().expect("a recording is held");
+    assert_eq!(held.recording.session_id(), log.session_id);
+    assert_ne!(
+        pair.member
+            .log_recording_id()
+            .expect("the recording is named"),
+        stray_recording
+    );
+}
+
 /// A member whose log directory is not its driver's is refused at its start, before
 /// anything is written there (ADR 0093). The directory holds no catalog: the error is
 /// `RaftError::Catalog`, its reason `catalog`, its message names the page's "Members

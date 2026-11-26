@@ -903,17 +903,20 @@ impl Held {
 enum LogImage {
     /// No image has joined the subscription yet.
     Awaited,
-    /// The first image that joined the subscription, noted after the poll that applied
-    /// it. Where this member's recording of it begins is the catalog's to say, not the
-    /// image's (ADR 0093).
+    /// The image noted on the subscription, after the poll that applied it: the first
+    /// that joined, or, once an image of another session was passed over, the image of
+    /// the session the election asks for (work item 510). Where this member's
+    /// recording of it begins is the catalog's to say, not the image's (ADR 0093).
     Joined {
         /// The id the driver gave the image, which tells it from a later image of the
         /// same session.
         correlation_id: i64,
         session_id: i32,
     },
-    /// The image noted is no longer available. No other image of the subscription is
-    /// noted or read until the member leaves the log, so that the core sees the loss.
+    /// The image noted is no longer available, and the election was told of it. No
+    /// other image of the subscription is noted or read until the member leaves the
+    /// log, so that the core sees the loss. An image the election was never told of
+    /// that goes is passed over instead ([`ClientIo::pass_over_unasked_image`]).
     Gone,
 }
 
@@ -957,6 +960,9 @@ struct ClientIo {
     starting: Option<Recording>,
     /// The image on the log subscription and where it joined.
     image: LogImage,
+    /// The session whose image the election last asked for ([`Io::log_image`]): the
+    /// leader's log session, which state 15 waits for (work item 510).
+    asked: Option<i32>,
     held: Option<Held>,
     /// Where the member's log ended when it subscribed on its `log` endpoint: the
     /// floor of the recording armed there ([`Held::floor`]).
@@ -1713,9 +1719,11 @@ impl ClientIo {
     }
 
     /// Takes the images the driver announced or withdrew on the log subscription, notes
-    /// a new image's join position before a frame of it is read, hands over an armed
-    /// recording the driver has started, and reads past what has arrived of the image
-    /// noted, so that the stream is not held back by a subscriber that stands still:
+    /// a new image's join position before a frame of it is read, passes over an image
+    /// or a recording of another session than the one the election asks for, or an
+    /// image that went before the election was told of it
+    /// ([`ClientIo::pass_over_unasked_image`]), hands over an armed recording the driver
+    /// has started, and reads past what has arrived of the image noted, so that the stream is not held back by a subscriber that stands still:
     /// the module acts on no entry in this version, and the recording is the member's
     /// log.
     ///
@@ -1756,7 +1764,36 @@ impl ClientIo {
             }
             LogImage::Joined { .. } | LogImage::Gone => LogImage::Gone,
         };
+        // An image noted that is not of the session the election asks for, or that
+        // went before the election was told of it, is no image of this member's log,
+        // which state 15 waits for by the leader's session: a publication the leader
+        // gave up with an earlier term, lingering at the endpoint when this member
+        // subscribed, for one (work item 510). It is passed over, so that the image of
+        // the session the election waits for is noted and recorded. One the election
+        // was told of that goes is the loss the core sees, as before.
+        let other = |session: i32| self.asked.is_some_and(|asked| asked != session);
+        let another = match self.image {
+            LogImage::Gone => true,
+            LogImage::Joined { session_id, .. } => other(session_id),
+            LogImage::Awaited => false,
+        } || self
+            .held
+            .as_ref()
+            .is_some_and(|held| other(held.recording.session_id()))
+            || self
+                .starting
+                .as_ref()
+                .is_some_and(|recording| other(recording.session_id()));
+        if another
+            && !self.held.as_ref().is_some_and(|held| held.checked)
+            && !self.pass_over_unasked_image()?
+        {
+            return Ok(());
+        }
         let LogImage::Joined { session_id, .. } = self.image else {
+            return Ok(());
+        };
+        let Some(subscription) = self.log_subscription.as_mut() else {
             return Ok(());
         };
         subscription
@@ -1774,6 +1811,111 @@ impl ClientIo {
             self.sync_asked_at = NO_SYNC_ASKED;
         }
         Ok(())
+    }
+}
+
+impl ClientIo {
+    /// Passes over a noted image, or a recording, of another session than the one the
+    /// election asks for, or a noted image that went, while the election has been told
+    /// of neither (work item 510). In order:
+    /// - When the image asked for stands and the recording held or handed over is of
+    ///   it, the image is noted, and nothing else changes.
+    /// - When an image of another session stands, recorded, and the image asked for
+    ///   stands too, a recording is armed while that other recording runs: the driver
+    ///   records the lowest image not yet recorded first, so the armed recording takes
+    ///   the image asked for. Until the image asked for stands, nothing changes, and the
+    ///   member waits for it, or for the other image to go.
+    /// - The other recording, held or handed over, is stopped, and is no part of the
+    ///   log, as one the election was never told of is not ([`Held::checked`]). A stop
+    ///   asked and not yet read returns `Ok(false)` with nothing else changed, and the
+    ///   next cycle calls again, as a leave does.
+    /// - The image asked for is noted when it stands, and the next image is awaited
+    ///   otherwise; a recording is armed for it when none is.
+    fn pass_over_unasked_image(&mut self) -> Result<bool, RaftError> {
+        let images: Vec<(i64, i32)> = self
+            .log_subscription
+            .as_ref()
+            .map(|subscription| {
+                subscription
+                    .images()
+                    .iter()
+                    .map(|image| (image.correlation_id(), image.session_id()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let wanted = self.asked.and_then(|asked| {
+            images
+                .iter()
+                .copied()
+                .find(|&(_, session)| session == asked)
+        });
+        let of_wanted =
+            |session: i32| wanted.is_some_and(|(_, wanted_session)| session == wanted_session);
+        let recording_of_wanted = self
+            .held
+            .as_ref()
+            .is_some_and(|held| of_wanted(held.recording.session_id()))
+            || self
+                .starting
+                .as_ref()
+                .is_some_and(|recording| of_wanted(recording.session_id()));
+        if let Some((correlation_id, session_id)) = wanted
+            && recording_of_wanted
+        {
+            self.image = LogImage::Joined {
+                correlation_id,
+                session_id,
+            };
+            return Ok(true);
+        }
+        let recorded = self.held.is_some() || self.starting.is_some();
+        let other_stands = recorded
+            && images.iter().any(|&(_, session)| {
+                self.held
+                    .as_ref()
+                    .is_some_and(|held| held.recording.session_id() == session)
+                    || self
+                        .starting
+                        .as_ref()
+                        .is_some_and(|recording| recording.session_id() == session)
+            });
+        if other_stands {
+            if wanted.is_none() {
+                return Ok(true);
+            }
+            if self.armed.is_none() {
+                self.armed = Some(
+                    self.client
+                        .arm_recording(&self.log_endpoint_channel, LOG_STREAM_ID)?,
+                );
+            }
+        }
+        if let Some(held) = self.held.as_ref() {
+            if stop_recording(&mut self.client, &held.recording, &mut self.stop_asked)?.is_none() {
+                return Ok(false);
+            }
+            self.held = None;
+        }
+        if let Some(recording) = self.starting.as_ref() {
+            if stop_recording(&mut self.client, recording, &mut self.stop_asked)?.is_none() {
+                return Ok(false);
+            }
+            self.starting = None;
+        }
+        self.image = match wanted {
+            Some((correlation_id, session_id)) => LogImage::Joined {
+                correlation_id,
+                session_id,
+            },
+            None => LogImage::Awaited,
+        };
+        if self.armed.is_none() {
+            self.armed = Some(
+                self.client
+                    .arm_recording(&self.log_endpoint_channel, LOG_STREAM_ID)?,
+            );
+        }
+        Ok(true)
     }
 }
 
@@ -1920,6 +2062,7 @@ impl Io for ClientIo {
                 self.client
                     .add_subscription(&self.log_endpoint_channel, LOG_STREAM_ID)?,
             );
+            self.asked = None;
         }
         if self.armed.is_none() && self.starting.is_none() && self.held.is_none() {
             self.armed = Some(
@@ -1940,6 +2083,7 @@ impl Io for ClientIo {
     /// another session's image is never reported. Reporting a recording is what makes
     /// it part of the member's log: [`Io::append_position`] counts none before.
     fn log_image(&mut self, session_id: i32) -> Result<Option<i64>, Self::Fault> {
+        self.asked = Some(session_id);
         let LogImage::Joined {
             session_id: noted, ..
         } = self.image
@@ -2014,6 +2158,7 @@ impl Io for ClientIo {
         self.armed = None;
         self.log_subscription = None;
         self.image = LogImage::Awaited;
+        self.asked = None;
         Ok(true)
     }
 
@@ -3454,6 +3599,7 @@ impl ConsensusModule {
                 armed: None,
                 starting: None,
                 image: LogImage::Awaited,
+                asked: None,
                 held: None,
                 log_floor: 0,
                 catalog,
