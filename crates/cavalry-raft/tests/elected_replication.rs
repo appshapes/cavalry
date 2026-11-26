@@ -1033,9 +1033,31 @@ fn a_follower_that_loses_its_image_begins_again_and_joins_level_or_behind() {
 /// first history holds another, and the check says so at the step that commits it.
 /// That first entry is the whole of the other history here: nothing is offered after
 /// the wipe, and the test passes on the first panic that carries the check's words.
+/// The check of the terms would say it first, since a term is led a second time, so
+/// the test has it forget the terms and the votes at the wipe, as the three members do.
 #[test]
 #[should_panic(expected = "leads with a log that differs from what was committed")]
 fn a_quorum_that_lost_its_logs_commits_another_history_and_the_check_fails() {
+    let (mut cluster, mut safety) = a_cluster_that_lost_every_log();
+    safety.forget_terms();
+    // Every voter reports an empty log, and the three elect at once. The first entry
+    // the new leader commits is not the first history's.
+    safety.run(&mut cluster, 10_000);
+}
+
+/// The same history, on which the check of the terms fails first: the three members
+/// that lost their logs elect a leader of a term the first history's leader led, and
+/// the check says so at the step at which a second run leads it (work item 476).
+#[test]
+#[should_panic(expected = "led by member")]
+fn a_quorum_that_lost_its_logs_leads_a_term_a_second_time_and_the_check_fails() {
+    let (mut cluster, mut safety) = a_cluster_that_lost_every_log();
+    safety.run(&mut cluster, 10_000);
+}
+
+/// A cluster of three that committed two entries, and then lost every member's log
+/// directory, with the check that ran beside it.
+fn a_cluster_that_lost_every_log() -> (Cluster, Safety) {
     let ids = [0, 1, 2];
     let mut safety = Safety::new(&ids);
     let (mut cluster, _) = elected(1, &mut safety);
@@ -1049,13 +1071,10 @@ fn a_quorum_that_lost_its_logs_commits_another_history_and_the_check_fails() {
     for id in ids {
         assert_eq!(cluster.commit_position(id), Some(end), "member {id}");
     }
-
     for id in ids {
         safety.wipe(&mut cluster, id);
     }
-    // Every voter reports an empty log, and the three elect at once. The first entry
-    // the new leader commits is not the first history's.
-    safety.run(&mut cluster, 10_000);
+    (cluster, safety)
 }
 
 /// A partition between the leader and one follower stops the log and the consensus

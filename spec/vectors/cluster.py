@@ -694,6 +694,17 @@ def votes_in_term(voters, own, candidate, heard, term):
     return {"vote": vote}
 
 
+def candidacy_term(own, candidate_term, heard):
+    """spec/cluster.md, state 2, nominate (ADR 0174): the term a member takes when it nominates
+    itself, its candidate term + 1, or, for a member that holds nothing, its log `[term, position]`
+    empty and its candidate term -1, the term above each term a member named in this election
+    too, `heard[i]` the highest term member i named or None, where that is higher."""
+    term = candidate_term + 1
+    if own[0] < 0 and own[1] == 0 and candidate_term < 0:
+        term = max([term] + [t + 1 for t in heard if t is not None])
+    return {"term": term}
+
+
 VOTING_STATES = (1, 2, 3, 4)  # canvass, nominate, candidate ballot, follower ballot
 
 
@@ -982,6 +993,16 @@ VECTORS += [
           ("votes-in-term-another-voter-named-a-later-term", 3, 2, 0, [3, 5, None], 4),
           ("votes-in-term-another-voter-silent", 3, 2, 0, [3, None, None], 4),
           ("votes-in-term-a-standby-past-the-voters-unread", 2, 1, 0, [3, None, 9], 4),
+      ]],
+    *[arithmetic(name, "candidacy-term", {"own": own, "candidate_term": cand, "heard": heard},
+                 candidacy_term(own, cand, heard))
+      for name, own, cand, heard in [
+          ("candidacy-term-a-new-cluster-stands-in-term-0", [-1, 0], -1, [-1, -1, None]),
+          ("candidacy-term-holds-nothing-stands-above-every-term-named", [-1, 0], -1, [0, 0, None]),
+          ("candidacy-term-holds-nothing-stands-above-the-highest-named", [-1, 0], -1, [3, 1, None]),
+          ("candidacy-term-holds-a-candidate-term-takes-the-next", [-1, 0], 0, [3, 1, None]),
+          ("candidacy-term-holds-a-log-takes-the-next", [2, 4096], 2, [5, 1, None]),
+          ("candidacy-term-holds-nothing-hears-none-takes-term-0", [-1, 0], -1, [None, None, None]),
       ]],
     arithmetic("candidate-unanimous", "candidate",
                {"members": 3, "reports": [[3, 98304], [3, 98304], [2, 65536]], "own": [3, 98304],

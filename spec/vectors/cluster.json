@@ -3824,6 +3824,126 @@
     },
     {
       "kind": "arithmetic",
+      "name": "candidacy-term-a-new-cluster-stands-in-term-0",
+      "rule": "candidacy-term",
+      "inputs": {
+        "own": [
+          -1,
+          0
+        ],
+        "candidate_term": -1,
+        "heard": [
+          -1,
+          -1,
+          null
+        ]
+      },
+      "fields": {
+        "term": 0
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidacy-term-holds-nothing-stands-above-every-term-named",
+      "rule": "candidacy-term",
+      "inputs": {
+        "own": [
+          -1,
+          0
+        ],
+        "candidate_term": -1,
+        "heard": [
+          0,
+          0,
+          null
+        ]
+      },
+      "fields": {
+        "term": 1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidacy-term-holds-nothing-stands-above-the-highest-named",
+      "rule": "candidacy-term",
+      "inputs": {
+        "own": [
+          -1,
+          0
+        ],
+        "candidate_term": -1,
+        "heard": [
+          3,
+          1,
+          null
+        ]
+      },
+      "fields": {
+        "term": 4
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidacy-term-holds-a-candidate-term-takes-the-next",
+      "rule": "candidacy-term",
+      "inputs": {
+        "own": [
+          -1,
+          0
+        ],
+        "candidate_term": 0,
+        "heard": [
+          3,
+          1,
+          null
+        ]
+      },
+      "fields": {
+        "term": 1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidacy-term-holds-a-log-takes-the-next",
+      "rule": "candidacy-term",
+      "inputs": {
+        "own": [
+          2,
+          4096
+        ],
+        "candidate_term": 2,
+        "heard": [
+          5,
+          1,
+          null
+        ]
+      },
+      "fields": {
+        "term": 3
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidacy-term-holds-nothing-hears-none-takes-term-0",
+      "rule": "candidacy-term",
+      "inputs": {
+        "own": [
+          -1,
+          0
+        ],
+        "candidate_term": -1,
+        "heard": [
+          null,
+          null,
+          null
+        ]
+      },
+      "fields": {
+        "term": 0
+      }
+    },
+    {
+      "kind": "arithmetic",
       "name": "candidate-unanimous",
       "rule": "candidate",
       "inputs": {

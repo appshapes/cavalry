@@ -3002,6 +3002,29 @@ pub fn votes_in_term(
         })
 }
 
+/// The term a member takes when it nominates itself and votes for itself
+/// (`spec/cluster.md`, state 2, nominate; ADR 0174): its `candidate_term` + 1, or, for a
+/// member that holds nothing, its log `own` empty and `candidate_term` −1, the term
+/// above each term a member named in this election too, `heard[i]` the highest term
+/// member `i` named or `None`, where that is higher. Such a member may have voted in a
+/// term before it lost its log directory, and a voter it voted for, or one whose vote it
+/// took, stored that term first and names it or a later one in every report the member
+/// reads in its present run (work item 476). Standing above each term named, it gives
+/// itself no second vote in a term, and a vote held for a candidacy of its earlier run
+/// matches none of its present ballots. A brand-new cluster, every term named −1, stands
+/// in term 0 as before.
+pub fn candidacy_term(own: LogReport, candidate_term: i64, heard: &[Option<i64>]) -> i64 {
+    let next = candidate_term.saturating_add(1);
+    let holds_nothing = own.term < 0 && own.position == 0 && candidate_term < 0;
+    if !holds_nothing {
+        return next;
+    }
+    heard
+        .iter()
+        .flatten()
+        .fold(next, |term, &named| term.max(named.saturating_add(1)))
+}
+
 /// The fields of a request vote a reader answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VoteRequest {

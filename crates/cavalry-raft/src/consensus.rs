@@ -20,9 +20,9 @@ use cavalry_proto::cluster::{
     ClusterAction, ELECTION_STATUS_INTERVAL_NS, ELECTION_TIMEOUT_NS, LEADER_HEARTBEAT_INTERVAL_NS,
     LEADER_HEARTBEAT_TIMEOUT_NS, LIVE_ADD_MAX_WINDOW, LogReport, MAX_MEMBERS, MemberPosition,
     Message, PROTOCOL_VERSION, STARTUP_CANVASS_TIMEOUT_NS, TermAction, TermFields, TermSpan,
-    TimeUnit, Vote, VoteRequest, ballot, candidate, canvass_position_action, clears_vote_floor,
-    commit_position, new_leadership_term_action, next_fields, quorum, request_vote, takes_leader,
-    votes_in_term, withheld_vote, withholds,
+    TimeUnit, Vote, VoteRequest, ballot, candidacy_term, candidate, canvass_position_action,
+    clears_vote_floor, commit_position, new_leadership_term_action, next_fields, quorum,
+    request_vote, takes_leader, votes_in_term, withheld_vote, withholds,
 };
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
@@ -2918,14 +2918,21 @@ impl Consensus {
 
     /// State 2. Canvass position goes on; when the delay has ended the member takes
     /// candidate term + 1, stores it before it sends anything, votes for itself and
-    /// asks for the others' votes in candidate ballot. A fault at the store leaves it
-    /// here, and the next cycle stores the same term again.
+    /// asks for the others' votes in candidate ballot. A member that holds nothing takes
+    /// the term above each term a member named in this election too, where that is
+    /// higher, so that it gives itself no second vote in a term it voted in before it
+    /// lost its log ([`candidacy_term`]; ADR 0174). A fault at the store leaves it here,
+    /// and the next cycle stores that term, or a higher one named since, again.
     fn nominate<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         let work = self.send_canvass_position(clock, io);
         if clock.now_ns < self.nomination_deadline_ns {
             return Ok(work);
         }
-        let term = self.candidate_term.saturating_add(1);
+        let term = candidacy_term(
+            self.own_report(),
+            self.candidate_term,
+            self.terms_named.get(..self.members).unwrap_or(&[]),
+        );
         io.store_candidate_term(term)?;
         self.candidate_term = term;
         self.votes = [None; MAX_MEMBERS];

@@ -287,3 +287,71 @@ fn a_member_that_voted_holds_a_candidate_term_and_votes_without_the_stopped_lead
         .expect("no fault");
     assert_eq!(votes_to(&io, 0), 1, "a vote for member 0 in term 1");
 }
+
+/// A member that holds nothing stands above each term a voter named, so it gives itself
+/// no second vote in a term (ADR 0174). In a new cluster, members 0 and 1 both stood in
+/// term 0, and this member voted for member 1 there. Each of the two lost its ballot to
+/// the other's vote against and canvasses again, naming term 0, its log empty. This
+/// member then lost its log directory. It hears both: every voter has reported and no
+/// log is heard, so it stands. It took candidate term + 1 before, term 0, and voted for
+/// itself in the term it had voted in for member 1. It takes term 1, the term above each
+/// named, stores it and asks both for votes in it. Votes for this member in term 0, as a
+/// sender may hold for a candidacy of the member's earlier run, make no leader of it:
+/// its ballot counts the votes for term 1 alone.
+#[test]
+fn a_member_that_holds_nothing_stands_above_each_term_a_voter_named() {
+    let mut io = Stub::new();
+    let mut member = wiped(1, &mut io);
+    for voter in [0, 1] {
+        member
+            .on_message(at(2), &empty_canvass(voter, 0), &mut io)
+            .expect("no fault");
+    }
+    assert_eq!(member.voters_unheard(), 0);
+    io.clear();
+    let mut ms = 3;
+    while member.counts().candidacies == 0 {
+        member.do_work(at(ms), &mut io).expect("no fault");
+        ms += 1;
+        assert!(ms < 10_000, "the member stands");
+    }
+    assert_eq!(
+        io.count(|call| matches!(call, Call::StoreCandidateTerm(0))),
+        0,
+        "no vote for itself in term 0"
+    );
+    assert_eq!(
+        io.count(|call| matches!(call, Call::StoreCandidateTerm(1))),
+        1,
+        "it stands in term 1"
+    );
+    member.do_work(at(ms), &mut io).expect("no fault");
+    for voter in [0, 1] {
+        assert_eq!(
+            io.count(|call| matches!(
+                call,
+                Call::Send { to, template: Template::RequestVote } if *to == voter
+            )),
+            1,
+            "a request vote to member {voter}"
+        );
+    }
+
+    // Votes for this member in term 0, held for a candidacy of an earlier run.
+    for voter in [0, 1] {
+        let vote = Message::Vote {
+            candidate_term_id: 0,
+            log_leadership_term_id: -1,
+            log_position: 0,
+            candidate_member_id: 2,
+            follower_member_id: voter,
+            vote: true,
+        };
+        member
+            .on_message(at(ms + 1), &vote, &mut io)
+            .expect("no fault");
+    }
+    member.do_work(at(ms + 2), &mut io).expect("no fault");
+    assert_eq!(member.role(), cavalry_raft::Role::Candidate);
+    assert_eq!(member.counts().terms_led, 0);
+}

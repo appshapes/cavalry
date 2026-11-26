@@ -96,6 +96,26 @@ pub const MAX_HELD_BACK: usize = 8;
 /// interval.
 pub const MAX_HELD_STREAM: usize = 1_024;
 
+/// The most votes the in-memory cluster records for [`Cluster::votes_cast`]: one cast
+/// past that many is not recorded, and is counted in [`Cluster::votes_unrecorded`].
+pub const MAX_VOTES_CAST: usize = 65_536;
+
+/// A vote a member cast, as [`Cluster::votes_cast`] records it when the member writes
+/// it: a vote for a candidate, or a candidate's vote for itself, which its request vote
+/// carries (work item 476).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct VoteCast {
+    /// The member id that cast it, the one its messages name.
+    pub voter: i32,
+    /// The term it was cast in.
+    pub term: i64,
+    /// The run it went to, as [`Cluster::member`] names it: the run that held the
+    /// candidate's member id's address when the vote was written.
+    pub candidate: i32,
+    /// That run's number, [`Cluster::run`], when the vote was written.
+    pub run: i64,
+}
+
 /// One consensus message between two members.
 struct Flight {
     deliver_at_ns: u64,
@@ -373,9 +393,40 @@ struct World {
     /// The messages a held stream lost: sent while [`MAX_HELD_STREAM`] were held, or
     /// released while the in-flight queue was full.
     stream_losses: u64,
+    /// Every vote cast, in the order written: at most [`MAX_VOTES_CAST`].
+    votes_cast: Vec<VoteCast>,
+    /// The votes cast past [`MAX_VOTES_CAST`], not recorded.
+    votes_unrecorded: u64,
 }
 
 impl World {
+    /// Records a vote the member at place `own` writes in `term` for the run at place
+    /// `candidate`, its own for a request vote, once: a candidate writes one request
+    /// vote to each member, and its vote for itself is recorded at the first.
+    fn record_vote(&mut self, own: usize, term: i64, candidate: usize) {
+        let (Some(voter), Some(to), Some(&run)) = (
+            self.disks.get(own).map(|disk| disk.member),
+            self.disks.get(candidate).map(|disk| disk.id),
+            self.runs.get(candidate),
+        ) else {
+            return;
+        };
+        let cast = VoteCast {
+            voter,
+            term,
+            candidate: to,
+            run,
+        };
+        if self.votes_cast.last() == Some(&cast) {
+            return;
+        }
+        if self.votes_cast.len() < MAX_VOTES_CAST {
+            self.votes_cast.push(cast);
+        } else {
+            self.votes_unrecorded = self.votes_unrecorded.saturating_add(1);
+        }
+    }
+
     /// The place of the run that a message to member id `member` reaches: the run that
     /// holds the member id's address, the member's own until a test moves it.
     fn to(&self, member: i32) -> Option<usize> {
@@ -456,6 +507,20 @@ impl Io for MemberIo<'_> {
         let Ok(length) = message.write(&mut buffer) else {
             return false;
         };
+        // A vote is cast when it is written, whether it arrives or not.
+        match *message {
+            Message::Vote {
+                candidate_term_id,
+                vote: true,
+                ..
+            } => self.world.record_vote(self.own, candidate_term_id, to),
+            Message::RequestVote {
+                candidate_term_id, ..
+            } => self
+                .world
+                .record_vote(self.own, candidate_term_id, self.own),
+            _ => {}
+        }
         let run = self.world.runs.get(self.own).copied().unwrap_or(0);
         let session = session_of(self.own, to, run);
         // A stream a test holds keeps every message written on it from then on, in the
@@ -1087,6 +1152,8 @@ impl Cluster {
                 held_streams: Vec::new(),
                 stream_queue: Vec::new(),
                 stream_losses: 0,
+                votes_cast: Vec::new(),
+                votes_unrecorded: 0,
             },
         })
     }
@@ -2349,6 +2416,37 @@ impl Cluster {
     /// count's.
     pub fn held_stream_losses(&self) -> u64 {
         self.world.stream_losses
+    }
+
+    /// Every vote the members cast, in the order written, at most [`MAX_VOTES_CAST`]:
+    /// each vote for a candidate, and each candidate's vote for itself, which its
+    /// request vote carries. A vote is recorded when it is written, so one lost or held
+    /// on its way is recorded too, and a member id's votes stay recorded across a
+    /// [`Cluster::wipe`], which the member's new run forgets (work item 476).
+    ///
+    /// ```
+    /// use cavalry_raft::memory::Cluster;
+    ///
+    /// let mut cluster = Cluster::with_election(&[0, 1, 2], 1).expect("three members");
+    /// cluster.run_ms(2_000);
+    /// let leader = cluster.leader().expect("a leader");
+    /// let term = cluster.member(leader).expect("a member").leadership_term_id();
+    /// let for_leader = cluster
+    ///     .votes_cast()
+    ///     .iter()
+    ///     .filter(|vote| vote.term == term && vote.candidate == leader)
+    ///     .count();
+    /// assert!(for_leader >= 2, "its own vote and a quorum's");
+    /// assert_eq!(cluster.votes_unrecorded(), 0);
+    /// ```
+    pub fn votes_cast(&self) -> &[VoteCast] {
+        &self.world.votes_cast
+    }
+
+    /// The votes cast past [`MAX_VOTES_CAST`], which [`Cluster::votes_cast`] does not
+    /// hold.
+    pub fn votes_unrecorded(&self) -> u64 {
+        self.world.votes_unrecorded
     }
 
     /// Holds back the next floor answer member `from` sends to member `to`: it is

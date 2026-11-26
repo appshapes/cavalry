@@ -12,10 +12,11 @@ use cavalry_proto::cluster::{
     MAX_LOG_RECORDINGS, MAX_LOG_RECORDINGS_LENGTH, MAX_MEMBERS, Member, MemberPosition, Message,
     NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd, ReplicationStop, ServiceTimers,
     SnapshotMark, Stream, TermFields, TermSpan, TimeUnit, TimerEventIs, TimerWord, VERSION, Vote,
-    VoteAnswer, VoteRequest, answered_term, ballot, candidate, canvass_position_action,
-    clears_vote_floor, commit_position, entry_position, log_at_least, new_leadership_term_action,
-    next_fields, parse_members, quorum, replay_end, replication_record, replication_stop,
-    request_vote, takes_leader, votes_in_term, withheld_vote, withholds, write_log_recordings,
+    VoteAnswer, VoteRequest, answered_term, ballot, candidacy_term, candidate,
+    canvass_position_action, clears_vote_floor, commit_position, entry_position, log_at_least,
+    new_leadership_term_action, next_fields, parse_members, quorum, replay_end, replication_record,
+    replication_stop, request_vote, takes_leader, votes_in_term, withheld_vote, withholds,
+    write_log_recordings,
 };
 use serde_json::{Map, Value, json};
 
@@ -766,6 +767,20 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                 .map(Value::as_i64)
                 .collect();
             json!({"vote": votes_in_term(voters, own, candidate, &heard, int(inputs, "term"))})
+        }
+        "candidacy-term" => {
+            let own = inputs["own"].as_array().expect("own");
+            let own = LogReport {
+                term: own[0].as_i64().expect("term"),
+                position: own[1].as_i64().expect("position"),
+            };
+            let heard: Vec<Option<i64>> = inputs["heard"]
+                .as_array()
+                .expect("heard")
+                .iter()
+                .map(Value::as_i64)
+                .collect();
+            json!({"term": candidacy_term(own, int(inputs, "candidate_term"), &heard)})
         }
         "replication-stop" => {
             let ReplicationStop {
