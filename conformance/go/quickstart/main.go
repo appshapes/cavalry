@@ -46,6 +46,7 @@ import (
 	"time"
 
 	cavalry "github.com/appshapes/cavalry/clients/go"
+	"github.com/appshapes/cavalry/conformance/go/linked"
 )
 
 const (
@@ -958,6 +959,7 @@ func sharedClient(client *cavalry.Client) {
 }
 
 func main() {
+	linked.Check() // linked with the library run.sh has just built, or it stops here
 	// The load-time check (spec/c-abi.md, "Versions and what a reader rejects"): the check
 	// NewClient makes first refuses a package whose ABIVersion is not the library's, with
 	// an *Error naming both numbers.

@@ -55,6 +55,7 @@ import (
 	"time"
 
 	cavalry "github.com/appshapes/cavalry/clients/go"
+	"github.com/appshapes/cavalry/conformance/go/linked"
 )
 
 const (
@@ -286,6 +287,7 @@ func positionOf(r ran, member int) int64 {
 }
 
 func main() {
+	linked.Check() // linked with the library run.sh has just built, or it stops here
 	if len(os.Args) != 3 {
 		fail("usage: snapshot <cluster directory> <the cavalry binary>")
 	}
