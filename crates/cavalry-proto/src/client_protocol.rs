@@ -70,12 +70,12 @@ pub const IPC_CHANNEL: &[u8] = b"cavalry:ipc";
 /// "The records a client writes"; ADR 0179).
 pub const CLIENT_LOCK_DIRECTORY: &str = "clients";
 
-/// What follows a client's id, in decimal, in the name of its lock file:
-/// `clients/<client id>.lock`.
+/// What ends the name of a client's lock file, after the client's id and the numbers
+/// of the counters file it has mapped: `clients/<client id>-<device>-<file>.lock`.
 pub const CLIENT_LOCK_SUFFIX: &str = ".lock";
 
-/// What follows a client's id in the name the driver gives the lock file of a client
-/// that closed or was timed out, until it holds that lock: `clients/<client id>.gone`.
+/// What ends the name the driver gives the lock file of a client that closed or was
+/// timed out, until it holds that lock, in place of `.lock`.
 /// `cavalry doctor` names such a client by it.
 pub const CLIENT_GONE_SUFFIX: &str = ".gone";
 

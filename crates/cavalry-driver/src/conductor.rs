@@ -262,7 +262,7 @@ struct Client {
     id: i64,
     last_seen: i64,
     last_seen_epoch: i64,
-    /// Whether the client held its lock, `clients/<client id>.lock`, at its first
+    /// Whether the client held its lock, on its file in `clients/`, at its first
     /// command: what lets the driver learn, once the client has gone, that nothing of
     /// it can store into a counter (`spec/client-protocol.md`, "The records a client
     /// writes"; ADR 0179).
@@ -2125,7 +2125,7 @@ impl Conductor {
 
     /// A client closes or is timed out: before anything of it is freed, the driver
     /// gives its lock file the name by which `doctor` tells a client that has gone
-    /// from one that runs, `clients/<client id>.gone`, and notes the client among
+    /// from one that runs, one that ends `.gone`, and notes the client among
     /// those whose lock it tries. The lock is on the file and goes with the name.
     /// Returns whether the client is so noted. One that held no lock, one whose file
     /// could not be renamed, and one for which the list has no place are not: the

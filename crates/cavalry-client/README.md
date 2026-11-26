@@ -346,9 +346,12 @@ In Aeron, this is the client, with `tryClaim` and `commit`
   is one type, `Owned`, which stores the record's release word, the last store to
   the slot, when its owner gives it up: a subscription on the thread that polls, when
   it takes an image out; a counter when it is closed; any handle when it is dropped.
-  The client also holds a lock for its life on a file of its own in the driver's
-  directory, `clients/<client id>.lock`, by which the driver learns that nothing of
-  a client that closed or was timed out is left. A program has nothing to do for
+  The client also holds a lock for its life on a file of its own in `clients/` of
+  the driver's directory, named by its client id and by which counters file it has
+  mapped, by which the driver learns that nothing of a client that closed or was
+  timed out is left. Its three mappings are one driver's: it looks at the three
+  names again after it has opened them, and maps nothing of a driver that started
+  in the directory afterwards. A program has nothing to do for
   either. One thing follows for it: a client that was closed gives its counters'
   records back when everything made from it is dropped, so drop a closed client's
   subscriptions and counters with it (`spec/client-protocol.md`, "The records a

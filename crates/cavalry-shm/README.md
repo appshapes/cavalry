@@ -93,6 +93,13 @@ the two crates where `unsafe` is permitted.
   clock reads. The counters file is at version 1 for it, and a reader of either
   version refuses the other's file with a message that says which side is the older
   (`spec/counters-file.md`, "Metadata record" and "Value slot"; ADR 0179).
+- Says which file a mapping is of, by the file's device and file numbers,
+  `file_id` on the command ring, the broadcast buffer and the counters file, and
+  builds the name of a client's lock file from the client's id and its counters
+  file's numbers (`client_lock`). Two files that exist at once never share both
+  numbers, so a client's lock file is never taken for the lock of another driver's
+  client of the same id, and a client knows that its mappings are one driver's
+  (`spec/client-protocol.md`, "The records a client writes"; ADR 0179).
 
 In Aeron, this is the log buffer layout and the CnC file, which Agrona provides
 ([glossary](../../docs/glossary.md)).

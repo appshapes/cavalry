@@ -804,13 +804,17 @@ impl Conductor {
 /// read-only, with the owner's handle on the position counter the driver allocated,
 /// or the word that the image is gone.
 ///
-/// The driver keeps the log and the counter for the counter reuse timeout after the
-/// event, unless the subscription is removed first (`spec/client-protocol.md`,
-/// "Events"; ADR 0078). So a log that is not there, or a record that holds no counter
-/// or another image's, is an image that is `gone`: this client's own `remove
-/// subscription` was on its way, or its conductor read the event more than that time
-/// late. The image is not added, the subscription's next poll reports the fault, and
-/// the client stays open. A log that is there and fails a check, or a record id no
+/// The driver keeps the log for the counter reuse timeout after the event, unless
+/// the subscription is removed first (`spec/client-protocol.md`, "Events"; ADR 0078).
+/// The counter's record it gives to no other owner before this client has let it go,
+/// however late this conductor reads the event (`spec/client-protocol.md`, "The
+/// records a client writes"; ADR 0179): no time is in that. So a log that is not
+/// there, or a record that holds no counter, is an image that is `gone`: it ended, or
+/// this client's own `remove subscription` was on its way, before this conductor read
+/// the event. The image is not added, the conductor stores the record's release word
+/// by its id, the subscription's next poll reports the fault, and the client stays
+/// open. A record that holds another image's counter is treated the same and is
+/// stored into by nobody; the rule above says it is never met. A log that is there and fails a check, or a record id no
 /// counters file has, is the driver saying one thing and the directory another:
 /// corrupt.
 fn announced(

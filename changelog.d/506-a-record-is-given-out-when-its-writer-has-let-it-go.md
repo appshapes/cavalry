@@ -7,7 +7,7 @@
   98,304 messages with no fault reported. The driver now gives a record that a client
   writes to another owner only when the thread that writes it has stored the record's
   release word, or when the client is gone, which a lock the client holds on
-  `clients/<client id>.lock` says. `counters.held` counts the records held meanwhile
+  a file of its own in `clients/` says. `counters.held` counts the records held meanwhile
   and `cavalry doctor` names a client that has gone and still holds its lock
   ([ADR 0179](docs/decisions/0179-give-a-record-a-client-writes-to-another-owner-only-when-its-writer-has-let-it-go.md)).
 - The counters file is at version 1 and the client protocol at version 11, and a
