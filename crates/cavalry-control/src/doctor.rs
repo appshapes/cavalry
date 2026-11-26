@@ -1033,8 +1033,8 @@ fn counters_checks(
     // Records held for their writers (ADR 0179). The gauge alone is no finding: it is
     // above 0 for a moment at every subscription and client that closes. A client
     // that has gone and whose process still holds its lock is one: the driver has
-    // given its lock file the name `clients/<client id>.gone`, and removes the file
-    // within the lock check interval of the lock being let go.
+    // given its lock file a name that ends `.gone`, and removes the file within the
+    // lock check interval of the lock being let go.
     checks += 1;
     if let Some(held) = read("counters.held", COUNTERS_HELD, findings) {
         let now = std::time::SystemTime::now()
@@ -1042,13 +1042,13 @@ fn counters_checks(
             .map_or(0, |since| {
                 i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
             });
-        for client in gone_clients(dir, now) {
+        for (client, file) in gone_clients(dir, now) {
             findings.push(Finding {
                 check: "counters.held",
                 level: Level::Warn,
                 message: format!(
                     "client {client} closed or was timed out, and its process still holds \
-                     its lock, clients/{client}{CLIENT_GONE_SUFFIX}: a thread of it may still \
+                     its lock, {CLIENT_LOCK_DIRECTORY}/{file}: a thread of it may still \
                      store into its counters, so the driver gives their records to nobody. \
                      counters.held is {held}. The process is stopped, or it keeps an object \
                      of that client alive: continue or end the process, or drop the client \
@@ -4128,26 +4128,25 @@ fn list_of(items: &[&str]) -> String {
     }
 }
 
-/// The ids of the clients that have gone and whose lock the driver has not taken for
-/// [`GONE_CLIENT_SECONDS`]: the files `clients/<client id>.gone` whose name is that old,
-/// by the time the file's entry last changed, in order. `now` is seconds since the
-/// Unix epoch.
-fn gone_clients(dir: &Path, now: i64) -> Vec<i64> {
+/// The clients that have gone and whose lock the driver has not taken for
+/// [`GONE_CLIENT_SECONDS`], each with its file's name: the files of `clients/` that the
+/// driver renamed to end `.gone` and whose name is that old, by the time the file's
+/// entry last changed, in order of client id. Only the driver gives a file that name,
+/// and only to a lock file of its own client, so every such file is a client of the
+/// driver that runs. `now` is seconds since the Unix epoch.
+fn gone_clients(dir: &Path, now: i64) -> Vec<(i64, String)> {
     use std::os::unix::fs::MetadataExt;
     let Ok(entries) = std::fs::read_dir(dir.join(CLIENT_LOCK_DIRECTORY)) else {
         return Vec::new();
     };
-    let mut clients: Vec<i64> = entries
+    let mut clients: Vec<(i64, String)> = entries
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let name = entry.file_name();
-            let client = name
-                .to_str()?
-                .strip_suffix(CLIENT_GONE_SUFFIX)?
-                .parse::<i64>()
-                .ok()?;
+            let name = name.to_str()?;
+            let client = cavalry_shm::client_lock::client_id(name, CLIENT_GONE_SUFFIX)?;
             let changed = entry.metadata().ok()?.ctime();
-            (now.saturating_sub(changed) >= GONE_CLIENT_SECONDS).then_some(client)
+            (now.saturating_sub(changed) >= GONE_CLIENT_SECONDS).then(|| (client, name.to_owned()))
         })
         .collect();
     clients.sort_unstable();
@@ -5893,14 +5892,25 @@ mod tests {
     #[test]
     fn a_client_that_has_gone_and_holds_its_lock_is_named_by_its_file() {
         let dir = TestDir::new("gone-client");
-        let _counters = CountersFile::create(&dir.0, 256).expect("counters");
+        let counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let clients = dir.0.join(CLIENT_LOCK_DIRECTORY);
         std::fs::create_dir(&clients).expect("the directory");
-        std::fs::write(clients.join("41.gone"), b"").expect("a gone client's file");
-        std::fs::write(clients.join("40.lock"), b"").expect("a running client's file");
+        // The names as the driver gives them: the client's id and its counters file.
+        let gone = counters
+            .file_id()
+            .client_file(&dir.0, 41, CLIENT_GONE_SUFFIX);
+        let gone_name = gone
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("a name")
+            .to_owned();
+        std::fs::write(&gone, b"").expect("a gone client's file");
+        std::fs::write(counters.file_id().client_file(&dir.0, 40, ".lock"), b"")
+            .expect("a running client's file");
         std::fs::write(clients.join("notes.gone"), b"").expect("a file that names no client");
+        std::fs::write(clients.join("39.gone"), b"").expect("a name of no counters file");
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("after the epoch")
@@ -5912,7 +5922,7 @@ mod tests {
         );
         assert_eq!(
             gone_clients(&dir.0, now + GONE_CLIENT_SECONDS + 1),
-            vec![41]
+            vec![(41, gone_name.clone())]
         );
         assert!(gone_clients(&dir.0.join("nowhere"), now + 10).is_empty());
 
@@ -5928,9 +5938,12 @@ mod tests {
             .collect();
         assert_eq!(found.len(), 1, "{report}");
         assert_eq!(found[0].level, Level::Warn);
-        for words in [
+        let named = format!(
             "client 41 closed or was timed out, and its process still holds its lock, \
-             clients/41.gone",
+             clients/{gone_name}"
+        );
+        for words in [
+            named.as_str(),
             "counters.held is 0",
             "continue or end the process, or drop the client",
         ] {

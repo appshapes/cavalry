@@ -274,6 +274,21 @@ impl CommandRing {
         self.mapped.fields
     }
 
+    /// A second handle on this mapping, for a second thread of one process: the same
+    /// file by construction, where a second [`CommandRing::open`] would map whatever
+    /// file the directory names by then, which is another driver's once a driver has
+    /// started there again.
+    pub fn share(&self) -> Self {
+        Self {
+            mapped: Arc::clone(&self.mapped),
+        }
+    }
+
+    /// Whether `dir/command-ring` is, now, the file this mapping is of.
+    pub fn is_named_in(&self, dir: &Path) -> bool {
+        FileId::at(&dir.join(FILE_NAME)).is_ok_and(|named| named == self.mapped.file)
+    }
+
     /// Which file this mapping is of. A client compares it with the file its driver's
     /// directory names, to know that its command ring, its other two mappings and
     /// every later mapping it opens are of one driver ([`crate::client_lock`]).

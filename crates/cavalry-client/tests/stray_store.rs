@@ -261,6 +261,25 @@ fn a_client_that_was_stopped_does_not_store_into_a_record_another_client_owns() 
         },
     );
     assert_eq!(again.get(), 0, "an allocation sets the value to 0");
+    // Continued, the child sent a keepalive before it read that it was timed out. The
+    // driver registered nobody for it: a second client of that id would be one without
+    // a lock, and its own timeout would put the first one's records out of use.
+    for (counter, name) in [
+        (
+            cavalry_shm::counters::generated::CLIENT_WITHOUT_LOCK,
+            "client.without_lock",
+        ),
+        (COUNTERS_RETIRED, "counters.retired"),
+    ] {
+        assert_eq!(
+            owner
+                .counters()
+                .read(counter.record())
+                .expect("a static counter"),
+            0,
+            "{name}"
+        );
+    }
 
     again.close();
     drop(others);
@@ -586,10 +605,18 @@ fn a_removed_subscription_is_forgotten_once_the_driver_has_answered() {
 }
 
 /// Client ids begin again with each driver, so the first client of a driver that
-/// started has the id that the first client of the driver before it had, and its lock
-/// file has the same name. A client of the earlier driver that goes after the restart
-/// removes nothing: the file by that name is not its own, and a client whose file
-/// were gone would be one the driver could not ask about (ADR 0179).
+/// started has the id that the first client of the driver before it had. Their lock
+/// files do not have one name: each carries which counters file its client has mapped,
+/// and the two drivers' are two files for as long as a client of the first has its own
+/// mapped. A client of the earlier driver that goes after the restart removes nothing
+/// (ADR 0179).
+///
+/// And a client of the earlier driver that was stopped between taking its id and
+/// making its lock file makes it after the restart, in the directory of the driver
+/// that started. That file is made here by hand, with the name such a client gives
+/// it, and locked. It is not the lock of the new driver's client of that id: that
+/// client makes its own, the driver asks it and no other, and what the earlier
+/// client's process does with its lock moves nothing of the new client's.
 #[test]
 fn a_client_of_the_driver_before_a_restart_removes_nothing_of_the_next_drivers() {
     let dir = TestDir::new("restart");
@@ -597,18 +624,35 @@ fn a_client_of_the_driver_before_a_restart_removes_nothing_of_the_next_drivers()
         Driver::start(dir.path(), dir.path().join("log")).expect("the first driver starts");
     let old = Cavalry::connect_to(dir.path()).expect("a client of the first driver");
     let id = old.client_id();
-    let name = dir.path().join("clients").join(format!("{id}.lock"));
-    assert!(name.is_file(), "the client's lock file");
+    let old_counters = old.counters().file_id();
+    let old_name = old_counters.client_file(dir.path(), id, ".lock");
+    assert!(old_name.is_file(), "the client's lock file");
     first_driver.close().expect("the first driver closes");
 
     let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the next driver starts");
     assert!(
-        !name.exists(),
+        !old_name.exists(),
         "a driver that starts removes what the last left"
     );
+    // The earlier driver's client, continued between its id and its lock file: its
+    // file, in the directory of the driver that started, under the id that driver
+    // gives out next. `old` still has the earlier counters file mapped, as that client
+    // does, so the file's name is no name of the new driver's.
+    let stray = std::fs::File::options()
+        .write(true)
+        .create_new(true)
+        .open(&old_name)
+        .expect("the earlier client's file");
+    stray.try_lock().expect("the earlier client's lock");
+
     let mut new = Cavalry::connect_to(dir.path()).expect("a client of the next driver");
     assert_eq!(new.client_id(), id, "ids begin again with each driver");
-    assert!(name.is_file());
+    let name = new
+        .counters()
+        .file_id()
+        .client_file(dir.path(), id, ".lock");
+    assert_ne!(name, old_name, "two drivers' counters files, two names");
+    assert!(name.is_file(), "the new client made its own lock file");
     let counter = new
         .add_counter(CLUSTER_COMMIT_POSITION.0, &1i32.to_le_bytes(), "a counter")
         .expect("added");
@@ -636,6 +680,18 @@ fn a_client_of_the_driver_before_a_restart_removes_nothing_of_the_next_drivers()
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(read(COUNTERS_HELD), 1, "held while its handle exists");
     assert_eq!(read(COUNTERS_RETIRED), 0);
+    // The earlier client's process ends, and its lock is free. The new client was
+    // closed and its file renamed, so a driver that took the earlier client's file for
+    // the new client's would take the lock now and give the record away under the
+    // counter that is still held here.
+    drop(stray);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        read(COUNTERS_HELD),
+        1,
+        "another driver's client let its lock go, and this client's record is still held"
+    );
+    assert!(old_name.is_file(), "the driver does not touch that file");
     drop(counter);
     wait("the record is let go", Duration::from_secs(10), || {
         (read(COUNTERS_HELD) == 0).then_some(())
@@ -643,7 +699,10 @@ fn a_client_of_the_driver_before_a_restart_removes_nothing_of_the_next_drivers()
     assert_eq!(read(COUNTERS_RETIRED), 0);
     // The last object of the client is gone, so its lock is free: the driver takes it
     // and removes the file, which only the driver does.
-    let gone = dir.path().join("clients").join(format!("{id}.gone"));
+    let gone = watcher
+        .counters()
+        .file_id()
+        .client_file(dir.path(), id, ".gone");
     wait(
         "the driver removes the file of the client that went",
         Duration::from_secs(10),

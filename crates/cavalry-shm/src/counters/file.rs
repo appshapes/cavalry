@@ -250,6 +250,11 @@ impl CountersFile {
         self.mapped.fields
     }
 
+    /// Whether `dir/counters` is, now, the file this mapping is of.
+    pub fn is_named_in(&self, dir: &Path) -> bool {
+        FileId::at(&dir.join(FILE_NAME)).is_ok_and(|named| named == self.mapped.file)
+    }
+
     /// Which file this mapping is of: the identity that a client's lock file carries in
     /// its name, and that tells a mapping of this driver's counters file from one of
     /// the driver before it ([`crate::client_lock`]).
@@ -484,6 +489,11 @@ impl CountersWriter {
         self.mapped.fields
     }
 
+    /// Whether `dir/counters` is, now, the file this mapping is of.
+    pub fn is_named_in(&self, dir: &Path) -> bool {
+        FileId::at(&dir.join(FILE_NAME)).is_ok_and(|named| named == self.mapped.file)
+    }
+
     /// Which file this mapping is of: the identity that a client's lock file carries in
     /// its name, and that tells a mapping of this driver's counters file from one of
     /// the driver before it ([`crate::client_lock`]).
@@ -672,6 +682,11 @@ impl CountersReader {
     /// The header's fields: capacity, creator pid and start timestamp.
     pub fn header(&self) -> HeaderFields {
         self.mapped.fields
+    }
+
+    /// Whether `dir/counters` is, now, the file this mapping is of.
+    pub fn is_named_in(&self, dir: &Path) -> bool {
+        FileId::at(&dir.join(FILE_NAME)).is_ok_and(|named| named == self.mapped.file)
     }
 
     /// Which file this mapping is of: the identity that a client's lock file carries in

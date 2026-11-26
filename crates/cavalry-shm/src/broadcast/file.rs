@@ -218,6 +218,11 @@ impl BroadcastBuffer {
         self.mapped.fields
     }
 
+    /// Whether `dir/broadcast-buffer` is, now, the file this mapping is of.
+    pub fn is_named_in(&self, dir: &Path) -> bool {
+        FileId::at(&dir.join(FILE_NAME)).is_ok_and(|named| named == self.mapped.file)
+    }
+
     /// Which file this mapping is of. A client compares it with the file its driver's
     /// directory names, to know that its broadcast buffer, its other two mappings and
     /// every later mapping it opens are of one driver ([`crate::client_lock`]).

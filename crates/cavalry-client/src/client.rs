@@ -145,12 +145,40 @@ impl Attached {
         let counters = CountersReader::open(dir).map_err(|error| {
             Unattached::other(counters_unfinished(&error), error.into(), heartbeat)
         })?;
+        // One driver's three files, and no mix of two drivers'. A driver that starts
+        // removes everything the last one left before it creates a file of its own, so
+        // at any moment the directory names files of one driver. Each of the three
+        // names was this mapping's file when it was opened and is again now, and a
+        // file's identity is not given to another file while this process has it
+        // mapped; so between the last open and the first look here, all three names
+        // were these three files at once. A name that is another file's now is a
+        // driver starting: the directory is read again.
+        if !(ring.is_named_in(dir) && broadcast.is_named_in(dir) && counters.is_named_in(dir)) {
+            return Err(Unattached::Creating(Unfinished::CommandRing));
+        }
         Ok(Self {
             ring,
             broadcast,
             counters,
         })
     }
+}
+
+/// A writing mapping of the counters file in `dir`, which must be the file `counters`
+/// is a mapping of: the driver this client attached to. Opened by its path, it is
+/// whatever file the directory names now, and that is another driver's once a driver
+/// has started there again; this client's handles are on records of its own driver's
+/// file, and a store through another driver's mapping would land in a record this
+/// client was never given (`spec/client-protocol.md`, "The records a client writes").
+fn open_writer(dir: &Path, counters: &CountersReader) -> Result<CountersWriter, ClientError> {
+    let writer = CountersWriter::open(dir)?;
+    if writer.file_id() != counters.file_id() {
+        return Err(ClientError::DriverGone {
+            dir: dir.to_path_buf(),
+            reason: Closed::DriverTimeout,
+        });
+    }
+    Ok(writer)
 }
 
 impl Unattached {
@@ -279,6 +307,11 @@ impl Cavalry {
                 },
             });
         };
+        // Every mapping this client will use, before its id is taken and its lock is
+        // made: the conductor's handle on the ring is the same mapping, and the
+        // mapping it stores release words through is of the same counters file.
+        let conductor_ring = ring.share();
+        let counters_writer = open_writer(&dir, &counters)?;
         let mut producer = ring.producer(DRIVER_TIMEOUT)?;
         let conductor_producer = ring.producer(DRIVER_TIMEOUT)?;
         let client_id = producer.next_correlation_id();
@@ -299,7 +332,7 @@ impl Cavalry {
         // driver knows the client and removes the file when the client has gone; a
         // command that could not be written leaves a file the driver never learns of,
         // which is removed here.
-        let lock = crate::owned::ClientLock::take(&dir, client_id);
+        let lock = crate::owned::ClientLock::take(&dir, client_id, counters.file_id());
         if let Err(error) = producer.write(
             keepalive.command_type() as i32,
             &scratch[..length],
@@ -319,8 +352,6 @@ impl Cavalry {
             spsc::queue::<ReplayRegistration>(REPLAY_QUEUE);
         let (recording_registrations, recording_registration_consumer) =
             spsc::queue::<RecordingRegistration>(RECORDING_QUEUE);
-        let conductor_ring = CommandRing::open(&dir, true)?;
-        let counters_writer = CountersWriter::open(&dir)?;
         let conductor = Conductor::new(
             dir.clone(),
             conductor_ring,
@@ -919,7 +950,7 @@ impl Cavalry {
         // Everything that can fail on this side fails before the command is sent, so
         // that the driver never holds a counter this client has no handle on.
         if self.counters_writer.is_none() {
-            self.counters_writer = Some(CountersWriter::open(&self.dir)?);
+            self.counters_writer = Some(open_writer(&self.dir, &self.counters)?);
         }
         let producer = self.ring.producer(DRIVER_TIMEOUT)?;
         let correlation_id = self.producer.next_correlation_id();
@@ -1794,5 +1825,46 @@ impl std::fmt::Debug for Cavalry {
             .field("client_id", &self.client_id)
             .field("closed", &self.closed())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cavalry_shm::counters::CountersFile;
+
+    use super::*;
+
+    /// A driver that starts again in a directory makes a new counters file under the
+    /// old one's name. A client of the driver before it, which opens a writing mapping
+    /// by that name later, is refused it: its handles are on records of the file it
+    /// attached to, and a release word stored through the new file would be stored
+    /// into a record of another driver's client.
+    #[test]
+    fn a_writing_mapping_of_another_drivers_counters_file_is_refused() {
+        let dir = std::env::temp_dir().join(format!("cavalry-open-writer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let first = CountersFile::create(&dir, 256).expect("the first driver's counters file");
+        let attached = CountersReader::open(&dir).expect("the client's mapping");
+        let writer = open_writer(&dir, &attached).expect("the same file, by its name");
+        assert_eq!(writer.file_id(), attached.file_id());
+        assert_eq!(first.file_id(), attached.file_id());
+
+        // The driver before is gone and the next one starts: it removes what was left
+        // and creates its own. The client still has the first file mapped.
+        std::fs::remove_file(dir.join("counters")).expect("the next driver removes the file");
+        let second = CountersFile::create(&dir, 256).expect("the next driver's counters file");
+        assert_ne!(second.file_id(), attached.file_id());
+        assert!(!attached.is_named_in(&dir));
+        match open_writer(&dir, &attached) {
+            Err(ClientError::DriverGone {
+                reason: Closed::DriverTimeout,
+                ..
+            }) => {}
+            Err(other) => panic!("{other}"),
+            Ok(_) => panic!("a client mapped the next driver's counters file to write"),
+        }
+        drop((first, second, attached, writer));
+        std::fs::remove_dir_all(&dir).expect("remove the directory");
     }
 }

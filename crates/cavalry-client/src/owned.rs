@@ -19,23 +19,30 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use cavalry_proto::client_protocol::{CLIENT_LOCK_DIRECTORY, CLIENT_LOCK_SUFFIX};
+use cavalry_proto::client_protocol::CLIENT_LOCK_SUFFIX;
+use cavalry_shm::client_lock::FileId;
 use cavalry_shm::counters::Counter;
 
 use crate::conductor::Shared;
 
-/// A client's lock: an exclusive advisory lock on `clients/<client id>.lock` in the
-/// driver's directory, taken before the client's first command and held for as long
+/// A client's lock: an exclusive advisory lock on the client's own file in `clients/`
+/// of the driver's directory, taken before the client's first command and held for as long
 /// as anything of the client that can store into a counter exists. Every such thing
 /// shares the client's state, which owns this, so the lock is let go when the last of
 /// them is dropped, and by the system when the process ends. The driver gives a
 /// closed or timed-out client's records to another owner when it holds this lock
 /// (`spec/client-protocol.md`, "The records a client writes"; ADR 0179).
 ///
+/// The file's name is the client's id and which counters file the client has mapped
+/// ([`cavalry_shm::client_lock`]). Ids begin again with each driver, and the path
+/// names whatever driver holds the directory when the file is made: a client that was
+/// stopped between taking its id and making its file, while the driver was started
+/// again, makes its file in the new driver's directory. The counters file in the name
+/// is the old driver's, so the new driver, which looks only at names that carry its
+/// own, never takes that file for the lock of its own client of the same id.
+///
 /// The client does not remove the file when it lets go: the driver does, once it has
-/// taken the lock. A name in `clients/` is a client id, and ids begin again with each
-/// driver, so a client of the driver before a restart that removed "its" file by name
-/// could remove the file of a client of the driver that started.
+/// taken the lock.
 pub(crate) struct ClientLock {
     file: File,
     path: PathBuf,
@@ -47,10 +54,12 @@ impl ClientLock {
     /// the client attaches all the same, and the driver, which finds no lock held at
     /// the client's first command, gives nothing of the client's that carries no
     /// release word to another owner before it starts again.
-    pub(crate) fn take(dir: &Path, client_id: i64) -> Option<Self> {
-        let path = dir
-            .join(CLIENT_LOCK_DIRECTORY)
-            .join(format!("{client_id}{CLIENT_LOCK_SUFFIX}"));
+    ///
+    /// `counters` is the counters file the client has mapped and will store into, and
+    /// the caller holds that mapping across this call: the name tells this client's
+    /// driver from another only while both drivers' counters files are open.
+    pub(crate) fn take(dir: &Path, client_id: i64, counters: FileId) -> Option<Self> {
+        let path = counters.client_file(dir, client_id, CLIENT_LOCK_SUFFIX);
         let file = File::options()
             .write(true)
             .create_new(true)
