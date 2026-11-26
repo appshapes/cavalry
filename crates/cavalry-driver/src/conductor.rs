@@ -31,6 +31,7 @@ use std::time::Duration;
 use cavalry_log::dir::Recovery;
 
 use cavalry_proto::channel::{Channel, ChannelError, FlowControl, PublicationPosition, UdpChannel};
+use cavalry_proto::client_protocol::{CLIENT_LOCK_DIRECTORY, CLIENT_LOCK_SUFFIX};
 use cavalry_proto::client_protocol::{
     Command, ErrorCode, Event, IPC_CHANNEL, MAX_STRING_LENGTH, NO_CHANNEL_STATUS, NULL_LENGTH,
     ProtocolError, ReplayStopReason,
@@ -65,6 +66,7 @@ use cavalry_shm::counters::generated::{
     SUBSCRIPTION_ADD_DEFERRED, SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT,
     SUBSCRIPTION_ADD_DEFERRED_WAITING, SUBSCRIPTION_LINGERS_ENDED, SUBSCRIPTION_POSITION,
 };
+use cavalry_shm::counters::generated::{COUNTERS_HELD, COUNTERS_RETIRED};
 use cavalry_shm::counters::{Counter, CounterId, CountersError, CountersFile, Scope};
 use cavalry_shm::log::layout as log_layout;
 use cavalry_shm::log::{HeaderFields, LogBuffers, LogType, UnblockOutcome as LogUnblock};
@@ -236,6 +238,10 @@ pub(crate) fn prepare_dir(dir: &Path) -> Result<DirLock, DriverError> {
         }
         .map_err(|source| io("remove what the last driver left in the directory", source))?;
     }
+    // Where each client keeps its lock file (`spec/client-protocol.md`, "The records a
+    // client writes"). A client of this version finds it and takes its lock there.
+    std::fs::create_dir(dir.join(CLIENT_LOCK_DIRECTORY))
+        .map_err(|source| io("create the directory of the clients' locks", source))?;
     Ok(DirLock { _dir: lock })
 }
 
@@ -258,6 +264,40 @@ struct Client {
     id: i64,
     last_seen: i64,
     last_seen_epoch: i64,
+    /// Whether the client held its lock, `clients/<client id>.lock`, at its first
+    /// command: what lets the driver learn, once the client has gone, that nothing of
+    /// it can store into a counter (`spec/client-protocol.md`, "The records a client
+    /// writes"; ADR 0179).
+    locks: bool,
+}
+
+/// What one try at a client's lock found.
+enum LockTry {
+    /// The client holds it.
+    Held,
+    /// The driver took it, and let go of it: the client does not hold it.
+    Taken,
+    /// No file is there: the client never made one, or removed it as it let go.
+    NoFile,
+    /// The system refused the try for another reason; the lock is tried again.
+    Unknown,
+}
+
+/// The client id of a record whose subscription was not registered when the record
+/// was made, which no client has: such a record is let go by its release word alone.
+const NO_CLIENT: i64 = -1;
+
+/// How many held records' release words the driver loads in one duty cycle.
+const HELD_PER_CYCLE: usize = 64;
+
+/// A record the driver has freed and holds for its writer: an image's position or a
+/// counter a client added, which a thread of that client may still store into. It is
+/// let go when its release word is stored, or when the driver holds the lock of the
+/// client it was allocated for (ADR 0179).
+#[derive(Clone, Copy)]
+struct Held {
+    record: u32,
+    client_id: i64,
 }
 
 /// One counter a client added with `add counter` (`spec/client-protocol.md`,
@@ -590,6 +630,8 @@ struct UdpImage {
 #[derive(Clone, Copy)]
 struct UdpPair {
     subscription_id: i64,
+    /// The client of the subscription, for whom the record is held once it is freed.
+    client_id: i64,
     /// The id of its `subscription.position` record.
     record: u32,
     /// The position it joined at, stored in the record before the image was announced.
@@ -612,6 +654,8 @@ fn announcement_waits(announced: i64, joined: i64, position: i64, now: i64) -> b
 struct Image {
     publication_id: i64,
     subscription_id: i64,
+    /// The client of the subscription, for whom the record is held once it is freed.
+    client_id: i64,
     position: Counter,
     /// The position the image joined at, which the driver stored in `position` before
     /// it announced the image.
@@ -793,6 +837,8 @@ enum PendingHop {
 
 /// The static counters the conductor moves.
 struct Statics {
+    counters_held: Counter,
+    counters_retired: Counter,
     client_timed_out: Counter,
     rejected_command: Counter,
     errors: Counter,
@@ -837,6 +883,8 @@ impl Statics {
     fn new(counters: &CountersFile) -> Result<Self, CountersError> {
         let get = |id: CounterId| counters.counter(id.record());
         Ok(Self {
+            counters_held: get(COUNTERS_HELD)?,
+            counters_retired: get(COUNTERS_RETIRED)?,
             client_timed_out: get(CLIENT_TIMED_OUT)?,
             rejected_command: get(CLIENT_PROTOCOL_REJECTED_COMMAND)?,
             errors: get(CLIENT_PROTOCOL_ERRORS)?,
@@ -915,6 +963,16 @@ pub(crate) struct Conductor {
     transmitter: Transmitter,
     statics: Statics,
     clients: Vec<Client>,
+    /// The records freed and held for their writers, at most as many as the counters
+    /// file has records (ADR 0179).
+    held: Vec<Held>,
+    /// Where the next look at the held records' release words begins.
+    held_next: usize,
+    /// The clients that have gone, held a lock, and whose lock the driver has yet to
+    /// take, at most [`spec::MAX_CLIENTS`].
+    gone: Vec<i64>,
+    /// When the driver last tried the locks of the clients that have gone.
+    locks_tried: i64,
     /// The counters clients added, in the order they were added (ADR 0062).
     client_counters: Vec<ClientCounter>,
     publications: Vec<Publication>,
@@ -1047,6 +1105,7 @@ impl Conductor {
         let scratch_length = transmitter
             .max_message_length()
             .min(8 + 2 * (4 + MAX_STRING_LENGTH) + 64);
+        let records = counters.capacity() as usize;
         Ok(Self {
             dir: dir.to_path_buf(),
             counters,
@@ -1054,6 +1113,10 @@ impl Conductor {
             transmitter,
             statics,
             clients: Vec::with_capacity(spec::MAX_CLIENTS),
+            held: Vec::with_capacity(records),
+            held_next: 0,
+            gone: Vec::with_capacity(spec::MAX_CLIENTS),
+            locks_tried: 0,
             client_counters: Vec::with_capacity(spec::MAX_CLIENT_COUNTERS),
             // A replay's publication has no registration, so the publications sit
             // beside the registrations' bound.
@@ -1229,6 +1292,14 @@ impl Conductor {
         work += self.read_commands(now);
         work += self.unblock_ring(now);
         work += self.time_out_clients(now);
+        // The records held for their writers, and the clients that have gone: nothing
+        // to do while there are none, which is nearly always (ADR 0179).
+        if !self.held.is_empty() {
+            work += self.let_go_released(now);
+        }
+        if !self.gone.is_empty() {
+            work += self.try_locks(now);
+        }
         work += self.take_replies(now);
         work += self.flush_deferred();
         work += self.take_replayer_replies(now);
@@ -1392,7 +1463,7 @@ impl Conductor {
                 client_id,
                 correlation_id,
                 registration_id,
-            } => self.remove_subscription(client_id, correlation_id, registration_id, now),
+            } => self.remove_subscription(client_id, correlation_id, registration_id),
             Command::ClientKeepalive { .. } => {}
             Command::ClientClose { client_id, .. } => self.remove_client(client_id, now),
             Command::StartRecording {
@@ -1486,7 +1557,7 @@ impl Conductor {
                 client_id,
                 correlation_id,
                 registration_id,
-            } => self.remove_counter(client_id, correlation_id, registration_id, now),
+            } => self.remove_counter(client_id, correlation_id, registration_id),
         }
     }
 
@@ -1569,13 +1640,7 @@ impl Conductor {
     /// forgets the client's registration, answers `operation success`, sends
     /// `unavailable counter` and frees the record. A registration the driver does not
     /// know, or another client's, is code 5.
-    fn remove_counter(
-        &mut self,
-        client_id: i64,
-        correlation_id: i64,
-        registration_id: i64,
-        now: i64,
-    ) {
+    fn remove_counter(&mut self, client_id: i64, correlation_id: i64, registration_id: i64) {
         let found = self.client_counters.iter().position(|counter| {
             counter.registration_id == registration_id && counter.client_id == client_id
         });
@@ -1592,19 +1657,20 @@ impl Conductor {
         };
         let counter = self.client_counters.remove(index);
         self.send(&Event::OperationSuccess { correlation_id });
-        self.release_client_counter(&counter, now);
+        self.release_client_counter(&counter);
     }
 
-    /// Tells every client that a client's counter is going, then frees its record, which
-    /// is not allocated again before the counter reuse timeout: a reader of the counter
-    /// stops at the event (`spec/client-protocol.md`, "Events").
-    fn release_client_counter(&mut self, counter: &ClientCounter, now: i64) {
+    /// Tells every client that a client's counter is going, then frees its record and
+    /// holds it for the client that wrote it: a reader of the counter stops at the
+    /// event, and the record is not allocated again before its writer has let it go
+    /// and the counter reuse timeout has passed (`spec/client-protocol.md`, "Events"
+    /// and "The records a client writes").
+    fn release_client_counter(&mut self, counter: &ClientCounter) {
         self.send(&Event::UnavailableCounter {
             registration_id: counter.registration_id,
             counter_id: i32::try_from(counter.counter_id).unwrap_or(i32::MAX),
         });
-        let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
-        let _ = self.counters.free(counter.counter_id, reuse);
+        self.hold(counter.counter_id, counter.client_id);
     }
 
     /// `add destination` and `remove destination` (`spec/client-protocol.md`,
@@ -1818,12 +1884,155 @@ impl Conductor {
             return false;
         }
         let last_seen_epoch = self.epoch.at(now);
+        // A client takes its lock before its first command, so at that command the
+        // driver cannot take it. A file that is not there, or a lock the driver takes,
+        // is a client that holds none.
+        let locks = matches!(self.try_client_lock(client_id), LockTry::Held);
         self.clients.push(Client {
             id: client_id,
             last_seen: now,
             last_seen_epoch,
+            locks,
         });
         true
+    }
+
+    /// The client of subscription `subscription_id`, when the subscription is registered.
+    fn client_of(&self, subscription_id: i64) -> Option<i64> {
+        self.subscriptions
+            .iter()
+            .find(|subscription| subscription.registration_id == subscription_id)
+            .map(|subscription| subscription.client_id)
+    }
+
+    /// The path of client `client_id`'s lock file.
+    fn client_lock_path(&self, client_id: i64) -> PathBuf {
+        self.dir
+            .join(CLIENT_LOCK_DIRECTORY)
+            .join(format!("{client_id}{CLIENT_LOCK_SUFFIX}"))
+    }
+
+    /// Tries client `client_id`'s lock once, without waiting, and lets go of it at once
+    /// when it takes it: the answer is what is wanted, and the file's close drops the
+    /// lock.
+    fn try_client_lock(&self, client_id: i64) -> LockTry {
+        match File::open(self.client_lock_path(client_id)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => LockTry::NoFile,
+            Err(_) => LockTry::Unknown,
+            Ok(file) => match file.try_lock() {
+                Ok(()) => LockTry::Taken,
+                Err(TryLockError::WouldBlock) => LockTry::Held,
+                Err(TryLockError::Error(_)) => LockTry::Unknown,
+            },
+        }
+    }
+
+    /// Frees record `record` and holds it for client `client_id`, whose thread may
+    /// still store into it: a reader sees no counter from now on, and the record goes
+    /// to no other owner until [`Self::let_go_released`] reads its release word or
+    /// [`Self::try_locks`] takes the client's lock (`spec/client-protocol.md`, "The
+    /// records a client writes"; ADR 0179). `counters.held` gains one.
+    fn hold(&mut self, record: u32, client_id: i64) {
+        if self.counters.hold(record).is_ok() {
+            self.held.push(Held { record, client_id });
+            self.statics.counters_held.increment();
+        }
+    }
+
+    /// Lets go of the held record at `index`: the counter reuse timeout runs from now,
+    /// for a reader that loaded its state before it was freed.
+    fn let_go(&mut self, index: usize, now: i64) {
+        let held = self.held.swap_remove(index);
+        let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
+        let _ = self.counters.let_go(held.record, reuse);
+        self.statics.counters_held.add(-1);
+    }
+
+    /// Lets go of every held record whose writer has stored its release word, at most
+    /// [`HELD_PER_CYCLE`] looked at in a cycle, in turn. Returns how many it let go.
+    fn let_go_released(&mut self, now: i64) -> usize {
+        let mut work = 0;
+        let looks = self.held.len().min(HELD_PER_CYCLE);
+        for _ in 0..looks {
+            if self.held.is_empty() {
+                break;
+            }
+            let index = self.held_next % self.held.len();
+            if self
+                .counters
+                .released(self.held[index].record)
+                .unwrap_or(false)
+            {
+                // The last entry takes this place and is looked at next.
+                self.let_go(index, now);
+                work += 1;
+            } else {
+                self.held_next = index + 1;
+            }
+        }
+        work
+    }
+
+    /// Tries the lock of each client that has gone, once every
+    /// [`spec::LOCK_CHECK_INTERVAL`]. A lock the driver takes, and a file the client
+    /// removed as it let go of it, is a client of which nothing can store: every
+    /// record held for it is let go, and the file is removed. Returns how many
+    /// clients it finished.
+    fn try_locks(&mut self, now: i64) -> usize {
+        if now.saturating_sub(self.locks_tried) < spec::nanos(spec::LOCK_CHECK_INTERVAL) {
+            return 0;
+        }
+        self.locks_tried = now;
+        let mut work = 0;
+        let mut index = 0;
+        while index < self.gone.len() {
+            let client_id = self.gone[index];
+            match self.try_client_lock(client_id) {
+                LockTry::Held | LockTry::Unknown => index += 1,
+                LockTry::Taken | LockTry::NoFile => {
+                    let _ = std::fs::remove_file(self.client_lock_path(client_id));
+                    self.gone.swap_remove(index);
+                    let mut held = 0;
+                    while held < self.held.len() {
+                        if self.held[held].client_id == client_id {
+                            self.let_go(held, now);
+                        } else {
+                            held += 1;
+                        }
+                    }
+                    work += 1;
+                }
+            }
+        }
+        work
+    }
+
+    /// A client has closed or was timed out, and its records are held. One that held
+    /// its lock is tried from now on ([`Self::try_locks`]). One that held none can
+    /// never be known to be gone: what it left with no release word is out of use
+    /// until the driver starts again, and `counters.retired` counts it. So is what a
+    /// client leaves when the list of the clients that have gone is full.
+    fn client_gone(&mut self, client_id: i64, locks: bool, now: i64) {
+        if locks && self.gone.len() < spec::MAX_CLIENTS {
+            self.gone.push(client_id);
+            return;
+        }
+        let mut index = 0;
+        while index < self.held.len() {
+            if self.held[index].client_id != client_id {
+                index += 1;
+            } else if self
+                .counters
+                .released(self.held[index].record)
+                .unwrap_or(false)
+            {
+                self.let_go(index, now);
+            } else {
+                self.held.swap_remove(index);
+                self.statics.counters_held.add(-1);
+                self.statics.counters_retired.increment();
+            }
+        }
     }
 
     fn add_publication(
@@ -2994,13 +3203,9 @@ impl Conductor {
     /// `subscription_id`: a position counter the client owns, at the producer's position,
     /// and an `available image` event, sent at `now`.
     fn add_image(&mut self, publication_index: usize, subscription_id: i64, now: i64) {
-        if !self
-            .subscriptions
-            .iter()
-            .any(|subscription| subscription.registration_id == subscription_id)
-        {
+        let Some(client_id) = self.client_of(subscription_id) else {
             return;
-        }
+        };
         if self.images.len() >= spec::MAX_IMAGES {
             self.registry_full(subscription_id, "images", spec::MAX_IMAGES);
             return;
@@ -3048,6 +3253,7 @@ impl Conductor {
         self.images.push(Image {
             publication_id,
             subscription_id,
+            client_id,
             position,
             joined: join_position,
             announced: now,
@@ -3739,8 +3945,10 @@ impl Conductor {
         };
         let counter_record = position.id();
         self.send(&event);
+        let client_id = self.client_of(subscription_id).unwrap_or(NO_CLIENT);
         self.udp_images[index].subscriptions.push(UdpPair {
             subscription_id,
+            client_id,
             record: counter_record,
             joined: join,
             announced: now,
@@ -3840,10 +4048,9 @@ impl Conductor {
                             .iter()
                             .position(|pair| pair.subscription_id == subscription_id)
                     {
-                        let record = image.subscriptions.swap_remove(pair).record;
-                        let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
-                        let _ = self.counters.free(record, reuse);
+                        let pair = image.subscriptions.swap_remove(pair);
                         self.udp_pairs = self.udp_pairs.saturating_sub(1);
+                        self.hold(pair.record, pair.client_id);
                     }
                 }
                 receiver::Reply::ReaderRejected {
@@ -4057,6 +4264,7 @@ impl Conductor {
             position.store_release(start.position);
             pairs.push(UdpPair {
                 subscription_id,
+                client_id: self.client_of(subscription_id).unwrap_or(NO_CLIENT),
                 record: position.id(),
                 joined: start.position,
                 announced: now,
@@ -4153,7 +4361,6 @@ impl Conductor {
             return;
         };
         self.udp_images[index].state = state;
-        let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
         let (endpoint_id, stream_id) = (
             self.udp_images[index].endpoint_id,
             self.udp_images[index].stream_id,
@@ -4175,14 +4382,18 @@ impl Conductor {
         }
         // A record whose subscription may not have read the announcement yet stays, and
         // goes with the log; every other record is freed now, as before.
+        let mut freed: Vec<(u32, i64)> = Vec::new();
         pairs.retain(|pair| {
             let waits = self.pair_waits(pair, now);
             if !waits {
-                let _ = self.counters.free(pair.record, reuse);
+                freed.push((pair.record, pair.client_id));
                 self.udp_pairs = self.udp_pairs.saturating_sub(1);
             }
             waits
         });
+        for (record, client_id) in freed {
+            self.hold(record, client_id);
+        }
         if !pairs.is_empty() {
             self.udp_images[index].subscriptions = pairs;
             self.udp_images[index].waiting = true;
@@ -4269,7 +4480,7 @@ impl Conductor {
         let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
         let mut image = self.udp_images.swap_remove(index);
         for pair in image.subscriptions.drain(..) {
-            let _ = self.counters.free(pair.record, reuse);
+            self.hold(pair.record, pair.client_id);
             self.udp_pairs = self.udp_pairs.saturating_sub(1);
         }
         if image.waiting {
@@ -4362,13 +4573,7 @@ impl Conductor {
         });
     }
 
-    fn remove_subscription(
-        &mut self,
-        client_id: i64,
-        correlation_id: i64,
-        registration_id: i64,
-        now: i64,
-    ) {
+    fn remove_subscription(&mut self, client_id: i64, correlation_id: i64, registration_id: i64) {
         let found = self.subscriptions.iter().position(|subscription| {
             subscription.registration_id == registration_id && subscription.client_id == client_id
         });
@@ -4380,7 +4585,7 @@ impl Conductor {
             );
             return;
         };
-        self.drop_subscription(index, now);
+        self.drop_subscription(index);
         self.send(&Event::OperationSuccess { correlation_id });
     }
 
@@ -4388,7 +4593,7 @@ impl Conductor {
     /// counters; over UDP the receiver drops its readers, whose records are freed on its
     /// replies, retires an image left with none, and the endpoint closes when nothing
     /// holds it.
-    fn drop_subscription(&mut self, index: usize, now: i64) {
+    fn drop_subscription(&mut self, index: usize) {
         let subscription = self.subscriptions.swap_remove(index);
         if let Some(endpoint_id) = subscription.endpoint {
             // The images this was the last subscription to read: the receiver retires
@@ -4415,16 +4620,19 @@ impl Conductor {
             // Its record on an image already retired, kept in case its client had not
             // read the announcement (ADR 0078), is freed now: the receiver holds no
             // reader for it and sends no reply.
-            let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
+            let mut freed: Vec<u32> = Vec::new();
             for image in self.udp_images.iter_mut().filter(|image| image.waiting) {
                 image.subscriptions.retain(|pair| {
                     let kept = pair.subscription_id != subscription.registration_id;
                     if !kept {
-                        let _ = self.counters.free(pair.record, reuse);
+                        freed.push(pair.record);
                         self.udp_pairs = self.udp_pairs.saturating_sub(1);
                     }
                     kept
                 });
+            }
+            for record in freed {
+                self.hold(record, subscription.client_id);
             }
             self.receiver_request(receiver::Request::RemoveInterest {
                 endpoint_id,
@@ -4452,16 +4660,19 @@ impl Conductor {
                 });
             }
         }
-        let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
         let mut kept = Vec::with_capacity(self.images.len());
+        let mut freed: Vec<u32> = Vec::new();
         for image in self.images.drain(..) {
             if image.subscription_id == subscription.registration_id {
-                let _ = self.counters.free(image.position.id(), reuse);
+                freed.push(image.position.id());
             } else {
                 kept.push(image);
             }
         }
         self.images = kept;
+        for record in freed {
+            self.hold(record, subscription.client_id);
+        }
         self.images
             .reserve(spec::MAX_IMAGES.saturating_sub(self.images.len()));
         // A publication whose last image went is not connected from here, before the
@@ -4475,6 +4686,11 @@ impl Conductor {
     /// the client goes, as if removed, a counter with its `unavailable counter` and no
     /// `operation success`, and the client is forgotten.
     fn remove_client(&mut self, client_id: i64, now: i64) {
+        let locks = self
+            .clients
+            .iter()
+            .find(|client| client.id == client_id)
+            .is_some_and(|client| client.locks);
         self.clients.retain(|client| client.id != client_id);
         while let Some(index) = self
             .client_counters
@@ -4482,7 +4698,7 @@ impl Conductor {
             .position(|counter| counter.client_id == client_id)
         {
             let counter = self.client_counters.remove(index);
-            self.release_client_counter(&counter, now);
+            self.release_client_counter(&counter);
         }
         // Its adds still waiting for a closing endpoint go with it (ADR 0049).
         self.pending_subscriptions
@@ -4511,8 +4727,9 @@ impl Conductor {
             .iter()
             .position(|subscription| subscription.client_id == client_id)
         {
-            self.drop_subscription(index, now);
+            self.drop_subscription(index);
         }
+        self.client_gone(client_id, locks, now);
     }
 
     /// Times out every client whose last command is older than the liveness timeout, on
@@ -4862,7 +5079,7 @@ impl Conductor {
         let mut kept = Vec::with_capacity(spec::MAX_IMAGES);
         for image in images {
             if image.publication_id == publication_id {
-                let _ = self.counters.free(image.position.id(), reuse);
+                self.hold(image.position.id(), image.client_id);
             } else {
                 kept.push(image);
             }
@@ -12736,7 +12953,7 @@ mod replay {
 
         // The commands pass: the last subscription goes, and the flag with it, before
         // the limit moves.
-        h.conductor.remove_subscription(CLIENT, 4, 3, now);
+        h.conductor.remove_subscription(CLIENT, 4, 3);
         assert!(h.conductor.images.is_empty());
         let publication = &h.conductor.publications[0];
         assert!(
@@ -13329,7 +13546,7 @@ mod replay {
             "paced at the window"
         );
         let _ = events(&mut h);
-        h.conductor.remove_subscription(CLIENT, 7, 5, h.now);
+        h.conductor.remove_subscription(CLIENT, 7, 5);
         for _ in 0..20 {
             h.cycle();
         }
@@ -16992,9 +17209,9 @@ mod receiving {
         // A second subscription on the stream keeps it armed; the last one drops it.
         h.conductor
             .add_subscription(1, 5, STREAM, channel.as_bytes(), h.now);
-        h.conductor.remove_subscription(1, 6, 2, now);
+        h.conductor.remove_subscription(1, 6, 2);
         assert_eq!(h.conductor.armed_recordings.len(), 1);
-        h.conductor.remove_subscription(1, 7, 5, now);
+        h.conductor.remove_subscription(1, 7, 5);
         assert!(h.conductor.armed_recordings.is_empty());
         let (code, message) = h.last_error(4).expect("the second answer");
         assert_eq!(code, 20, "{message}");
@@ -17099,7 +17316,7 @@ mod receiving {
         assert_eq!(h.counter(RECORDING_ARMED), i64::from(n));
 
         // One subscription goes: exactly its stream's armed recording is dropped.
-        h.conductor.remove_subscription(1, 40_000, 10_005, now);
+        h.conductor.remove_subscription(1, 40_000, 10_005);
         assert_eq!(
             h.conductor.armed_recordings.len(),
             spec::MAX_SUBSCRIPTIONS - 1
@@ -17574,8 +17791,7 @@ mod receiving {
         assert!(!log.exists());
         assert!(unavailable_images(&mut h, 2).is_empty());
         // The subscription and its endpoint stay; removing it frees every record.
-        let now = h.now;
-        h.conductor.remove_subscription(1, 3, 2, now);
+        h.conductor.remove_subscription(1, 3, 2);
         assert!(h.cycle_until(|h| h.conductor.receive_endpoints.is_empty()));
         assert_eq!(h.counter(COUNTERS_ALLOCATED), allocated);
         drop(sender);
@@ -17600,7 +17816,7 @@ mod receiving {
         );
         let now = h.now;
         assert!(now < announced + spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
-        h.conductor.remove_subscription(1, 3, 2, now);
+        h.conductor.remove_subscription(1, 3, 2);
         assert!(
             h.conductor.counters.counter(record).is_err(),
             "freed with the removal"
@@ -17686,7 +17902,7 @@ mod receiving {
         h.conductor
             .add_publication(1, 5, STREAM, IPC_CHANNEL, false, now);
         assert_eq!(h.conductor.images.len(), 1);
-        h.conductor.remove_subscription(1, 6, 2, now);
+        h.conductor.remove_subscription(1, 6, 2);
         h.conductor.remove_publication(1, 7, 5, now);
         h.cycle();
         assert!(h.conductor.publications.is_empty());
@@ -17790,8 +18006,7 @@ mod receiving {
         let mut h = Harness::new("udp-unsubscribe");
         let allocated = h.counter(COUNTERS_ALLOCATED);
         let (sender, _image_id, _position) = subscribe_and_connect(&mut h, 2);
-        let now = h.now;
-        h.conductor.remove_subscription(1, 3, 2, now);
+        h.conductor.remove_subscription(1, 3, 2);
         assert!(h.cycle_until(|h| h.conductor.receive_endpoints.is_empty()));
         assert_eq!(h.counter(IMAGE_UNSUBSCRIBED), 1);
         assert_eq!(h.counter(IMAGE_REMOVED), 1);
@@ -17881,8 +18096,7 @@ mod receiving {
         );
         // The last subscription goes: its reader's removal takes the last slot, and
         // the retire finds no room.
-        let now = h.now;
-        h.conductor.remove_subscription(1, 3, 2, now);
+        h.conductor.remove_subscription(1, 3, 2);
         h.now += MS;
         let now = h.now;
         h.udp_receiver.duty_cycle(now);
@@ -17953,8 +18167,7 @@ mod receiving {
         );
         // The subscription goes: one reader's reply takes the last slot; the other
         // reader stays, leaving, and neither image counts a subscriber or retires.
-        let now = h.now;
-        h.conductor.remove_subscription(1, 3, 2, now);
+        h.conductor.remove_subscription(1, 3, 2);
         h.now += MS;
         let now = h.now;
         h.udp_receiver.duty_cycle(now);
@@ -18244,8 +18457,7 @@ mod receiving {
             "the slowest reader's position, the second subscriber's"
         );
         // Removing one subscription leaves the image with the other.
-        let now = h.now;
-        h.conductor.remove_subscription(1, 4, 3, now);
+        h.conductor.remove_subscription(1, 4, 3);
         assert!(h.cycle_until(|h| h.conductor.udp_pairs == 1));
         assert_eq!(h.conductor.udp_images.len(), 1);
         assert_eq!(h.counter(IMAGE_UNSUBSCRIBED), 0);
@@ -18333,8 +18545,7 @@ mod receiving {
         // The last subscription goes: the image is retired, but its log stays while the
         // recording runs, and the recording is stopped at the rebuild position once the
         // recorder has written up to it.
-        let now = h.now;
-        h.conductor.remove_subscription(1, 3, 2, now);
+        h.conductor.remove_subscription(1, 3, 2);
         assert!(h.cycle_until(|h| h.counter(IMAGE_UNSUBSCRIBED) == 1));
         assert_eq!(
             h.counter(IMAGE_REMOVED),
@@ -18396,8 +18607,7 @@ mod receiving {
             .add_subscription(1, 2, STREAM, channel.as_bytes(), h.now);
         assert_eq!(h.last_error(2), None);
         h.cycle();
-        let now = h.now;
-        h.conductor.remove_subscription(1, 3, 2, now);
+        h.conductor.remove_subscription(1, 3, 2);
         assert_eq!(
             h.conductor.receive_endpoints[0].state,
             ChannelState::Closing
@@ -18481,8 +18691,7 @@ mod receiving {
         let (sender, image_id, _position) = subscribe_and_connect(&mut h, 2);
         let port = h.conductor.receive_endpoints[0].endpoint.port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
-        let now = h.now;
-        h.conductor.remove_subscription(1, 3, 2, now);
+        h.conductor.remove_subscription(1, 3, 2);
         // The receiver has not run: the image is listed, live, and holds the endpoint.
         assert_eq!(h.conductor.udp_images.len(), 1);
         assert_eq!(h.conductor.udp_images[0].state, ImageState::Live);
@@ -18539,8 +18748,7 @@ mod receiving {
             .add_subscription(1, 5, STREAM + 1, channel.as_bytes(), h.now);
         assert_eq!(h.last_error(5), None);
         h.cycle();
-        let now = h.now;
-        h.conductor.remove_subscription(1, 6, 2, now);
+        h.conductor.remove_subscription(1, 6, 2);
         assert_eq!(h.conductor.udp_images.len(), 1);
         assert!(h.conductor.udp_images[0].leaving);
         h.conductor
@@ -18584,7 +18792,7 @@ mod receiving {
         assert_eq!(h.last_error(2), None);
         h.cycle();
         let now = h.now;
-        h.conductor.remove_subscription(1, 3, 2, now);
+        h.conductor.remove_subscription(1, 3, 2);
         assert_eq!(
             h.conductor.receive_endpoints[0].state,
             ChannelState::Closing
@@ -18634,8 +18842,7 @@ mod receiving {
             .add_subscription(1, 2, STREAM, channel.as_bytes(), h.now);
         assert_eq!(h.last_error(2), None);
         h.cycle();
-        let now = h.now;
-        h.conductor.remove_subscription(1, 3, 2, now);
+        h.conductor.remove_subscription(1, 3, 2);
         assert_eq!(
             h.conductor.receive_endpoints[0].state,
             ChannelState::Closing
@@ -18737,7 +18944,7 @@ mod receiving {
         assert_eq!(h.counter(PUBLICATION_ADD_DEFERRED), 0);
 
         // Its last subscription removed: the add waits for the close, then binds.
-        h.conductor.remove_subscription(1, 4, 2, now);
+        h.conductor.remove_subscription(1, 4, 2);
         h.conductor
             .add_publication(1, 5, STREAM, control.as_bytes(), true, h.now);
         assert_eq!(h.conductor.pending_publications.len(), 1);
@@ -18777,7 +18984,7 @@ mod receiving {
         assert_eq!(h.last_error(2), None);
         h.cycle();
         let now = h.now;
-        h.conductor.remove_subscription(1, 3, 2, now);
+        h.conductor.remove_subscription(1, 3, 2);
         h.conductor
             .add_publication(1, 4, STREAM, control.as_bytes(), true, now);
         h.conductor
@@ -18820,7 +19027,7 @@ mod receiving {
         assert_eq!(h.last_error(2), None);
         h.cycle();
         let now = h.now;
-        h.conductor.remove_subscription(1, 3, 2, now);
+        h.conductor.remove_subscription(1, 3, 2);
         h.conductor
             .add_publication(1, 4, STREAM, control.as_bytes(), false, now);
         assert_eq!(h.conductor.pending_publications.len(), 1);
@@ -18861,8 +19068,7 @@ mod receiving {
             .add_subscription(1, 2, STREAM, channel.as_bytes(), h.now);
         assert_eq!(h.last_error(2), None);
         h.cycle();
-        let now = h.now;
-        h.conductor.remove_subscription(1, 3, 2, now);
+        h.conductor.remove_subscription(1, 3, 2);
         assert_eq!(
             h.conductor.receive_endpoints[0].state,
             ChannelState::Closing
@@ -18921,7 +19127,7 @@ mod receiving {
         assert_eq!(h.last_error(2), None);
         h.cycle();
         let now = h.now;
-        h.conductor.remove_subscription(1, 3, 2, now);
+        h.conductor.remove_subscription(1, 3, 2);
         // The registry filled with held adds, exclusive and shared, the receiver
         // running no cycle.
         let capacity = spec::MAX_PUBLICATIONS as i64;
@@ -18990,7 +19196,7 @@ mod receiving {
         assert_eq!(h.last_error(2), None);
         h.cycle();
         let now = h.now;
-        h.conductor.remove_subscription(1, 3, 2, now);
+        h.conductor.remove_subscription(1, 3, 2);
         let registered = spec::MAX_PUBLICATIONS as i64 - 1;
         for n in 0..registered {
             h.conductor

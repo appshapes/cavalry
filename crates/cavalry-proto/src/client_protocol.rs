@@ -65,6 +65,15 @@ pub const CORRELATED_LENGTH: usize = 16;
 /// (`spec/udp.md`, "The channel URI").
 pub const IPC_CHANNEL: &[u8] = b"cavalry:ipc";
 
+/// The directory of the clients' lock files in the driver's directory, which the
+/// driver creates when it starts (`spec/client-protocol.md`, "The driver directory" and
+/// "The records a client writes"; ADR 0179).
+pub const CLIENT_LOCK_DIRECTORY: &str = "clients";
+
+/// What follows a client's id, in decimal, in the name of its lock file:
+/// `clients/<client id>.lock`.
+pub const CLIENT_LOCK_SUFFIX: &str = ".lock";
+
 /// The channel status indicator id of a `cavalry:ipc` publication or subscription,
 /// which has no endpoint: `publication ready` and `subscription ready` carry it
 /// (`spec/client-protocol.md`, "Events"; ADR 0040).
