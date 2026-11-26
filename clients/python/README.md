@@ -696,11 +696,10 @@ with no error from a poll between (ADR 0159, ADR 0168). The publication's log is
 MiB in the driver's directory, every page of it resident, and every service holds it
 from that poll on, a program with no timer and no snapshot too; where the directory
 has no room for it, the refusal is `CAVALRY_ERR_STORAGE_SPACE`, code 12, and `cavalry
-doctor` names it with `driver.log_create_failed`. Until work item 492 lands, each such
-refusal also leaves the log's file in the directory, one at each ask, a second apart,
-and the first holds whatever room was left (GitHub issue 238). What a service tells
-its member of its timers, each pending timer again every second among it, is offered
-and waits for nothing, a program's first timer too. It holds the GIL all the same, because releasing it would cost
+doctor` names it with `driver.log_create_failed`. The driver leaves no file for a log
+it could not create, however often it is asked (ADR 0172). What a service tells its
+member of its timers, each pending timer again every second among it, is offered and
+waits for nothing, a program's first timer too. It holds the GIL all the same, because releasing it would cost
 every entry: through `ctypes.CDLL` each call-back takes the GIL back, and beside one
 Python thread that computes, a poll of 10 messages then took 5.8 to 6.3 ms at its p99,
 the interpreter's switch interval of 5 ms and more, against 4.4 to 4.6 µs with the GIL
