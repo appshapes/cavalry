@@ -826,9 +826,23 @@ const ELECTION_COUNTERS: [&str; 18] = [
 /// that a start did not settle.
 const ELECTION_BOUND: Duration = Duration::from_secs(30);
 
-/// The leader heartbeat timeout (`spec/cluster.md`, "Roles and the election"): a start
-/// that took longer is reported, though it passes.
-const LEADER_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+/// The leader heartbeat timeout (`spec/cluster.md`, "Roles and the election"), the
+/// cluster's own constant: a start that took longer is reported, though it passes.
+const LEADER_HEARTBEAT_TIMEOUT: Duration =
+    Duration::from_nanos(cavalry_proto::cluster::LEADER_HEARTBEAT_TIMEOUT_NS);
+
+/// Each counter the election report reads is one `counters.toml` names, so that a
+/// counter renamed there fails here, where it would print `None` in a failure's report.
+#[test]
+fn the_election_report_reads_counters_that_exist() {
+    let counters = include_str!("../../../counters.toml");
+    for name in ELECTION_COUNTERS {
+        assert!(
+            counters.contains(&format!("name = \"{name}\"")),
+            "{name} is not in counters.toml"
+        );
+    }
+}
 
 /// Each member's counters of [`ELECTION_COUNTERS`], and the members string, whose ports
 /// a member's error names.
