@@ -128,6 +128,12 @@ feature that followed this page, commit by commit.
      review record as its body and the `auto-merge` label, then follows the review
      loop from the author's side; `/pr watch <number>` follows one that is open. The
      pull request's title and body become the commit on `master`.
+   - Whoever writes it, a commit message or a pull request body ends where the review
+     record ends. It carries no attribution lines: no `Co-Authored-By:` line that
+     names Claude, no `Claude-Session:` line and no "Generated with Claude Code" line
+     (the owner's ruling of 2026-11-26; work item 475). Claude Code adds them by
+     default, and the project's `.claude/settings.json` turns them off with its
+     `attribution` setting. A commit that is already pushed keeps the lines it has.
    - When the feature's last commit is on `master`, comment the commit hashes on the
      work item (`brigade work-item comment <number>`, the text on stdin) and move it to
      Done (`brigade work-item move <number> done`). Do not close it: a finished work
