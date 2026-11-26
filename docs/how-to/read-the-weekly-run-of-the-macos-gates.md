@@ -164,7 +164,9 @@ gh run watch <run id>
 
 The first command starts the gates at the head of `master`. `--ref <branch>` starts
 them at a branch that holds the workflow file, for a change you want to see on a
-clean macOS machine before its pull request opens. Nothing requires that: a pull
+clean macOS machine before its pull request opens. At a branch, the job's `just
+lint-docs` reads the branch's whole change against `master`, as a pull request's run
+does, and not its last commit alone. Nothing requires such a run: a pull
 request's required check is `gates (linux)`, and a Mac laptop has run the gates.
 
 ## How to verify it worked

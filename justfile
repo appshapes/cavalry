@@ -33,7 +33,8 @@ test *ARGS: test-scripts
 # sentence of counters.toml names (work item 230), and the script that points Brigade's
 # server at this tree, against a made-up checkout and a fake `cargo`, with the nightly
 # workflow that runs it (work item 362), and where the macOS gates run, by the two
-# workflows' own lines (work item 479), and the book's pages of the decisions and the
+# workflows' own lines, and the range `just lint-docs` reads in a run by hand, in a
+# made-up repository (work item 479), and the book's pages of the decisions and the
 # check of the built book, on a made-up book and made-up built pages (work item 474),
 # and the Python client's package: its manifest, its build backend's reading of made-up
 # libraries, the wheel it writes and the client's search for its library in a made-up
@@ -50,6 +51,7 @@ test-scripts:
     python3 scripts/fixer-spec-pages-test.py
     python3 scripts/brigade-server-patch-test.py
     python3 scripts/macos-workflow-test.py
+    python3 scripts/lint-docs-range-test.py
     python3 scripts/tidy-test.py
     python3 scripts/gen-counters-test.py
     python3 scripts/decisions-index-test.py
