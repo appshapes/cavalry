@@ -199,6 +199,11 @@ pub enum CountersError {
         /// The record's id.
         id: u32,
     },
+    /// The record is not held: it is allocated, unused, or already let go.
+    NotHeld {
+        /// The record's id.
+        id: u32,
+    },
     /// The operating system refused to create, open, size or map the file.
     Io(std::io::Error),
 }
@@ -231,6 +236,7 @@ impl CountersError {
             CountersError::Key { .. } => "key",
             CountersError::Full { .. } => "full",
             CountersError::Unallocated { .. } => "unallocated",
+            CountersError::NotHeld { .. } => "not-held",
             CountersError::Io(_) => "io",
         }
     }
@@ -259,10 +265,23 @@ impl fmt::Display for CountersError {
                  {DOC_REJECTS}",
                 Hex(found)
             ),
+            // Which side is the older, and what to do: across version 1 neither
+            // attaches to the other, so both are stopped and started from one build
+            // (`spec/client-protocol.md`, "Crossing to this version"; ADR 0179).
+            CountersError::Version { found } if *found < layout::VERSION => write!(
+                f,
+                "counters file rejected ({reason}): version {found}, this program reads \
+                 version {}; the driver of this directory is of an older build of Cavalry \
+                 than this program. Stop that driver and every client of it, and start \
+                 them from this program's build, the driver first; see {DOC_REJECTS}",
+                layout::VERSION
+            ),
             CountersError::Version { found } => write!(
                 f,
-                "counters file rejected ({reason}): version {found}, this reader knows {}; \
-                 the driver runs another Cavalry version, upgrade the older side; see \
+                "counters file rejected ({reason}): version {found}, this program reads \
+                 version {}; this program is of an older build of Cavalry than the driver \
+                 of this directory. Stop the driver and every client of it, this program \
+                 among them, and start them from the driver's build, the driver first; see \
                  {DOC_REJECTS}",
                 layout::VERSION
             ),
@@ -318,6 +337,12 @@ impl fmt::Display for CountersError {
                 f,
                 "counter refused ({reason}): record {id} holds no counter, it was freed or \
                  never allocated; read counters.allocated for how many exist; see \
+                 {DOC_RECORD}"
+            ),
+            CountersError::NotHeld { id } => write!(
+                f,
+                "counter refused ({reason}): record {id} is not held, so nothing was let \
+                 go; this is a fault of the driver, report it with counters.held; see \
                  {DOC_RECORD}"
             ),
             CountersError::Io(error) => write!(

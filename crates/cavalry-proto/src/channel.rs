@@ -6,7 +6,7 @@
 //! create a publication at a position, and, from version 3, `ssc=true|false`, by which
 //! a live recording connects a publication that no receiver answers, and, from version
 //! 4, `term-length`, the term length of a publication's log (`spec/udp.md`, "The
-//! channel URI"; `spec/client-protocol.md`, version 10; ADR 0040, ADR 0053, ADR 0059,
+//! channel URI"; `spec/client-protocol.md`, version 11; ADR 0040, ADR 0053, ADR 0059,
 //! ADR 0098, ADR 0099).
 //!
 //! [`Channel::parse`] reads a channel string, borrowing from it, and runs the spec's

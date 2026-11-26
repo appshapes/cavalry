@@ -17,8 +17,17 @@ pub const RECORD_LENGTH: usize = 256;
 pub const SLOT_LENGTH: usize = 128;
 /// The first eight bytes of a counters file, `CVLYCNTR`, written last by the creator.
 pub const MAGIC: [u8; 8] = *b"CVLYCNTR";
-/// The version of `spec/counters-file.md` this crate reads and writes.
-pub const VERSION: i32 = 0;
+/// The version of `spec/counters-file.md` this crate reads and writes. Version 1 gave
+/// the value slot its release word (ADR 0179).
+pub const VERSION: i32 = 1;
+/// The reclaim deadline of a record that is held: freed, and not to be allocated again
+/// until its writer has let it go. No reading of a clock reaches it
+/// (`spec/counters-file.md`, "Metadata record").
+pub const HELD: i64 = i64::MAX;
+/// The oldest version of the file that a reader which only reads may open
+/// ([`super::CountersReader::open_to_read`]): version 0 differs from version 1 in
+/// nothing a reader reads, the release word being the driver's alone to load.
+pub const OLDEST_READABLE: i32 = 0;
 /// The smallest capacity a counters file may have.
 pub const MIN_CAPACITY: u32 = 64;
 /// The largest capacity a counters file may have.
@@ -171,7 +180,7 @@ pub fn parse_header(bytes: &[u8], file_length: u64) -> Result<HeaderFields, Coun
     check_magic(magic)?;
     let mut rest = [0u8; HEADER_LENGTH - 8];
     rest.copy_from_slice(&bytes[8..HEADER_LENGTH]);
-    parse_header_rest(&rest, file_length)
+    parse_header_rest(&rest, file_length, VERSION)
 }
 
 /// The not-ready and magic checks on the first eight bytes.
@@ -189,6 +198,7 @@ pub(crate) fn check_magic(magic: [u8; 8]) -> Result<(), CountersError> {
 pub(crate) fn parse_header_rest(
     rest: &[u8; HEADER_LENGTH - 8],
     file_length: u64,
+    oldest: i32,
 ) -> Result<HeaderFields, CountersError> {
     let Ok(raw) = RawHeaderRest::ref_from_bytes(rest) else {
         return Err(CountersError::TooShort {
@@ -196,7 +206,9 @@ pub(crate) fn parse_header_rest(
         });
     };
     let version = raw.version.get();
-    if version != VERSION {
+    // A party that stores into the file, and a client, read this version alone
+    // (`oldest` is `VERSION`); one that only reads may read back to `oldest`.
+    if version > VERSION || version < oldest {
         return Err(CountersError::Version { found: version });
     }
     let capacity = raw.capacity.get();
