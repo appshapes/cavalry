@@ -21,6 +21,11 @@ use std::time::{Duration, Instant};
 
 use cavalry_client::{Cavalry, Fault, Offer};
 use cavalry_driver::Driver;
+// The one port these tests choose, from the one file that says how ports are taken
+// and why, which is `cavalry-raft`'s.
+#[path = "../../cavalry-raft/tests/ports/mod.rs"]
+mod ports;
+
 use cavalry_shm::counters::generated::{
     CLUSTER_COMMIT_POSITION, COUNTERS_HELD, COUNTERS_RETIRED, SUBSCRIPTION_POSITION,
 };
@@ -396,6 +401,187 @@ fn a_poll_inside_its_handler_stores_into_a_record_that_is_still_its_own() {
     drop(subscription);
     subscriber.close().expect("the subscriber closes");
     publisher.close().expect("the publisher closes");
+    driver.close().expect("the driver closes");
+}
+
+/// The release word of record `record`, read from the counters file's bytes: the i64
+/// at offset 8 of the record's value slot (`spec/counters-file.md`, "Value slot").
+fn release_word(dir: &Path, client: &Cavalry, record: u32) -> i64 {
+    use std::os::unix::fs::FileExt;
+    let capacity = u64::from(client.counters().capacity());
+    let offset = 128 + capacity * 256 + u64::from(record) * 128 + 8;
+    let file = std::fs::File::open(dir.join("counters")).expect("the counters file");
+    let mut word = [0u8; 8];
+    file.read_exact_at(&mut word, offset).expect("the word");
+    i64::from_le_bytes(word)
+}
+
+/// A handle stores its release word once. The driver reads the word, lets the record
+/// go and gives it to another owner with the word at 0. A second store of the word,
+/// from the drop of a handle that had already given the record up, would set that
+/// owner's word, and the driver would then let that owner's record go at once when it
+/// freed it, while the owner's thread could still store: the stray store again, one
+/// owner on (ADR 0179). Here a client is closed, its subscription's next poll gives
+/// its image's record up, another client is given the record, and only then is the
+/// subscription dropped.
+#[test]
+fn a_handle_stores_its_release_word_once() {
+    let dir = TestDir::new("once");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
+    let mut publisher = Cavalry::connect_to(dir.path()).expect("the publisher connects");
+    let mut subscriber = Cavalry::connect_to(dir.path()).expect("the subscriber connects");
+    let mut subscription = subscriber
+        .add_subscription("cavalry:ipc", STREAM + 3)
+        .expect("the subscription");
+    let mut publication = publisher
+        .add_publication("cavalry:ipc", STREAM + 3)
+        .expect("the publication");
+    wait(
+        "the subscriber has its image",
+        Duration::from_secs(10),
+        || {
+            subscription.poll(|_, _| {}, 0).expect("polls");
+            (subscription.image_count() == 1).then_some(())
+        },
+    );
+    while publication.offer(&[0u8; 32]).is_err() {
+        std::hint::spin_loop();
+    }
+    let record = position_record(&publisher).expect("the image's position");
+    wait("the subscriber reads", Duration::from_secs(10), || {
+        subscription.poll(|_, _| {}, 16).expect("polls");
+        (publisher.counters().read(record).unwrap_or(0) == 64).then_some(())
+    });
+
+    // The client closes; the subscription is not dropped. Its next poll finds the
+    // client closed and gives the image's record up: the word's one store.
+    subscriber.close().expect("the subscriber's client closes");
+    assert!(matches!(
+        subscription.poll(|_, _| {}, 16),
+        Err(Fault::Closed)
+    ));
+    assert_eq!(release_word(dir.path(), &publisher, record), 1);
+    wait(
+        "the driver lets the record go",
+        Duration::from_secs(10),
+        || {
+            (publisher
+                .counters()
+                .read(COUNTERS_HELD.record())
+                .expect("counters.held")
+                == 0)
+                .then_some(())
+        },
+    );
+    // Another owner is given the record, with its word at 0.
+    let mut others = Vec::new();
+    let counter = wait(
+        "the record is given out again",
+        Duration::from_secs(10),
+        || {
+            let key = i32::try_from(others.len()).expect("a few");
+            let counter = publisher
+                .add_counter(CLUSTER_COMMIT_POSITION.0, &key.to_le_bytes(), "a counter")
+                .expect("added");
+            if counter.id() == record {
+                return Some(counter);
+            }
+            others.push(counter);
+            assert!(others.len() < 32, "no add took record {record}");
+            std::thread::sleep(Duration::from_millis(200));
+            None
+        },
+    );
+    counter.store_release(OWNERS_VALUE).expect("stored");
+    assert_eq!(release_word(dir.path(), &publisher, record), 0);
+
+    // The closed client's subscription is dropped now, long after it gave the record
+    // up. Nothing of it stores: not a position, and not the word a second time.
+    assert!(matches!(
+        subscription.poll(|_, _| {}, 16),
+        Err(Fault::Closed)
+    ));
+    drop(subscription);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        release_word(dir.path(), &publisher, record),
+        0,
+        "the next owner's release word, after the first owner's handle was dropped"
+    );
+    assert_eq!(counter.get(), OWNERS_VALUE);
+
+    counter.close();
+    drop(others);
+    drop(publication);
+    publisher.close().expect("the publisher closes");
+    driver.close().expect("the driver closes");
+}
+
+/// Over UDP a position's record is freed when the receiver says that its reader is
+/// gone, a cycle or more after its subscription went. It is held for its writer all
+/// the same: here the client is closed and its subscription is neither polled nor
+/// dropped, so nothing has said that its thread is done, and the client's process
+/// holds its lock.
+#[test]
+fn over_udp_a_position_is_held_until_its_writer_lets_it_go() {
+    let dir = TestDir::new("udp");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
+    let channel = format!("cavalry:udp?endpoint=127.0.0.1:{}", ports::free_port());
+    let mut publisher = Cavalry::connect_to(dir.path()).expect("the publisher connects");
+    let mut subscriber = Cavalry::connect_to(dir.path()).expect("the subscriber connects");
+    let mut subscription = subscriber
+        .add_subscription(&channel, STREAM + 4)
+        .expect("the subscription");
+    let publication = publisher
+        .add_publication(&channel, STREAM + 4)
+        .expect("the publication");
+    wait("the image arrives", Duration::from_secs(20), || {
+        subscription.poll(|_, _| {}, 0).expect("polls");
+        (subscription.image_count() == 1).then_some(())
+    });
+    let held = |client: &Cavalry| {
+        client
+            .counters()
+            .read(COUNTERS_HELD.record())
+            .expect("counters.held")
+    };
+    assert_eq!(held(&publisher), 0);
+    subscriber.close().expect("the subscriber's client closes");
+    wait("the position is held", Duration::from_secs(10), || {
+        (held(&publisher) == 1).then_some(())
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        held(&publisher),
+        1,
+        "held for as long as the subscription is neither polled nor dropped"
+    );
+    drop(subscription);
+    wait("the record is let go", Duration::from_secs(10), || {
+        (held(&publisher) == 0).then_some(())
+    });
+    drop(publication);
+    publisher.close().expect("the publisher closes");
+    driver.close().expect("the driver closes");
+}
+
+/// A client forgets a subscription it removed when the driver has answered the
+/// removal, and not before and not never: more subscriptions than a client may hold
+/// at once are added and dropped in turn, and none is refused.
+#[test]
+fn a_removed_subscription_is_forgotten_once_the_driver_has_answered() {
+    let dir = TestDir::new("forgotten");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
+    let mut client = Cavalry::connect_to(dir.path()).expect("the client connects");
+    // A client holds at most 1,024 subscriptions.
+    for round in 0..1_100 {
+        let subscription = client
+            .add_subscription("cavalry:ipc", STREAM + 5)
+            .unwrap_or_else(|error| panic!("round {round}: {error}"));
+        drop(subscription);
+    }
+    assert_eq!(client.closed(), None);
+    client.close().expect("the client closes");
     driver.close().expect("the driver closes");
 }
 

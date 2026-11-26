@@ -1594,8 +1594,15 @@ mod tests {
                             break;
                         }
                         Err(crate::Offer::AdminAction) => {}
-                        Err(_) if std::time::Instant::now() < deadline => std::hint::spin_loop(),
-                        Err(_) => return offered,
+                        // Held at its limit for 200 ms with nobody reading: that is
+                        // as far as the publisher is let write.
+                        Err(crate::Offer::BackPressured) => {
+                            if std::time::Instant::now() >= deadline {
+                                return offered;
+                            }
+                            std::hint::spin_loop();
+                        }
+                        Err(other) => panic!("{other}"),
                     }
                 }
             }
