@@ -823,10 +823,11 @@ fn a_leader_lost_leaves_each_follower_at_the_end_its_recording_stopped() {
     }
 }
 
-/// A leave whose stop position was not read in time is an error that names the
-/// recording held, what the operator does next and where the leave is explained.
-/// No test here makes a stop fail on a running driver, which takes a seam the client
-/// and the driver do not have; this is the text such a leave returns.
+/// A stop whose position was not read in time, a leave's or a pass-over's (work item
+/// 510), is an error that names the recording held, what the operator does next and
+/// where the leave is explained. No test here makes a stop fail on a running driver,
+/// which takes a seam the client and the driver do not have; this is the text such a
+/// stop returns.
 #[test]
 fn a_stop_timeout_says_what_to_do_next() {
     let error = RaftError::StopTimeout { recording_id: 7 };

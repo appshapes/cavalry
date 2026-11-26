@@ -287,6 +287,17 @@ committed once a quorum, two of three, has it on disk.
   did not say where it stopped within 1 s. Nothing else was changed. Start the
   member again. If the message repeats, run `cavalry doctor --dir` on the member's
   driver directory: the driver is starved of CPU or cannot write its log directory.
+- `cavalry run: cluster member <id>: member stopped (stop-timeout)`: the running
+  member stopped one of its recordings and the driver did not say where it stopped
+  within 1 s. The member was leaving its leader's log, or it was passing over a
+  recording that is no part of its log, such as one of a publication a leader gave
+  up that still lingered at the member's `log` endpoint. The member holds the
+  recording, goes no further, and asks the stop again on its next cycle. `cavalry
+  run` prints the line once, however often it happens. Run `cavalry doctor --dir` and
+  `--log-dir` on the member's directories, as in step 4: when its `cluster-member`
+  line comes to say `election closed`, the stop was read and nothing is for you to
+  do. When it does not, the driver or the member's process is starved of CPU, or the
+  driver cannot write its log directory.
 - `cavalry run: member refused (terms-lost)`: the member's log directory holds its
   log and no record of its terms. Either there is no `terms` file, or the file holds
   no term: it was removed or replaced, and the member's votes and the terms of its

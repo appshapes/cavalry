@@ -1176,6 +1176,7 @@ fn an_image_of_another_session_is_passed_over_for_the_leaders_once_asked() {
                 .as_ref()
                 .map(|held| (held.recording.recording_id(), held.recording.session_id()))
         });
+    let added = Instant::now();
     let log = pair
         .leader
         .io
@@ -1186,6 +1187,13 @@ fn an_image_of_another_session_is_passed_over_for_the_leaders_once_asked() {
     let start = pair.observe("the leader's image is told", |io| {
         io.log_image(log.session_id).expect("the image is read")
     });
+    // The pass-over adds no wait: the leader's image is told as soon as the driver
+    // has started its recording, milliseconds after the log was added, where before
+    // the election waited out the leader heartbeat timeout, 10 s. The bound is half
+    // that timeout, clear of a loaded host's noise.
+    let told_after = added.elapsed();
+    println!("the leader's image was told {told_after:?} after its log was added");
+    assert!(told_after < Duration::from_secs(5), "{told_after:?}");
     assert_eq!(start, 0);
     let held = pair.member.io.held.as_ref().expect("a recording is held");
     assert_eq!(held.recording.session_id(), log.session_id);
@@ -1263,6 +1271,143 @@ fn an_image_of_another_session_that_goes_first_is_passed_over_for_the_leaders() 
             .expect("the recording is named"),
         stray_recording
     );
+}
+
+/// Work item 510's pass-over, when the leader's image goes after it began: the stray's
+/// stop is asked once the leader's image stands, and that image goes before the stop
+/// is read. The stop is followed to its end all the same, and the recording armed for
+/// the leader's image is not taken in hand in the stray's place, so no recording
+/// running is lost track of and no stop asked is left unread. Before, the module waited
+/// for the leader's image again with the stray still held, and took the armed recording
+/// in hand in its place, the stray's stop asked and never read.
+#[test]
+fn a_strays_stop_is_followed_to_its_end_though_the_leaders_image_goes() {
+    let mut pair = pair("passed-over-stop-followed");
+    pair.member.io.join_log().expect("subscribed and armed");
+    let mut stranger = Cavalry::connect_to(&pair.leader_driver_dir).expect("the stranger");
+    let channel = pair.member.io.log_endpoint_channel.clone();
+    let _stray = stranger
+        .add_exclusive_publication(&channel, LOG_STREAM_ID)
+        .expect("the stray publication");
+    let stray_recording = pair.observe("the stray image takes the armed recording", |io| {
+        io.held.as_ref().map(|held| held.recording.recording_id())
+    });
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    assert_eq!(
+        pair.member.io.log_image(log.session_id).expect("read"),
+        None,
+        "the election asks for the leader's image while the stray's is noted"
+    );
+    pair.observe("the stray's stop is asked", |io| {
+        io.stop_asked
+            .filter(|&(id, _)| id == stray_recording)
+            .map(|_| ())
+    });
+    until_stopped("the leader gives up its log", || {
+        pair.leader.io.remove_log()
+    });
+    // The leader's image goes from the subscription, which no duty cycle reads
+    // meanwhile.
+    wait_for("the leader's image goes", || {
+        let subscription = pair
+            .member
+            .io
+            .log_subscription
+            .as_mut()
+            .expect("subscribed");
+        subscription.poll(|_, _| {}, 0).expect("polled");
+        subscription
+            .images()
+            .iter()
+            .all(|image| image.session_id() != log.session_id)
+            .then_some(())
+    });
+    // On every cycle the stray stays held until its stop is read, and nothing is
+    // taken in hand in its place: the leader's image is gone, and its recording,
+    // armed before, waits.
+    let mut cycles_after = 0;
+    pair.observe("the stray's stop is read, and ten cycles pass", |io| {
+        let held = io.held.as_ref().map(|held| held.recording.recording_id());
+        assert!(
+            held.is_none() || held == Some(stray_recording),
+            "recording {held:?} was taken in hand in the stray's place"
+        );
+        if io.stop_asked.is_none() {
+            cycles_after += 1;
+        }
+        (cycles_after >= 10).then_some(())
+    });
+    assert!(pair.member.io.held.is_none(), "the stray is no longer held");
+    let catalog = CatalogReader::open(&pair.member_log_dir).expect("the catalog opens");
+    assert!(
+        catalog
+            .stop_position(stray_recording)
+            .expect("the slot is read")
+            .is_some(),
+        "the stray's recording is stopped"
+    );
+}
+
+/// A recording that has stopped is never taken for the image asked for, though it is
+/// of that image's session (work item 510). The member records the leader's image,
+/// and the recording is stopped while the image stands, before the election asks for
+/// it: here by the test, as the driver stops a recording when its image is retired.
+/// The module passes the stopped recording over, keeps the leader's image noted, and
+/// arms a recording that takes the image again, and that one is what the election is
+/// told. A recording whose image went and was replaced by a second image of its
+/// session, once the image cool-down passed, is told apart from that second image's
+/// by this rule. Before, the election was told the stopped recording, which no longer
+/// moves.
+#[test]
+fn a_recording_that_has_stopped_is_never_taken_for_the_image_asked_for() {
+    let mut pair = pair("stopped-recording");
+    pair.member.io.join_log().expect("subscribed and armed");
+    let log = pair
+        .leader
+        .io
+        .add_log(0, 0)
+        .expect("the driver takes the commands")
+        .expect("the log has its recording");
+    let stopped = pair.observe("the leader's image takes the armed recording", |io| {
+        io.held
+            .as_ref()
+            .filter(|held| held.recording.session_id() == log.session_id)
+            .map(|held| held.recording.recording_id())
+    });
+    pair.member
+        .io
+        .client
+        .stop_recording(stopped)
+        .expect("the stop is taken");
+    wait_for("the stop is read", || {
+        pair.member
+            .io
+            .held
+            .as_ref()
+            .and_then(|held| held.recording.stop_position())
+    });
+    let start = pair.observe("the leader's image is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    let held = pair.member.io.held.as_ref().expect("a recording is held");
+    assert_eq!(held.recording.session_id(), log.session_id);
+    assert_ne!(
+        held.recording.recording_id(),
+        stopped,
+        "the election is told a recording that runs"
+    );
+    assert!(held.recording.stop_position().is_none());
+    assert_eq!(start, held.start);
+    let recording_id = pair
+        .member
+        .log_recording_id()
+        .expect("the recording is named");
+    assert_ne!(recording_id, stopped);
 }
 
 /// A member whose log directory is not its driver's is refused at its start, before
@@ -2302,15 +2447,19 @@ fn a_replay_whose_sender_vanished_is_said_gone_at_the_image_liveness_timeout() {
     assert_eq!(member.io.kept.len(), 1);
 }
 
-/// A recording of another session's image is not the log, though the image the
-/// election asks for is the one the member noted (ADR 0093). A stranger's publication
-/// on the member's `log` endpoint takes the armed recording, publishes an entry and
-/// closes, and its image goes before the member looks at its log subscription. The
-/// leader's log then arrives and is the image the member notes. Asked for the
-/// leader's session, the module holds a recording of the stranger's session: it says
-/// nothing, counts nothing, and keeps nothing when it leaves.
+/// A recording taken by an image that went is passed over, though the image the
+/// member noted stands (ADR 0093; work item 510). A stranger's publication on the
+/// member's `log` endpoint takes the armed recording, publishes an entry and closes,
+/// and its image goes before the member looks at its log subscription. The leader's
+/// log then arrives and is the image the member notes, and the stranger's recording,
+/// stopped with its image, is handed over before the election asks for any image. The
+/// module stops it and keeps nothing of it, keeps the leader's image noted, and arms a
+/// recording that takes that image: the election is told it where it joins. Before,
+/// the module held the stranger's recording and noted the leader's image beside it,
+/// and the election, asked for the leader's session, was told nothing until the
+/// leader heartbeat timeout.
 #[test]
-fn a_recording_taken_by_an_image_that_went_is_not_the_noted_images() {
+fn a_recording_taken_by_an_image_that_went_is_passed_over() {
     let mut pair = pair("stale-recording");
     pair.member.io.join_log().expect("subscribed and armed");
     let mut stranger = Cavalry::connect_to(&pair.leader_driver_dir).expect("the stranger");
@@ -2351,33 +2500,43 @@ fn a_recording_taken_by_an_image_that_went_is_not_the_noted_images() {
         .expect("the driver takes the commands")
         .expect("the log has its recording");
     assert_ne!(log.session_id, stray_session);
-    pair.observe("the leader's image is noted", |io| {
-        matches!(io.image, LogImage::Joined { session_id, .. } if session_id == log.session_id)
-            .then_some(())
-    });
-    pair.observe("the stray recording is handed over", |io| {
-        io.held.as_ref().map(|_| ())
-    });
-    let held = pair.member.io.held.as_ref().expect("the recording is held");
-    assert_eq!(held.recording.session_id(), stray_session);
-    assert_eq!(
-        pair.member.io.log_image(log.session_id).expect("read"),
-        None,
-        "the recording held is of another session's image"
+    // The cycle that notes the leader's image hands the stray recording over, and the
+    // next one passes it over: the two are seen together at the end of that cycle.
+    let stray_recording = pair.observe(
+        "the leader's image is noted, and the stray recording handed over",
+        |io| {
+            if !matches!(io.image, LogImage::Joined { session_id, .. } if session_id == log.session_id)
+            {
+                return None;
+            }
+            io.held
+                .as_ref()
+                .filter(|held| held.recording.session_id() == stray_session)
+                .map(|held| held.recording.recording_id())
+        },
     );
-    assert!(
-        !pair
-            .member
-            .io
-            .held
-            .as_ref()
-            .is_some_and(|held| held.checked)
-    );
-    assert_eq!(pair.member.io.append_position(), 0);
-    assert_eq!(pair.member.log_recording_id(), None);
+    let start = pair.observe("the leader's image is told", |io| {
+        io.log_image(log.session_id).expect("the image is read")
+    });
+    assert_eq!(start, 0);
+    let held = pair.member.io.held.as_ref().expect("a recording is held");
+    assert_eq!(held.recording.session_id(), log.session_id);
+    let recording_id = pair
+        .member
+        .log_recording_id()
+        .expect("the recording is named");
+    assert_ne!(recording_id, stray_recording);
     until_stopped("the log is left", || pair.member.io.leave_log());
-    assert_eq!(pair.member.io.append_position(), 0);
-    assert!(pair.member.io.kept.is_empty());
+    assert_eq!(
+        pair.member
+            .io
+            .kept
+            .iter()
+            .map(|kept| kept.recording_id)
+            .collect::<Vec<_>>(),
+        vec![recording_id],
+        "only the leader's recording is kept"
+    );
 }
 
 impl Pair {

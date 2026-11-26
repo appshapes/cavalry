@@ -286,11 +286,12 @@ pub enum RaftError {
         /// The publication's refusal.
         refusal: Offer,
     },
-    /// A member leaving the log stopped the recording it held, and 1 s later had not
-    /// read where the recording stopped. It holds the recording still, in init, and the
-    /// next duty cycle stops it again. No duty cycle waits for a stop: each one that
-    /// finds the stop not yet read returns, and this is the error of the first to
-    /// find it a second old.
+    /// A member stopped a recording it held, and 1 s later had not read where the
+    /// recording stopped: as it left the log, where that stop is where its log ends,
+    /// or as it passed over a recording that is no part of its log (work item 510). It
+    /// holds the recording still, where it was, and the next duty cycle stops it again.
+    /// No duty cycle waits for a stop: each one that finds the stop not yet read
+    /// returns, and this is the error of the first to find it a second old.
     StopTimeout {
         /// The recording held.
         recording_id: i64,
@@ -662,11 +663,12 @@ impl core::fmt::Display for RaftError {
             ),
             RaftError::StopTimeout { recording_id } => write!(
                 f,
-                "member stopped ({reason}): the member stopped recording {recording_id} as \
-                 it left the log, and 1 s later the driver had not said where it stopped, so \
-                 the member does not know where its log ends; it stays in init holding the \
-                 recording. Call do_work again, which stops it again; if this repeats, run \
-                 `cavalry doctor`: the driver or this process is starved of CPU; see {DOC}"
+                "member stopped ({reason}): the member stopped recording {recording_id}, as \
+                 it left the log, where that stop is where its log ends, or as it passed over \
+                 a recording that is no part of its log, and 1 s later the driver had not \
+                 said where it stopped; the member goes no further, holding the recording. \
+                 Call do_work again, which stops it again; if this repeats, run `cavalry \
+                 doctor`: the driver or this process is starved of CPU; see {DOC}"
             ),
             RaftError::StartStopTimeout { recording_id } => write!(
                 f,
@@ -1108,11 +1110,22 @@ fn take_started(
     catalog: &CatalogReader,
     floor: i64,
 ) -> Result<Option<Held>, RaftError> {
-    if let Some(waiting) = armed.as_mut()
-        && let Some(recording) = waiting.poll()?
-    {
-        *starting = Some(recording);
-        *armed = None;
+    if let Some(waiting) = armed.as_mut() {
+        match waiting.poll() {
+            Ok(Some(recording)) => {
+                *starting = Some(recording);
+                *armed = None;
+            }
+            Ok(None) => {}
+            // The handle is spent once it has returned its refusal, and is dropped so
+            // that a recording can be armed again: an armed recording the driver
+            // refused, as one is when every image on the stream is being recorded by
+            // the time the driver reads it, holds nothing.
+            Err(error) => {
+                *armed = None;
+                return Err(error.into());
+            }
+        }
     }
     let Some(recording) = starting.take() else {
         return Ok(None);
@@ -1720,12 +1733,13 @@ impl ClientIo {
 
     /// Takes the images the driver announced or withdrew on the log subscription, notes
     /// a new image's join position before a frame of it is read, passes over an image
-    /// or a recording of another session than the one the election asks for, or an
-    /// image that went before the election was told of it
-    /// ([`ClientIo::pass_over_unasked_image`]), hands over an armed recording the driver
-    /// has started, and reads past what has arrived of the image noted, so that the stream is not held back by a subscriber that stands still:
-    /// the module acts on no entry in this version, and the recording is the member's
-    /// log.
+    /// or a recording of another session than the one the election asks for, or one
+    /// whose image went, before the election was told of it
+    /// ([`ClientIo::pass_over_unasked_image`]), hands over an armed recording the
+    /// driver has started once the pass-over is done and none is held, and reads past
+    /// what has arrived of the image noted, while the pass-over waits too, so that the
+    /// stream is not held back by a subscriber that stands still: the module acts on no
+    /// entry in this version, and the recording is the member's log.
     ///
     /// An image is never read in the poll that applies it. The client's conductor runs
     /// on a thread of its own and hands an image over whenever it has read the driver's
@@ -1772,6 +1786,9 @@ impl ClientIo {
         // the session the election waits for is noted and recorded. One the election
         // was told of that goes is the loss the core sees, as before.
         let other = |session: i32| self.asked.is_some_and(|asked| asked != session);
+        let stray = |recording: &Recording| {
+            other(recording.session_id()) || recording.stop_position().is_some()
+        };
         let another = match self.image {
             LogImage::Gone => true,
             LogImage::Joined { session_id, .. } => other(session_id),
@@ -1779,17 +1796,13 @@ impl ClientIo {
         } || self
             .held
             .as_ref()
-            .is_some_and(|held| other(held.recording.session_id()))
-            || self
-                .starting
-                .as_ref()
-                .is_some_and(|recording| other(recording.session_id()));
-        if another
-            && !self.held.as_ref().is_some_and(|held| held.checked)
-            && !self.pass_over_unasked_image()?
-        {
-            return Ok(());
-        }
+            .is_some_and(|held| stray(&held.recording))
+            || self.starting.as_ref().is_some_and(stray);
+        // The image noted is read while the pass-over waits, for a stray's stop or for
+        // the image asked for, so that the stream is not held back meanwhile.
+        let passed = !another
+            || self.held.as_ref().is_some_and(|held| held.checked)
+            || self.pass_over_unasked_image()?;
         let LogImage::Joined { session_id, .. } = self.image else {
             return Ok(());
         };
@@ -1799,12 +1812,18 @@ impl ClientIo {
         subscription
             .bounded_poll(session_id, |_, _| {}, i64::MAX, LOG_POLL_LIMIT)
             .map_err(RaftError::Poll)?;
-        if let Some(held) = take_started(
-            &mut self.armed,
-            &mut self.starting,
-            &self.catalog,
-            self.log_floor,
-        )? {
+        // A recording is taken in hand only once the pass-over is done and none is
+        // held, so that one held is never dropped unstopped: the pass-over stops a
+        // stray one first.
+        if passed
+            && self.held.is_none()
+            && let Some(held) = take_started(
+                &mut self.armed,
+                &mut self.starting,
+                &self.catalog,
+                self.log_floor,
+            )?
+        {
             self.held = Some(held);
             // The mark is of the recording before this one: a position this one
             // writes may equal it, and its sync must still be asked.
@@ -1816,100 +1835,144 @@ impl ClientIo {
 
 impl ClientIo {
     /// Passes over a noted image, or a recording, of another session than the one the
-    /// election asks for, or a noted image that went, while the election has been told
-    /// of neither (work item 510). In order:
-    /// - When the image asked for stands and the recording held or handed over is of
-    ///   it, the image is noted, and nothing else changes.
-    /// - When an image of another session stands, recorded, and the image asked for
-    ///   stands too, a recording is armed while that other recording runs: the driver
-    ///   records the lowest image not yet recorded first, so the armed recording takes
-    ///   the image asked for. Until the image asked for stands, nothing changes, and the
-    ///   member waits for it, or for the other image to go.
-    /// - The other recording, held or handed over, is stopped, and is no part of the
-    ///   log, as one the election was never told of is not ([`Held::checked`]). A stop
-    ///   asked and not yet read returns `Ok(false)` with nothing else changed, and the
-    ///   next cycle calls again, as a leave does.
-    /// - The image asked for is noted when it stands, and the next image is awaited
-    ///   otherwise; a recording is armed for it when none is.
+    /// election asks for, or a noted image or a recording whose image went, while the
+    /// election has been told of none of them (work item 510). Such a recording is a
+    /// stray: it is no part of the log, as one the election was never told of is not
+    /// ([`Held::checked`]). A recording is of the image asked for when it is of that
+    /// session and live. The driver stops a recording when its image is retired, and
+    /// takes a second image of that session only after the image cool-down
+    /// (`spec/udp.md`, "The receiver", step 5), so this client reads the stop before
+    /// it is handed the second image: a live recording of the session is of the image
+    /// that stands. In order:
+    /// - A stray whose image still stands, whose stop has not been asked, keeps running
+    ///   until a recording of the image asked for is armed or held: the driver records
+    ///   the lowest image not being recorded, and once the stray stopped a recording
+    ///   armed after it would take the stray's image again. While the image asked for
+    ///   does not stand, nothing changes, and `Ok(false)` says the member waits for it,
+    ///   or for the stray's image to go. Once it stands, a recording is armed, and the
+    ///   driver starts it on that image at once.
+    /// - The image asked for is noted when it stands, so that `observe_log` reads it
+    ///   while a stop is awaited; the election is told of it only once a recording of
+    ///   it is held.
+    /// - Every stray, held or handed over, is stopped, one at a time. A stop asked is
+    ///   followed to its end, or to [`RaftError::StopTimeout`], whatever else stands. A
+    ///   stop not yet read returns `Ok(false)`, and the next cycle calls again, as a
+    ///   leave does; meanwhile no recording is taken in hand.
+    /// - Once the strays are stopped, the image asked for stays noted when it stands.
+    ///   Before the election asks for any, the image noted stays noted when it stands.
+    ///   Otherwise the next image is awaited. A recording is armed when none is armed,
+    ///   handed over or held.
+    ///
+    /// An image that went before the election asked for any is passed over the same
+    /// way. The image recorded next is checked by the election as any is: one that
+    /// joins past the member's append position is counted in
+    /// `cluster.join_position_mismatches`, and the member catches up. Nothing the
+    /// member counts in its log is passed over, so the pass-over has no counter of its
+    /// own.
+    ///
+    /// The match of a live recording rests on an order that no page bounds. The
+    /// recording's stop waits until the recorder has written up to the rebuild
+    /// position, and the recorder may trail (ADR 0084). So a recorder that announces
+    /// the stop more than the cool-down after the retire, with this module stalled
+    /// across the retire and the cool-down, the stall beginning in the one cycle in
+    /// which it holds a recording of the asked session while a stray image is noted,
+    /// has the election told the stale recording for the second image. Invariant 1
+    /// holds: the append position is that recording's synced position, so the member
+    /// reports only what it holds. But the member does not come back by itself: it
+    /// stays a closed follower with its append position at the stale recording's stop
+    /// until its next election or a restart, and while its leader leads that has no
+    /// bound. Without the pass-over the same case fails the election at the leader
+    /// heartbeat timeout and canvasses again, so in this one case the pass-over
+    /// lengthens a 10 s wait into one with no end of its own. Work item 528 ends it, a
+    /// follower whose told recording stops while its image stands holding an election,
+    /// and that hole is there apart from the pass-over. Work item 529 ties a recording
+    /// to its image, which closes the case.
     fn pass_over_unasked_image(&mut self) -> Result<bool, RaftError> {
-        let images: Vec<(i64, i32)> = self
+        let images = self
             .log_subscription
             .as_ref()
-            .map(|subscription| {
-                subscription
-                    .images()
-                    .iter()
-                    .map(|image| (image.correlation_id(), image.session_id()))
-                    .collect()
-            })
-            .unwrap_or_default();
+            .map_or(&[][..], |subscription| subscription.images());
         let wanted = self.asked.and_then(|asked| {
             images
                 .iter()
-                .copied()
-                .find(|&(_, session)| session == asked)
+                .find(|image| image.session_id() == asked)
+                .map(|image| (image.correlation_id(), image.session_id()))
         });
-        let of_wanted =
-            |session: i32| wanted.is_some_and(|(_, wanted_session)| session == wanted_session);
-        let recording_of_wanted = self
+        let of_wanted = |recording: &Recording| {
+            wanted.is_some_and(|(_, session)| recording.session_id() == session)
+                && recording.stop_position().is_none()
+        };
+        // A stray that must run on: its image stands, and its stop was not asked.
+        let runs_on = |recording: &Recording| {
+            !of_wanted(recording)
+                && recording.stop_position().is_none()
+                && self
+                    .stop_asked
+                    .is_none_or(|(id, _)| id != recording.recording_id())
+                && images
+                    .iter()
+                    .any(|image| image.session_id() == recording.session_id())
+        };
+        let wanted_on_its_way = self.armed.is_some()
+            || self
+                .held
+                .as_ref()
+                .is_some_and(|held| of_wanted(&held.recording))
+            || self.starting.as_ref().is_some_and(of_wanted);
+        let must_run_on = !wanted_on_its_way
+            && (self
+                .held
+                .as_ref()
+                .is_some_and(|held| runs_on(&held.recording))
+                || self.starting.as_ref().is_some_and(runs_on));
+        let stray_held = self
             .held
             .as_ref()
-            .is_some_and(|held| of_wanted(held.recording.session_id()))
-            || self
-                .starting
-                .as_ref()
-                .is_some_and(|recording| of_wanted(recording.session_id()));
-        if let Some((correlation_id, session_id)) = wanted
-            && recording_of_wanted
-        {
+            .is_some_and(|held| !of_wanted(&held.recording));
+        let stray_starting = self
+            .starting
+            .as_ref()
+            .is_some_and(|recording| !of_wanted(recording));
+        if must_run_on {
+            if wanted.is_none() {
+                return Ok(false);
+            }
+            self.armed = Some(
+                self.client
+                    .arm_recording(&self.log_endpoint_channel, LOG_STREAM_ID)?,
+            );
+        }
+        // The image asked for is noted before the strays are stopped, so that it is
+        // read while a stop is awaited. The election is told of it only once a
+        // recording of it is held.
+        if let Some((correlation_id, session_id)) = wanted {
             self.image = LogImage::Joined {
                 correlation_id,
                 session_id,
             };
-            return Ok(true);
         }
-        let recorded = self.held.is_some() || self.starting.is_some();
-        let other_stands = recorded
-            && images.iter().any(|&(_, session)| {
-                self.held
-                    .as_ref()
-                    .is_some_and(|held| held.recording.session_id() == session)
-                    || self
-                        .starting
-                        .as_ref()
-                        .is_some_and(|recording| recording.session_id() == session)
-            });
-        if other_stands {
-            if wanted.is_none() {
-                return Ok(true);
-            }
-            if self.armed.is_none() {
-                self.armed = Some(
-                    self.client
-                        .arm_recording(&self.log_endpoint_channel, LOG_STREAM_ID)?,
-                );
-            }
-        }
-        if let Some(held) = self.held.as_ref() {
+        if stray_held && let Some(held) = self.held.as_ref() {
             if stop_recording(&mut self.client, &held.recording, &mut self.stop_asked)?.is_none() {
                 return Ok(false);
             }
             self.held = None;
         }
-        if let Some(recording) = self.starting.as_ref() {
+        if stray_starting && let Some(recording) = self.starting.as_ref() {
             if stop_recording(&mut self.client, recording, &mut self.stop_asked)?.is_none() {
                 return Ok(false);
             }
             self.starting = None;
         }
-        self.image = match wanted {
-            Some((correlation_id, session_id)) => LogImage::Joined {
+        // Before the election asks for any, a noted image that stands stays noted.
+        self.image = match (wanted, self.image) {
+            (Some((correlation_id, session_id)), _) => LogImage::Joined {
                 correlation_id,
                 session_id,
             },
-            None => LogImage::Awaited,
+            (None, noted @ LogImage::Joined { .. }) if self.asked.is_none() => noted,
+            (None, _) => LogImage::Awaited,
         };
-        if self.armed.is_none() {
+        if self.armed.is_none() && self.starting.is_none() && self.held.is_none() {
             self.armed = Some(
                 self.client
                     .arm_recording(&self.log_endpoint_channel, LOG_STREAM_ID)?,
