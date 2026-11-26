@@ -2,7 +2,9 @@
 //! log directories they kept (`spec/cluster.md`, "A member's start"; ADR 0089, ADR
 //! 0108): a follower, the leader, all three at once, and all three after their hosts
 //! lost power together, each log holding a frame past its sync whose body is gone
-//! (ADR 0144). A member that starts again
+//! (ADR 0144), once in the segment file that holds the synced position and once with
+//! the tail written on into the next segment file (work item 471). A member that
+//! starts again
 //! reads its log back from the recordings its record of them names, joins the
 //! cluster with it, and replicates only what it lacks. Each test holds that nothing
 //! committed is lost: a service beside the member that started again reads every
@@ -18,7 +20,7 @@ use std::time::{Duration, Instant};
 use cavalry_client::{Cavalry, CommittedLog};
 use cavalry_driver::Driver;
 use cavalry_log::catalog::CatalogReader;
-use cavalry_log::layout::{CatalogHeader, crc32, locate};
+use cavalry_log::layout::{CatalogHeader, Descriptor, crc32, locate, segment_file_name};
 use cavalry_log::recordings::RecordingsFile;
 use cavalry_proto::frame::{DataFrameHeader, Flags, FrameType};
 use cavalry_raft::{ConsensusModule, ElectionState, RaftError, Refused, Role};
@@ -26,7 +28,7 @@ use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
     CLUSTER_LEADER_MEMBER_ID, CLUSTER_LOG_RECORDINGS_FORGOTTEN, CLUSTER_LOG_RECORDINGS_LISTED,
     CLUSTER_LOG_RECORDINGS_UNSYNCED, CLUSTER_TRUNCATIONS_FINISHED, RECORDING_CUT_TO_SYNCED,
-    RECORDING_RECOVERED,
+    RECORDING_FILES_REMOVED, RECORDING_RECOVERED,
 };
 
 mod ports;
@@ -600,13 +602,8 @@ fn all_three_members_start_again_on_their_logs_and_the_log_goes_on() {
 /// and a body of zeros (`spec/durable-log.md`, "The driver"; ADR 0144). Returns the
 /// position the log had synced to, where the frame begins.
 fn lose_power(log_dir: &Path, member_id: i32) -> i64 {
-    let (_, named) = record_of(log_dir, member_id);
-    let &(recording_id, _) = named.last().expect("the log is in a recording");
-    let descriptor = CatalogReader::open(log_dir)
-        .expect("the catalog opens")
-        .get(recording_id)
-        .expect("the slot reads")
-        .expect("the catalog holds the recording");
+    let descriptor = last_recording(log_dir, member_id);
+    let recording_id = descriptor.recording_id();
     let synced = descriptor.stop_position();
     assert!(synced > 0, "the recording holds the log: {descriptor:?}");
     // The stop the close wrote, undone: the stop fields at −1 and −1 under their
@@ -637,6 +634,72 @@ fn lose_power(log_dir: &Path, member_id: i32) -> i64 {
     synced
 }
 
+/// The catalog's descriptor of the recording that ends the member's log.
+fn last_recording(log_dir: &Path, member_id: i32) -> Descriptor {
+    let (_, named) = record_of(log_dir, member_id);
+    let &(recording_id, _) = named.last().expect("the log is in a recording");
+    CatalogReader::open(log_dir)
+        .expect("the catalog opens")
+        .get(recording_id)
+        .expect("the slot reads")
+        .expect("the catalog holds the recording")
+}
+
+/// Leaves `member`'s log directory as [`lose_power`] does, with the recorder written on
+/// past its sync to the end of the segment file that holds the synced position and
+/// rolled into the next, as a power loss can leave a recording that grew fast (work
+/// item 471; `crates/cavalry-log/tests/power_loss.rs` holds the recovery at the log,
+/// work item 405): the frame past the sync with its body lost, a padding frame at the
+/// start of the segment's last term, as the recorder pads a term it has filled, and
+/// the next segment file at the segment file length, as the recorder makes it, with a
+/// frame at its base whose body is lost. The synced position stays where it was, as a
+/// roll moves no synced position. Returns the synced position, the padding frame's
+/// file and offset in it, and the next segment file.
+fn lose_power_across_a_roll(log_dir: &Path, member_id: i32) -> (i64, (PathBuf, u64), PathBuf) {
+    let descriptor = last_recording(log_dir, member_id);
+    let synced = lose_power(log_dir, member_id);
+    let segment = i64::from(descriptor.segment_file_length());
+    let term = i64::from(descriptor.term_length());
+    let header = |kind: FrameType, position: i64, length: usize| {
+        let located = locate(&descriptor, position).expect("a position of the recording");
+        let bytes = DataFrameHeader::new(kind, Flags::UNFRAGMENTED, length)
+            .expect("a header")
+            .with_term_offset(located.term_offset)
+            .with_term_id(located.term_id)
+            .with_session_id(descriptor.session_id())
+            .with_stream_id(descriptor.stream_id())
+            .to_bytes();
+        (located, bytes)
+    };
+    let next_base = locate(&descriptor, synced)
+        .expect("the synced position")
+        .segment_base_position
+        + segment;
+    assert!(
+        synced < next_base - term,
+        "the log ends in the segment's first terms, so the tail crosses all of them"
+    );
+    let (last_term, padding) = header(
+        FrameType::Pad,
+        next_base - term,
+        usize::try_from(term).expect("a term length"),
+    );
+    let padding_at = (
+        log_dir.join(&last_term.segment_file),
+        u64::try_from(last_term.offset_in_segment).expect("an offset"),
+    );
+    write_at(&padding_at.0, &padding, padding_at.1);
+    let next = log_dir.join(segment_file_name(descriptor.recording_id(), next_base));
+    std::fs::File::create(&next)
+        .and_then(|file| file.set_len(u64::try_from(segment).expect("a length")))
+        .expect("the next segment file is made");
+    let (_, first_frame) = header(FrameType::Data, next_base, FRAME as usize);
+    let mut frame = [0u8; FRAME as usize];
+    frame[..first_frame.len()].copy_from_slice(&first_frame);
+    write_at(&next, &frame, 0);
+    (synced, padding_at, next)
+}
+
 fn write_at(path: &Path, bytes: &[u8], offset: u64) {
     use std::os::unix::fs::FileExt;
     std::fs::OpenOptions::new()
@@ -658,7 +721,27 @@ fn write_at(path: &Path, bytes: &[u8], offset: u64) {
 /// service read before the power was lost: no member hands the damaged frame on.
 #[test]
 fn three_members_whose_hosts_lost_power_together_start_again_on_what_they_synced() {
-    let dir = TestDir::new("power");
+    power_lost_together("power", false);
+}
+
+/// As the test above, with each recorder written on past its sync to the end of the
+/// segment file and rolled into the next before the power was lost (work item 471).
+/// Started again, each member's driver cuts the recording to what it had synced in
+/// the segment that holds it, zeroes the rest of that segment, the padding frame of its
+/// last term among it, and removes the next segment file, which lies wholly past the
+/// stop, counting the cut and the file removed. No member reads a recording past its
+/// stop, so the next segment's removal shows in the counter and the directory alone;
+/// the members' logs, and what every service reads, are as in the test above.
+#[test]
+fn three_members_whose_unsynced_tails_crossed_a_segment_roll_start_again_on_what_they_synced() {
+    power_lost_together("power-across-a-roll", true);
+}
+
+/// The two tests above: the power lost on all three hosts, with each recorder's tail
+/// in the segment that holds its synced position or, with `across_a_roll`, written on
+/// into the next segment file.
+fn power_lost_together(test: &str, across_a_roll: bool) {
+    let dir = TestDir::new(test);
     let members_string = members_string();
     let mut members = start(dir.path(), &members_string);
     run_until_led(&mut members, -1);
@@ -670,10 +753,18 @@ fn three_members_whose_hosts_lost_power_together_start_again_on_what_they_synced
     assert_eq!(before.len(), 11);
 
     let mut ids = Vec::new();
+    let mut rolled = Vec::new();
     for member in members {
         let id = member.module.member_id();
         member.module.close().expect("the member closes");
         member.driver.close().expect("the driver closes");
+        if across_a_roll {
+            let (synced, padding, next) = lose_power_across_a_roll(&member.log_dir, id);
+            assert_eq!(synced, first, "member {id}");
+            rolled.push((padding, next));
+            ids.push(id);
+            continue;
+        }
         assert_eq!(lose_power(&member.log_dir, id), first, "member {id}");
         ids.push(id);
     }
@@ -689,10 +780,12 @@ fn three_members_whose_hosts_lost_power_together_start_again_on_what_they_synced
         assert_eq!(
             (
                 static_counter(RECORDING_RECOVERED),
-                static_counter(RECORDING_CUT_TO_SYNCED)
+                static_counter(RECORDING_CUT_TO_SYNCED),
+                static_counter(RECORDING_FILES_REMOVED)
             ),
-            (1, 1),
-            "member {}'s driver rebuilt the live recording and cut it",
+            (1, 1, i64::from(across_a_roll)),
+            "member {}'s driver rebuilt the live recording, cut it, and removed a next \
+             segment file it found",
             member.module.member_id()
         );
         // Each alone, before it has heard another: the log it synced, and not the
@@ -701,6 +794,24 @@ fn three_members_whose_hosts_lost_power_together_start_again_on_what_they_synced
             std::slice::from_mut(member),
             "the member read its log back",
             |members| members[0].module.append_position() == first,
+        );
+    }
+    for ((padding, offset), next) in &rolled {
+        assert!(
+            !next.exists(),
+            "{} lay past the stop and is gone",
+            next.display()
+        );
+        let mut bytes = [0u8; 32];
+        use std::os::unix::fs::FileExt;
+        std::fs::File::open(padding)
+            .and_then(|file| file.read_exact_at(&mut bytes, *offset))
+            .expect("the segment reads");
+        assert_eq!(
+            bytes,
+            [0u8; 32],
+            "the padding frame past the stop is zeroed in {}",
+            padding.display()
         );
     }
     run_until_led(&mut members, first_term);

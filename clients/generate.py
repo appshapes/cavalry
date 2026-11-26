@@ -418,7 +418,9 @@ def _checked(ctype, name):
 
 def write_python(header: Header) -> dict[str, str]:
     """The Python package: `cavalry/_abi.py`, the ctypes binding, and
-    `cavalry/__init__.py`, the client's own code, from PYTHON_CLIENT below."""
+    `cavalry/__init__.py`, the client's own code, from PYTHON_CLIENT below; and the two
+    files that make it a package a user installs, `pyproject.toml` and
+    `cavalry_package.py`, from `generate_python_package.py` (ADR 0166)."""
     out = []
     out.append('"""The C ABI of spec/c-abi.md as ctypes declares it.')
     out.append("")
@@ -515,10 +517,14 @@ def write_python(header: Header) -> dict[str, str]:
     out.append("        from . import CavalryError  # the package's error; the package has loaded by the time load runs")
     out.append('        raise CavalryError("cavalry_abi_version", CAVALRY_ERR_ABI_VERSION,')
     out.append('                           f"the library at {path} is ABI version {found} and this package was generated "')
-    out.append('                           f"from a header of ABI version {CAVALRY_ABI_VERSION}; load the library built from "')
-    out.append('                           f"the same checkout as the package, at CAVALRY_FFI_LIBRARY or the checkout\'s "')
-    out.append('                           f"target/release, or regenerate the package from the library\'s header with "')
-    out.append('                           f"`python3 clients/generate.py python`; see "')
+    out.append('                           f"from a header of ABI version {CAVALRY_ABI_VERSION}; the two must come from one "')
+    out.append('                           f"checkout. When the library is inside an installed package, build the package "')
+    out.append('                           f"again after `cargo build --release -p cavalry-ffi --lib` and install that one "')
+    out.append('                           f"(clients/python/README.md#the-package): a package\'s own library is loaded "')
+    out.append('                           f"before CAVALRY_FFI_LIBRARY is read. In a checkout, build the library again, or "')
+    out.append('                           f"regenerate the client from the library\'s header with `python3 "')
+    out.append('                           f"clients/generate.py python`. The first `Client(library_path=...)` of a process "')
+    out.append('                           f"loads the library you name, whatever the search finds; see "')
     out.append('                           f"docs/reference/c-abi.md#versions-and-what-a-reader-rejects")')
     out.append("    held = ctypes.PyDLL(path)")
     out.append("    for name, (restype, argtypes) in FUNCTIONS.items():")
@@ -529,7 +535,7 @@ def write_python(header: Header) -> dict[str, str]:
     out.append("    return library")
     abi = "\n".join(out) + "\n"
     client = PYTHON_CLIENT.replace("@ABI_VERSION@", defines["CAVALRY_ABI_VERSION"])
-    return {"cavalry/_abi.py": abi, "cavalry/__init__.py": client}
+    return {"cavalry/_abi.py": abi, "cavalry/__init__.py": client, **write_python_package()}
 
 
 PYTHON_CLIENT = '''"""The Python client over the C ABI of spec/c-abi.md (clients/python/README.md).
@@ -659,22 +665,44 @@ class HandlerError(Exception):
 
 
 def find_library():
-    """The shared library: `CAVALRY_FFI_LIBRARY` when set, else `target/release/libcavalry_ffi`
-    of the checkout this package sits in, which `cargo build --release -p cavalry-ffi --lib`
-    writes."""
+    """The shared library, from the first of three places that holds one. The package's
+    own directory, where a package installed from a wheel holds it, so that an installed
+    package loads the library it was built with whatever the environment says. Then
+    `CAVALRY_FFI_LIBRARY`, when it is set: a path, or a bare name with no directory in
+    it, which is the system loader's to find. Then `target/release/libcavalry_ffi` of the
+    checkout this package sits in, which `cargo build --release -p cavalry-ffi --lib`
+    writes. When none holds one, the error names every path it tried (README, "The
+    package"; ADR 0166)."""
+    name = "libcavalry_ffi" + _SUFFIX
+    here = os.path.dirname(os.path.abspath(__file__))
+    packaged = os.path.join(here, name)
+    if os.path.isfile(packaged):
+        return packaged
     path = os.environ.get("CAVALRY_FFI_LIBRARY")
     if path:
-        return path
-    here = os.path.dirname(os.path.abspath(__file__))
+        if os.path.isfile(path) or not os.path.dirname(path):
+            return path
+        raise CavalryError("find_library", 0,
+                           f"CAVALRY_FFI_LIBRARY is set to {path}, and no file is there; this package holds no "
+                           f"library of its own at {packaged}. Set CAVALRY_FFI_LIBRARY to the path of {name}, or "
+                           f"unset it to load the one of the checkout this package sits in; see "
+                           f"clients/python/README.md#the-package")
+    tried = []
     for _ in range(6):
-        here = os.path.dirname(here)
-        candidate = os.path.join(here, "target", "release", "libcavalry_ffi" + _SUFFIX)
-        if os.path.exists(candidate):
+        above = os.path.dirname(here)
+        if above == here:
+            break
+        here = above
+        candidate = os.path.join(here, "target", "release", name)
+        if os.path.isfile(candidate):
             return candidate
+        tried.append(candidate)
     raise CavalryError("find_library", 0,
-                       "libcavalry_ffi" + _SUFFIX + " was not found: build it with `cargo build --release -p"
-                       " cavalry-ffi --lib` in the checkout, or set CAVALRY_FFI_LIBRARY to its path;"
-                       " see clients/python/README.md")
+                       f"{name} was not found. Tried, in order: {packaged}, where a package installed from a "
+                       f"wheel holds it; CAVALRY_FFI_LIBRARY, which is not set; and a checkout's build, at "
+                       f"{', '.join(tried)}. Install the package from a wheel built for this platform, or build "
+                       f"the library with `cargo build --release -p cavalry-ffi --lib` in the checkout, or set "
+                       f"CAVALRY_FFI_LIBRARY to its path; see clients/python/README.md#the-package")
 
 
 _library = None
@@ -2004,6 +2032,7 @@ from generate_dotnet import write_dotnet  # noqa: E402
 from generate_go import write_go  # noqa: E402
 from generate_jvm import write_jvm  # noqa: E402
 from generate_node import write_node  # noqa: E402
+from generate_python_package import write_python_package  # noqa: E402
 
 WRITERS = {"python": write_python, "node": write_node, "go": write_go, "jvm": write_jvm, "dotnet": write_dotnet}
 

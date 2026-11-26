@@ -255,7 +255,10 @@ commit path runs per message.
   members parted from each other (`cut_between`) or one that the other stops hearing
   (`cut_one_way`), a member that stops (`halt`) or whose module stands still while its
   driver receives (`stall`), paused syncs, a member started again on an empty log
-  directory (`wipe`), one that elects started again on the log it kept (`restart`)
+  directory (`wipe`), one that elects started again on the log it kept (`restart`),
+  a second run of one member id on a host of its own (`start_twin`) and the member
+  id's address moved from one run to the other (`move_address`), which only the run
+  that holds the address hears (work item 470),
   and a member's recording ended where its log stands (`end_recording`) to set, and a
   leader's replay of its own log to a member that asked for it, which a member
   records only when it subscribed for it, as a driver arms one recording for one

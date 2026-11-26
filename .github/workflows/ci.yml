@@ -141,6 +141,14 @@ jobs:
       # acceptance test for the first slice): on Linux for every change, and on macOS
       # too for every commit on master (ADR 0073).
       - run: just quickstart
+      # A client's package as a user installs it (work item 469; ADR 0166): the Python
+      # client's wheel, built with the shared library inside by the package's own
+      # backend, installed into a new environment outside the checkout, and the
+      # client README's example run there; then the same wheel without its library,
+      # which must fail. The runner's own Python 3 and its venv; nothing from a
+      # package index. On Linux for every change and on macOS too for every commit on
+      # master, as the job's other steps are (ADR 0073).
+      - run: just package
       - run: just replay-check
       # The harness on a shared runner is a report (ADR 0016): the table is in the log
       # and the result is an artifact, with no comparison of its numbers. It is a gate
