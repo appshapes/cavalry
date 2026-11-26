@@ -38,14 +38,15 @@ use cavalry_proto::udp::{LINGER, MTU_LENGTH_DEFAULT, SOCKET_RCVBUF_LENGTH, UDP_T
 use cavalry_shm::command_ring::{CommandRing, CommandRingError, layout::DRIVER_CLOSED};
 use cavalry_shm::counters::generated::{
     CHANNEL_DESTINATIONS, CHANNEL_IMAGES, CHANNEL_PUBLICATIONS, CHANNEL_SOCKET_RCVBUF,
-    CHANNEL_SOCKET_SNDBUF, CHANNEL_STATUS, CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_COUNTER,
-    COUNTERS, COUNTERS_ALLOCATED, COUNTERS_ALLOCATION_FAILED, IMAGE_CREATED, IMAGE_ENDED,
-    IMAGE_HWM_POSITION, IMAGE_REBUILD_POSITION, PUBLICATION_LIMIT, PUBLICATION_POSITION,
-    RECORDING_ARMED, RECORDING_ARMED_DROPPED, RECORDING_ARMED_FAILED, RECORDING_ARMED_STARTED,
-    RECORDING_BYTES, RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_SYNCED_POSITION,
-    RECORDING_WRITE_FAILED, SENDER_BYTES_UNSENT, SENDER_FLOW_CONTROL_RECEIVERS,
-    SENDER_FLOW_CONTROL_RECEIVERS_FULL, SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT,
-    SENDER_JOINS_REFUSED, SENDER_LIMIT, SENDER_POSITION, SUBSCRIPTION_POSITION,
+    CHANNEL_SOCKET_SNDBUF, CHANNEL_STATUS, CLIENT_CONDUCTOR_PARKS_OVERDUE,
+    CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_COUNTER, COUNTERS, COUNTERS_ALLOCATED,
+    COUNTERS_ALLOCATION_FAILED, IMAGE_CREATED, IMAGE_ENDED, IMAGE_HWM_POSITION,
+    IMAGE_REBUILD_POSITION, PUBLICATION_LIMIT, PUBLICATION_POSITION, RECORDING_ARMED,
+    RECORDING_ARMED_DROPPED, RECORDING_ARMED_FAILED, RECORDING_ARMED_STARTED, RECORDING_BYTES,
+    RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_SYNCED_POSITION, RECORDING_WRITE_FAILED,
+    SENDER_BYTES_UNSENT, SENDER_FLOW_CONTROL_RECEIVERS, SENDER_FLOW_CONTROL_RECEIVERS_FULL,
+    SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT, SENDER_JOINS_REFUSED, SENDER_LIMIT, SENDER_POSITION,
+    SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_CONTROL_TOGGLE,
@@ -1021,6 +1022,40 @@ fn counters_checks(
                 message: format!("{} is {value}: {}", def.name, def.doctor),
                 doc: DOC_COUNTERS,
             });
+        }
+    }
+    // A client's conductor that its watch woke (ADR 0177): a counter each such client
+    // adds for itself, at its first overdue park, so most clients have none. One
+    // finding for each client that has one above 0, named by the client id in its key.
+    checks += 1;
+    if let Some(def) = COUNTERS
+        .iter()
+        .find(|def| def.id == CLIENT_CONDUCTOR_PARKS_OVERDUE)
+    {
+        for id in 0..reader.capacity() {
+            let Some(fields) = reader.record(id).ok().flatten() else {
+                continue;
+            };
+            if fields.type_id() != def.id.0 {
+                continue;
+            }
+            let Some(client) = fields
+                .key()
+                .get(..8)
+                .and_then(|key| <[u8; 8]>::try_from(key).ok())
+                .map(i64::from_le_bytes)
+            else {
+                continue;
+            };
+            let value = reader.read(id).unwrap_or(0);
+            if value > 0 {
+                findings.push(Finding {
+                    check: def.name,
+                    level: Level::Warn,
+                    message: format!("client {client}'s {} is {value}: {}", def.name, def.doctor),
+                    doc: DOC_COUNTERS,
+                });
+            }
         }
     }
     // The adds held behind an endpoint that is closing each take a slot of their
@@ -5788,6 +5823,57 @@ mod tests {
             "could not run the driver's threads",
         ] {
             assert!(found.message.contains(words), "{words}: {}", found.message);
+        }
+        assert!(report.ok(), "a warning does not fail: {report}");
+    }
+
+    /// A client's conductor that did not come back from a timed wait, and that the
+    /// client's watch woke (ADR 0177): doctor says from the client's own counter which
+    /// client, what happened, what it cost, and the page that says how to probe the
+    /// machine. A client whose counter reads 0 is not named.
+    #[test]
+    fn a_clients_conductor_that_its_watch_woke_is_explained_from_the_clients_counter() {
+        let dir = TestDir::new("client-parks-overdue");
+        let mut counters = CountersFile::create(&dir.0, 256).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        for (client, value) in [(41i64, 3), (42i64, 0)] {
+            counters
+                .allocate(
+                    CLIENT_CONDUCTOR_PARKS_OVERDUE,
+                    &client.to_le_bytes(),
+                    &format!("client.conductor_parks_overdue {client}"),
+                )
+                .expect("room")
+                .store_release(value);
+        }
+        let report = examine(&dir.0);
+        let found: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|finding| finding.check == "client.conductor_parks_overdue")
+            .collect();
+        assert_eq!(found.len(), 1, "one client above 0: {report}");
+        assert_eq!(found[0].level, Level::Warn);
+        assert!(
+            found[0].message.starts_with(
+                "client 41's client.conductor_parks_overdue is 3: A client's conductor did \
+                 not come back from a timed wait and was woken by the client's watch"
+            ),
+            "{}",
+            found[0].message
+        );
+        for words in [
+            "a stall of up to 300 ms past its timeout",
+            "nothing to do",
+            "docs/how-to/find-a-wait-that-does-not-return.md",
+            "could not run the client's threads",
+        ] {
+            assert!(
+                found[0].message.contains(words),
+                "{words}: {}",
+                found[0].message
+            );
         }
         assert!(report.ok(), "a warning does not fail: {report}");
     }

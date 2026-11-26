@@ -233,3 +233,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0171. Park the idle loops where a stop can wake them, and wake every thread at a stop](decisions/0171-park-the-idle-loops-where-a-stop-can-wake-them-and-wake-every-thread-at-a-stop.md)
 - [0172. Remove the file of a log that could not be created](decisions/0172-remove-the-file-of-a-log-that-could-not-be-created.md)
 - [0176. Watch the driver's parks, and end one that outlived its timeout](decisions/0176-watch-the-drivers-parks-and-end-one-that-outlived-its-timeout.md)
+- [0177. Watch a client's conductor, and count its overdue parks in a counter the client adds](decisions/0177-watch-a-clients-conductor-and-count-its-overdue-parks-in-a-counter-the-client-adds.md)
