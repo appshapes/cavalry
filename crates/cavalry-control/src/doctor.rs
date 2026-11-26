@@ -1055,28 +1055,34 @@ fn counters_checks(
     // above 0 for a moment at every subscription and client that closes. A client
     // that has gone and whose process still holds its lock is one: the driver has
     // given its lock file the name `clients/<client id>.gone`, and removes the file
-    // within the lock check interval of the lock being let go.
-    checks += 1;
-    if let Some(held) = read("counters.held", COUNTERS_HELD, findings) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |since| {
-                i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
-            });
-        for (client, file) in gone_clients(dir, now) {
-            findings.push(Finding {
-                check: "counters.held",
-                level: Level::Warn,
-                message: format!(
-                    "client {client} closed or was timed out, and its process still holds \
-                     its lock, {CLIENT_LOCK_DIRECTORY}/{file}: a thread of it may still \
-                     store into its counters, so the driver gives their records to nobody. \
-                     counters.held is {held}. The process is stopped, or it keeps an object \
-                     of that client alive: continue or end the process, or drop the client \
-                     and what was made from it, and the records are free within a second"
-                ),
-                doc: DOC_RECORDS,
-            });
+    // within the lock check interval of the lock being let go. Only a running driver
+    // tries the locks: a `.gone` file that a driver that stopped or died left in its
+    // directory says nothing of any process, and the `driver-heartbeat` finding
+    // already says to start a driver, which removes `clients/`.
+    if running {
+        checks += 1;
+        if let Some(held) = read("counters.held", COUNTERS_HELD, findings) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| {
+                    i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+                });
+            for (client, file) in gone_clients(dir, now) {
+                findings.push(Finding {
+                    check: "counters.held",
+                    level: Level::Warn,
+                    message: format!(
+                        "client {client} closed or was timed out, and its process still holds \
+                         its lock, {CLIENT_LOCK_DIRECTORY}/{file}: a thread of it may still \
+                         store into its counters, so the driver gives their records to \
+                         nobody. counters.held is {held}. The process is stopped, or it keeps \
+                         an object of that client alive: continue or end the process, or drop \
+                         the client and what was made from it, and the records are free \
+                         within a second"
+                    ),
+                    doc: DOC_RECORDS,
+                });
+            }
         }
     }
     // A client's conductor that its watch woke (ADR 0177): a counter each such client
@@ -5966,14 +5972,15 @@ mod tests {
     }
 
     /// A client that has gone and still holds its lock is named, with the file that
-    /// says so, once it has held it for longer than a closing client does (ADR 0179).
-    /// The gauge alone, which every close moves for a moment, is no finding.
+    /// says so, once it has held it for longer than a closing client does (ADR 0179),
+    /// and only while a driver runs and tries the locks. The gauge alone, which every
+    /// close moves for a moment, is no finding.
     #[test]
     fn a_client_that_has_gone_and_holds_its_lock_is_named_by_its_file() {
         let dir = TestDir::new("gone-client");
         let _counters = CountersFile::create(&dir.0, 256).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
-        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let clients = dir.0.join(CLIENT_LOCK_DIRECTORY);
         std::fs::create_dir(&clients).expect("the directory");
         let gone_name = String::from("41.gone");
@@ -6028,6 +6035,25 @@ mod tests {
             "docs/reference/client-protocol.md#the-records-a-client-writes"
         );
         assert!(report.ok(), "a warning does not fail: {report}");
+
+        // Only a running driver tries the locks and removes the files: a `.gone` file
+        // in the directory of a driver that stopped without closing, or that closed,
+        // says nothing of any process, so it is no finding.
+        let held = |report: &Report| {
+            report
+                .findings
+                .iter()
+                .filter(|finding| finding.check == "counters.held")
+                .count()
+        };
+        consumer.store_heartbeat(now_nanos() - 11_000_000_000);
+        let report = examine(&dir.0);
+        assert_eq!(finding(&report, "driver-heartbeat").level, Level::Fail);
+        assert_eq!(held(&report), 0, "a driver that stopped: {report}");
+        consumer.close();
+        let report = examine(&dir.0);
+        assert_eq!(finding(&report, "driver-heartbeat").level, Level::Fail);
+        assert_eq!(held(&report), 0, "a driver that closed: {report}");
     }
 
     /// A client's conductor that did not come back from a timed wait, and that the
