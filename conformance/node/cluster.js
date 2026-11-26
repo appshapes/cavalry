@@ -70,12 +70,13 @@ const TIMER_MESSAGE = "timer"; // the message at which each service's program sc
 const TIMER_ID = 77; // the timer that is handed over, scheduled as a number and handed back as 77n
 const CANCELLED_ID = 78; // the timer that is scheduled and cancelled in the same handling
 // How long after the message's entry the timer is due. A second, and not the 50 ms the C
-// round and the Python round had first: a service tells its member of a timer only once the
-// poll that took the entry has sent the six commands of its first timer, some 25 ms on a
-// laptop and more on a busy host, so the event of a timer that was wrongly due at once is
-// stamped about as late as a deadline of 50 ms, 49 ms after the message in a run of the
-// Python round, and that margin would let it pass. The round prints what it was in its own
-// run.
+// round and the Python round had first: the event of a timer that is due at once is
+// stamped tens of milliseconds after its message, the time an entry takes to be committed
+// and read by a service on a laptop, 9 to 42 ms in the Python round's runs there, and more
+// on a busy host, so a deadline of 50 ms is a thin margin for telling a timer that was
+// wrongly due at once from one that waited. Before ADR 0168 a service's first timer waited
+// for its publication to its member too, 49 ms in a run of the Python round. The round
+// prints what it was in its own run.
 const TIMER_AFTER_MS = 1000;
 const SAFE = Number.MAX_SAFE_INTEGER; // the greatest integer a number carries exactly, and an id here
 const HOUR_MS = 3600000; // the deadline its first schedule gives it, which the second replaces

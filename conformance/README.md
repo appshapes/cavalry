@@ -44,16 +44,27 @@ and "Replies"). Every runner's round also holds a program's timer (version 7; AD
 all three are handed it once, as an entry of its own kind with the timer's id, at
 one position and no earlier than its deadline; and each schedules a second timer,
 due at once, and cancels it in the same handling, and none is handed it. The
-second before the first timer is the check's margin: a service tells its member of a
-timer only once the poll that took the entry has sent the six commands of its
-first timer, some 25 ms on a laptop and more on a busy host, so the event of a
-timer that was wrongly due at once is stamped about as late as a deadline of 50 ms,
-which these rounds had first: 49 ms after the message in a run of the Python
-round. The five clients' rounds print what that was in their own run, the time of
-their timers that were due at once, beside the deadline. In the runs made on a
-laptop for work item 419 it was 38 to 68 ms, the .NET
-round's the latest, since it sleeps a millisecond between its duty cycles; no
-run's number is a bound. Those five rounds
+second before the first timer is the check's margin: the event of a timer that is
+due at once is stamped tens of milliseconds after its message, once the message's
+entry is committed and read by a service and the service has told its member, so
+a deadline of 50 ms, which these rounds had first, is a thin margin for telling a
+timer that was wrongly due at once from one that waited. The five clients' rounds
+print what that was in their own run, the time of their first timers that were
+due at once, beside the deadline. In ten runs of each on a laptop (Apple M5 Pro)
+it was 15 to 27 ms. Before ADR 0168 a service's first timer waited for its
+publication to its member too, and in the runs made for work item 419 it was 38
+to 68 ms, the .NET round's the latest. The Python round also measures what a
+later timer costs: at the end of its round it sends 200 messages, one at a time,
+at each of which every program schedules one more timer, due at once, and it
+prints their histogram. In one run with 10,000 of them, which
+`CAVALRY_LATER_TIMERS=10000` asks for, the leader stamped the event after the
+message's time, nearest rank, at p50 20 ms, p99 28 ms, p99.99 38 ms and max 38
+ms, and the service beside the leader was handed each timer, after it scheduled
+it, at p50 19,352 µs, p99 26,246 µs, p99.99 31,677 µs and max 38,186 µs. In the
+ten runs of 200 the stamps were 11 to 42 ms. So a first timer costs what a later
+one costs. Both measures hold the round's own cycle, one thread that polls three
+services and a session and sleeps 200 µs between cycles; no run's number is a
+bound, and work item 493 asks where the 20 ms go. Those five rounds
 hold more of the client's own: a second schedule of the timer sets its deadline,
 where its first was an hour away; the least and the greatest int64, scheduled
 as ids, are handed back as they are, and in the Node round the least and the
