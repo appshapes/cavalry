@@ -185,10 +185,17 @@ during some of it, and no run's number is a bound.
   how-tos' programs do, ends at its start. Before this decision that was the
   case from a program's first schedule or snapshot; now it is from a service's
   start, for every program.
-- A log that the driver could not create may stay in its directory as a file,
-  and each ask may leave another: work item 492, found by reading the driver
-  for this decision and not run. The paced ask is one a second where it was one
-  a poll.
+- A log that the driver could not create stays in its directory as a file, and
+  each ask leaves another. GitHub issue 238 ran it on Linux, in a container
+  whose `/dev/shm` is 64 MiB, for an image's log that the driver was asked for
+  ten times a second: 249 files after 25 s, each as long as its log, the first
+  holding the 8,172 KiB the filesystem had left and the others nothing, all
+  still there after the driver closed. So until work item 492 lands, a service
+  that is refused its publication for want of room leaves a file as long as the
+  log, 192 MiB, at each ask, one a second, and the first takes what room was
+  left. Before this decision that was so for a program with a timer or a
+  snapshot, at every poll; now it is so for every service, once a second. Work
+  item 492 is placed directly after this decision.
 - A driver that refuses one of the five counters, one to five of its 256 left,
   is the same error of the same reads, error code 10, counted in
   `driver.registry_full`. With none left it refuses the service's first counter,
@@ -227,7 +234,8 @@ during some of it, and no run's number is a bound.
 
 - Work item 462, which this decision was made in; work item 419, whose rounds
   showed it; work item 478, the term length of a `cavalry:ipc` channel; work item
-  492, a log left as a file where the driver could not create it; work item 493,
+  492 and GitHub issue 238, a log left as a file where the driver could not
+  create it; work item 493,
   the time an entry takes to reach its service; work item 494, a service whose
   driver has no counter left.
 - `spec/cluster.md`, "Members and streams", "Snapshots", "A service's snapshot",
