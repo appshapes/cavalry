@@ -657,9 +657,9 @@ pub struct Counts {
     /// `cluster.votes_withheld`: a request vote the member answered with nothing
     /// because it withholds its vote, its log empty beside a member that holds one, or
     /// holding nothing, its log empty and no candidate term stored, whether a voter is
-    /// unheard in its election or not (work item 476), or a vote floor held, and not every voter had reported a log the
-    /// candidate's is at least, or a voter other than the candidate had named the
-    /// request's term or a later one (ADR 0145, ADR 0161).
+    /// unheard in its election or not (work item 476), or a vote floor held, and not
+    /// every voter had reported a log the candidate's is at least, or a voter other than
+    /// the candidate had named the request's term or a later one (ADR 0145, ADR 0161).
     pub votes_withheld: u64,
     /// `cluster.leaders_withheld`: a new leadership term the member, a voter with its
     /// log empty, ignored where it would otherwise have taken the sender as its leader:
@@ -2702,9 +2702,9 @@ impl Consensus {
             });
         let log_heard = reported || candidate.as_ref().is_some_and(holds);
         // Every other voter of the members string has reported in this election: until
-        // then a member whose log is empty in a cluster of empty logs withholds too,
-        // since a candidate it voted for before it lost its log names that term only in
-        // a report (work item 476).
+        // then a member that holds nothing, its log empty and no candidate term stored,
+        // withholds too, since a candidate it voted for before it lost its log names
+        // that term only in a report (work item 476).
         withholds(
             self.own_report(),
             self.vote_floor,

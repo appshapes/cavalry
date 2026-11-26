@@ -1992,10 +1992,11 @@ fn no_leader_message(member: &MemberCounters, state: i64, cluster: Option<&Clust
         "member {id} follows no leader: its election is in {}{began}. The members elect \
          their leader: each canvasses, one that no member which reported is ahead of \
          nominates itself after a delay of up to half a second, and it leads once {of} has \
-         voted for it. At its start a member whose log holds entries waits in canvass up \
-         to {startup} s for every {who} to report, and moves to nominate at once when all \
-         have; one whose log is empty waits for every {who}, with no bound. If this member stays \
-         without a leader, fewer than a quorum of the {who}s run or reach each other: run \
+         voted for it. At its start a member that holds a log or a candidate term waits \
+         in canvass up to {startup} s for every {who} to report, and moves to nominate at \
+         once when all have; one that holds nothing, its log empty and no candidate term \
+         stored, waits for every {who}, with no bound. If this member stays without a \
+         leader, fewer than a quorum of the {who}s run or reach each other: run \
          doctor on each member's host, and check that each reaches the consensus endpoint \
          of every other, the third field of its entry in {members}.{unheard}{standby}{replicated}{}",
         election_state_name(state),

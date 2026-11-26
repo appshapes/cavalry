@@ -611,8 +611,8 @@ fn every_transition_of_the_election_and_the_role_adds_one_to_a_counter_registere
 
     // A member in canvass votes for a candidate and waits for it; with no new
     // leadership term for the election timeout it canvasses again. It has heard both
-    // other members, each with no log, as a member whose log is empty must before it
-    // votes (work item 476).
+    // other members, each with no log, as a member that holds nothing, its log empty
+    // and no candidate term stored, must before it votes (work item 476).
     let mut io = Stub::new();
     let mut voter = elector(6);
     watch.work(&mut voter, &mut io, 1);

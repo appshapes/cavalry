@@ -161,8 +161,8 @@ fn a_candidate_names_no_leader_until_it_leads_and_then_names_itself() {
 
 /// A member that votes names no leader in follower ballot, and names the candidate
 /// once it takes that candidate's new leadership term. The member has heard both other
-/// members, each with no log, as a member whose log is empty must before it votes
-/// (work item 476).
+/// members, each with no log, as a member that holds nothing, its log empty and no
+/// candidate term stored, must before it votes (work item 476).
 #[test]
 fn a_voter_names_no_leader_in_its_ballot() {
     let mut io = Stub::new();

@@ -51,9 +51,9 @@ fn sends(io: &Stub, template: Template) -> usize {
 
 /// Takes `member` from init to candidate ballot at `ms`, hearing the members of
 /// `heard` in canvass, none ahead of it. With both heard it is a candidate at once;
-/// with one, at the startup canvass timeout, 60 s, which only a member whose log holds
-/// something reaches: one whose log is empty stands only once it has heard every other
-/// voter (work item 476). Returns the millisecond its ballot began at.
+/// with one, at the startup canvass timeout, 60 s, which only a member that holds a
+/// log or a candidate term reaches: one that holds nothing stands only once it has
+/// heard every other voter (work item 476). Returns the millisecond its ballot began at.
 fn to_candidate_ballot(member: &mut Consensus, io: &mut Stub, heard: &[i32]) -> u64 {
     member.do_work(at(1), io).expect("no fault");
     assert_eq!(member.election_state(), ElectionState::Canvass);
@@ -131,8 +131,9 @@ fn a_candidate_stores_its_term_before_it_asks_for_a_vote() {
 /// said nothing since the candidate's election began, as a leader that was killed says
 /// nothing. Member 1's vote makes a quorum with the candidate's own, every member heard
 /// has voted for it, and it leads on the next cycle, long before the election timeout.
-/// The candidate holds a log because a member whose log is empty does not stand before
-/// it has heard every other voter (work item 476).
+/// The candidate holds a log because a member that holds nothing, its log empty and no
+/// candidate term stored, does not stand before it has heard every other voter (work
+/// item 476).
 #[test]
 fn a_ballot_closes_at_once_when_every_member_heard_has_voted_for_the_candidate() {
     let mut io = Stub::new();
@@ -333,7 +334,7 @@ fn a_member_votes_once_in_a_term_and_stores_the_term_before_the_vote() {
 /// A vote that cannot be sent is no vote: the term it would have raised is stored, so
 /// the member votes for nobody else in it, and the member stays where it was and
 /// counts nothing. The member's log and the candidate's each hold 64 bytes, so the
-/// member votes on the logs compared: one whose log is empty votes only once it has
+/// member votes on the logs compared: one that holds nothing votes only once it has
 /// heard every other voter (work item 476).
 #[test]
 fn a_vote_that_is_not_sent_moves_the_term_and_nothing_else() {

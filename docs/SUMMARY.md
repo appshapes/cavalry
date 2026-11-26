@@ -231,4 +231,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0170. Run the macOS gates each week and at a release, and not for every commit](decisions/0170-run-the-macos-gates-each-week-and-at-a-release-and-not-for-every-commit.md)
 - [0168. Add a service's counters and its publication to its member when it first opens its member's log](decisions/0168-add-a-services-counters-and-its-publication-to-its-member-when-it-first-opens-its-members-log.md)
 - [0171. Park the idle loops where a stop can wake them, and wake every thread at a stop](decisions/0171-park-the-idle-loops-where-a-stop-can-wake-them-and-wake-every-thread-at-a-stop.md)
-- [0174. Have a member of a cluster of empty logs vote only once every voter has reported](decisions/0174-have-a-member-of-a-cluster-of-empty-logs-vote-only-once-every-voter-has-reported.md)
+- [0174. Have a member that holds nothing vote only once every voter has reported](decisions/0174-have-a-member-that-holds-nothing-vote-only-once-every-voter-has-reported.md)

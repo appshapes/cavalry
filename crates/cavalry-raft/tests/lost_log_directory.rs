@@ -265,9 +265,10 @@ fn two_members_that_lost_their_logs_vote_in_the_one_that_holds_the_log() {
 /// log directories while the third, which holds the log, is stopped. Before, the two
 /// heard no report that holds a log, voted as a new cluster's members do, and after
 /// the startup canvass timeout elected between them an empty history, so that what the
-/// cluster committed was gone from every member that ran. Now a member whose log is
-/// empty stands and votes only once every voter has reported: the two elect no leader
-/// in 120 s while the third is stopped. Once it runs, its report holds a log, so they
+/// cluster committed was gone from every member that ran. Now a member that holds
+/// nothing, its log empty and no candidate term stored, as a lost log directory leaves
+/// it, stands and votes only once every voter has reported: the two elect no leader in
+/// 120 s while the third is stopped. Once it runs, its report holds a log, so they
 /// withhold, it leads in a later term, and the two catch up to everything committed.
 #[test]
 fn two_members_that_lost_their_logs_while_the_third_is_stopped_wait_for_it() {

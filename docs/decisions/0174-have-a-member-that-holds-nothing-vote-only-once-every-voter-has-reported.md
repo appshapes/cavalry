@@ -1,4 +1,4 @@
-# 0174. Have a member of a cluster of empty logs vote only once every voter has reported
+# 0174. Have a member that holds nothing vote only once every voter has reported
 
 - **Status:** Accepted
 - **Date:** 2026-11-26

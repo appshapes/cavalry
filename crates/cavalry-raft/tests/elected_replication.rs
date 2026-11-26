@@ -113,7 +113,8 @@ fn a_cluster_started_together_elects_its_leader_replicates_and_commits() {
 }
 
 /// A cold start with a member missing elects no leader until that member starts (work
-/// item 476). A member whose log is empty cannot tell a new cluster from one whose logs
+/// item 476). A member that holds nothing, its log empty and no candidate term stored,
+/// as each does before its first vote, cannot tell a new cluster from one whose logs
 /// were lost, and one that lost its log in the cluster's first ballot may have voted
 /// there. So in a cluster of empty logs it neither stands nor votes until every other
 /// voter has reported. Two of three run for 120 s, twice the startup canvass timeout:
