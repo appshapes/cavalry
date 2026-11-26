@@ -285,8 +285,10 @@ enum OverduePublished {
     Asked(i64),
     /// The counter, and the count last stored in it.
     Counter(Counter, u64),
-    /// The driver refused the counter, most likely for want of a record: the count
-    /// stays in the process.
+    /// The driver refused the counter, most likely for want of a record, or named a
+    /// record this client cannot write: the count stays in the process, and the
+    /// conductor does not ask again. A record the driver gave and this client could
+    /// not open stays the client's until its close, as every counter of a client does.
     Refused,
 }
 
@@ -435,7 +437,9 @@ impl Conductor {
     fn publish_overdue(&mut self, pair: &Pair, epoch: i64) {
         let total = pair.parks_overdue.load(Ordering::Acquire);
         match &mut self.overdue {
-            OverduePublished::None if total > 0 => {
+            // Not once the client is closed: a command after its `client close` would
+            // read to the driver as a new client's first.
+            OverduePublished::None if total > 0 && self.shared.closed().is_none() => {
                 let correlation_id = self.producer.next_correlation_id();
                 let key = self.client_id.to_le_bytes();
                 let mut label = [0u8; 64];
@@ -1446,6 +1450,8 @@ mod tests {
             "the watch did not end the conductor's park, or the conductor did not count it",
             || (conductor_parks_overdue(&dir, client_id) == Some(1)).then_some(()),
         );
+        // The conductor parks as it should from here on, so the count stands: a count
+        // taken at every look, or a conductor still held, would move it.
         std::thread::park_timeout(std::time::Duration::from_millis(500));
         assert_eq!(
             conductor_parks_overdue(&dir, client_id),
@@ -1457,10 +1463,14 @@ mod tests {
             .expect("the client takes a command after its conductor was woken");
         drop(publication);
         client.close().expect("closes");
-        assert_eq!(
-            conductor_parks_overdue(&dir, client_id),
-            None,
-            "the driver freed the client's counter at its close"
+        // The driver frees it when it reads the client's close, a duty cycle later.
+        wait_within(
+            "the driver did not free the client's counter at its close",
+            || {
+                conductor_parks_overdue(&dir, client_id)
+                    .is_none()
+                    .then_some(())
+            },
         );
         driver.close().expect("the driver closes");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1483,6 +1493,67 @@ mod tests {
         std::thread::park_timeout(std::time::Duration::from_millis(500));
         assert_eq!(conductor_parks_overdue(&dir, client_id), Some(1));
         client.close().expect("closes");
+        driver.close().expect("the driver closes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A driver with no counter left refuses the conductor's own (ADR 0177). The park
+    /// was ended all the same, and the conductor asks once: it does not ask again, and
+    /// it does not spin or wait on the refusal. A second client first adds counters
+    /// until the driver refuses one. Then a client whose conductor's first park lasts
+    /// an hour connects; its watch ends the park, and its conductor's `add counter` is
+    /// refused. The driver's two counters of a refused add move by one between them
+    /// and stay there, the client has no counter, and it takes a command as before.
+    #[test]
+    fn a_driver_with_no_counter_left_refuses_the_conductors_own_and_is_asked_once() {
+        let (dir, driver) = watch_test_driver("watch-no-counter-left");
+        let refusals = |dir: &std::path::Path| {
+            let counters = cavalry_shm::counters::CountersReader::open(dir).expect("counters");
+            [
+                cavalry_shm::counters::generated::DRIVER_REGISTRY_FULL,
+                cavalry_shm::counters::generated::COUNTERS_ALLOCATION_FAILED,
+            ]
+            .into_iter()
+            .map(|id| counters.read(id.record()).expect("a static counter"))
+            .sum::<i64>()
+        };
+        super::WATCH_FOR_TEST.set(Some(None));
+        let mut filler = crate::Cavalry::connect_to(&dir).expect("the filling client");
+        let mut held = Vec::new();
+        for key in 0i32.. {
+            match filler.add_counter(
+                cavalry_shm::counters::generated::CLUSTER_COMMIT_POSITION.0,
+                &key.to_le_bytes(),
+                "cluster.commit_position filler",
+            ) {
+                Ok(counter) => held.push(counter),
+                Err(_) => break,
+            }
+            assert!(key < 100_000, "the driver refuses a counter at some count");
+        }
+        let before = refusals(&dir);
+
+        super::WATCH_FOR_TEST.set(Some(Some(None)));
+        super::PARK_FOR_TEST.set(Some(HOUR));
+        super::PARK_FOR_TEST_ONCE.set(true);
+        let mut client = crate::Cavalry::connect_to(&dir).expect("connects");
+        super::WATCH_FOR_TEST.set(None);
+        super::PARK_FOR_TEST.set(None);
+        super::PARK_FOR_TEST_ONCE.set(false);
+        let client_id = client.client_id();
+        wait_within("the conductor did not ask for its counter", || {
+            (refusals(&dir) == before + 1).then_some(())
+        });
+        std::thread::park_timeout(std::time::Duration::from_millis(500));
+        assert_eq!(refusals(&dir), before + 1, "asked once, and not again");
+        assert_eq!(conductor_parks_overdue(&dir, client_id), None);
+        let publication = client
+            .add_publication("cavalry:ipc", 2414)
+            .expect("the client takes a command after the refusal");
+        drop(publication);
+        client.close().expect("closes");
+        drop(held);
+        filler.close().expect("the filling client closes");
         driver.close().expect("the driver closes");
         let _ = std::fs::remove_dir_all(&dir);
     }

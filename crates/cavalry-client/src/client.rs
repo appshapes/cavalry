@@ -371,7 +371,21 @@ impl Cavalry {
                     }) {
                     Ok(watch) => Some(watch),
                     Err(source) => {
-                        shared.close(Closed::ByUser);
+                        // As a close: the driver is told, so that it does not hold the
+                        // client until its timeout, and the conductor is ended.
+                        if shared.close(Closed::ByUser) {
+                            let command = Command::ClientClose {
+                                client_id,
+                                correlation_id: producer.next_correlation_id(),
+                            };
+                            if let Ok(length) = command.write(&mut scratch) {
+                                let _ = producer.write(
+                                    command.command_type() as i32,
+                                    &scratch[..length],
+                                    epoch_time(),
+                                );
+                            }
+                        }
                         handle.thread().unpark();
                         let _ = handle.join();
                         return Err(ClientError::Io {

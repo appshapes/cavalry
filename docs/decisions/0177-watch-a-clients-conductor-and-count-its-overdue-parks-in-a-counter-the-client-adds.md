@@ -49,8 +49,19 @@ client adds with `add counter` and alone writes (ADR 0062): a new counter,
 itself, with a command of its own on its own producer, when the number first leaves
 0, and not before: a client that never has an overdue park adds nothing and costs
 the driver no record. It stores the count with a release store whenever it has
-moved. A driver that refuses the counter, for want of a record, leaves the count in
-the process. The driver frees the counter when the client closes or is timed out,
+moved. A conductor whose client is closed sends no such command.
+
+A driver that has no counter left refuses the conductor's, as it refuses any
+client's. The park was ended all the same. The conductor then keeps the count in
+the process and does not ask again: it asks once in a client's life, it reads the
+refusal as it reads any event, and it neither waits on it nor tries again at each
+pass. `doctor` then names no such client, and what it shows is the driver's own
+count of the refused add, `driver.registry_full` or `counters.allocation_failed`,
+with what to do about a driver that is full. The same holds for a driver that
+names a record the client cannot open; that record stays the client's until its
+close.
+
+The driver frees the counter when the client closes or is timed out,
 as it frees every counter of a client, so `doctor` names a client by it for as long
 as the client lives: `doctor` reads every such counter and gives a finding for each
 that is above 0, with the client's id.
@@ -110,6 +121,11 @@ cannot be started fails the client's start, with the conductor ended.
   - `close_ends_the_conductor_though_its_park_would_not_time_out`, from ADR 0171,
     now on a client with no watch: it adds no counter, and its close still ends a
     conductor parked for an hour.
+  - `a_driver_with_no_counter_left_refuses_the_conductors_own_and_is_asked_once`: a
+    second client adds counters until the driver refuses one, and then a client's
+    held conductor is woken. The driver's two counters of a refused add move by one
+    between them and stay there for half a second, the client has no counter, and
+    it takes `add publication` as before.
   - `an_overdue_park_is_counted_once_however_many_looks_it_takes`.
 - **`doctor`**:
   `a_clients_conductor_that_its_watch_woke_is_explained_from_the_clients_counter`,
@@ -117,7 +133,12 @@ cannot be started fails the client's start, with the conductor ended.
 - **The rate and the grace** are ADR 0171's and ADR 0176's: one wait in 38 million
   on the laptop, and a sound park at most 53 ms late in 1.8 billion waits.
 - Twenty runs of the tests that wait on a clock, on both of CI's runners, are in the
-  pull request's body with their run's id.
+  pull request's body with their run's id. The first such run failed, at the first
+  test's last line: it read the counter as freed as soon as the client's close
+  returned, and the driver frees it a duty cycle later. The test waits for it now.
+- No client was left running for an hour as a driver was for ADR 0176: a client's
+  conductor idles by the same backoff and is held to the same grace, and that
+  hour's count of 0 is the evidence for both.
 
 ## Consequences
 

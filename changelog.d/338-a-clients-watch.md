@@ -4,5 +4,6 @@
   client whose conductor was held sent no keepalive and was timed out by its driver
   after 10 s. A park so ended is counted in a counter the client adds for itself at
   the first one, `client.conductor_parks_overdue`, which `cavalry doctor` explains
-  with the client's id. Clients on other systems have no watch and are unchanged
+  with the client's id; `doctor`'s `checks run:` count is one higher for that check.
+  Clients on other systems have no watch and are unchanged
   ([ADR 0177](docs/decisions/0177-watch-a-clients-conductor-and-count-its-overdue-parks-in-a-counter-the-client-adds.md)).
