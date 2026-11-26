@@ -51,10 +51,11 @@ pub(crate) enum ImageEvent {
     Gone { session_id: i32 },
 }
 
-/// A mapping the subscription no longer reads, for the conductor to drop.
+/// A mapping the subscription no longer reads, for the conductor to drop. The image's
+/// position is not in it: its handle was given up on the thread that polls, where its
+/// release word is stored, and no other thread holds it afterwards (ADR 0179).
 pub(crate) struct Retired {
     _log: LogBuffers,
-    _position: Counter,
 }
 
 /// What a subscription registers with the conductor when it is added, and what the
@@ -243,13 +244,11 @@ impl Image {
     }
 
     fn retire(self) -> Retired {
-        // On the thread that polls, between two polls: nothing stores this image's
-        // position after this (ADR 0179). The mapping is dropped elsewhere.
+        // On the thread that polls, between two polls: the position's handle is
+        // given up here, which stores its release word, and nothing stores this
+        // image's position after this (ADR 0179). The mapping is dropped elsewhere.
         self.position.release();
-        Retired {
-            _log: self.log,
-            _position: self.position,
-        }
+        Retired { _log: self.log }
     }
 }
 
@@ -336,8 +335,11 @@ impl Subscription {
             return;
         }
         self.released = true;
-        for image in &self.images {
-            image.position.release();
+        // Each image is taken out: its position's handle is given up here, and its
+        // mapping goes to the conductor to drop, or is dropped here when the
+        // conductor has gone, which unmaps on this thread and only now.
+        while let Some(image) = self.images.pop() {
+            self.retire(image);
         }
         // What the conductor queued and no poll took: the handle's drop is its release.
         while let Some(event) = self.incoming.poll() {
@@ -729,10 +731,7 @@ impl Subscription {
 
     fn retire_parts(&mut self, log: LogBuffers, position: Counter) {
         position.release();
-        let retired = Retired {
-            _log: log,
-            _position: position,
-        };
+        let retired = Retired { _log: log };
         if let Err(retired) = self.retired.offer(retired) {
             drop(retired);
         }

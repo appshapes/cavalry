@@ -284,12 +284,6 @@ impl Cavalry {
         let client_id = producer.next_correlation_id();
         let receiver = broadcast.receiver()?;
         let counters = Arc::new(counters);
-        // The client's lock, before its first command: the driver tries it when it
-        // reads that command, and a client that holds it is one whose records are
-        // given back out when the driver holds it in turn (`spec/client-protocol.md`,
-        // "The records a client writes"; ADR 0179). A client that cannot take it
-        // attaches all the same.
-        let lock = crate::owned::ClientLock::take(&dir, client_id);
 
         let mut scratch = vec![0u8; COMMAND_SCRATCH];
         let keepalive = Command::ClientKeepalive {
@@ -297,11 +291,25 @@ impl Cavalry {
             correlation_id: producer.next_correlation_id(),
         };
         let length = keepalive.write(&mut scratch)?;
-        producer.write(
+        // The client's lock, taken just before its first command: the driver tries it
+        // when it reads that command, and a client that holds it is one whose records
+        // are given back out when the driver holds it in turn
+        // (`spec/client-protocol.md`, "The records a client writes"; ADR 0179). A
+        // client that cannot take it attaches all the same. From the command on, the
+        // driver knows the client and removes the file when the client has gone; a
+        // command that could not be written leaves a file the driver never learns of,
+        // which is removed here.
+        let lock = crate::owned::ClientLock::take(&dir, client_id);
+        if let Err(error) = producer.write(
             keepalive.command_type() as i32,
             &scratch[..length],
             epoch_time(),
-        )?;
+        ) {
+            if let Some(lock) = lock {
+                lock.abandon();
+            }
+            return Err(error.into());
+        }
 
         let shared = Arc::new(Shared::new(nano_time(), lock));
         let (response_producer, responses) = spsc::queue::<Response>(RESPONSE_QUEUE);
@@ -942,7 +950,7 @@ impl Cavalry {
                     });
                 };
                 Ok(Counter::new(
-                    crate::owned::Owned::new(cell),
+                    crate::owned::Owned::new(cell, Arc::clone(&self.shared)),
                     Arc::clone(&self.shared),
                     producer,
                     self.client_id,

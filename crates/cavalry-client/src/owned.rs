@@ -6,16 +6,23 @@
 //! could wait: a process that was stopped stores when it is continued, and a thread
 //! learns that its record went from an event another thread reads. So the driver gives
 //! a record to another owner only when its writer has said that it will not store
-//! again. That is the release word, and this type is where it is stored: in
-//! [`Owned::release`], and in the handle's drop whatever dropped it. The handle is not
-//! `Clone`, so one owner holds it at a time, and after its release or its drop nothing
-//! stores through it.
+//! again. That is the release word, and this type is where it is stored: in the
+//! handle's drop, and nowhere else. [`Owned::release`] takes the handle and drops it,
+//! so that there is one store of the word for one handle by construction: a value is
+//! dropped once. A second store would come after the driver may have given the record
+//! to another owner, whose word it would then set. The handle is not `Clone`, so one
+//! owner holds it at a time, and once it is released there is no handle left to store
+//! through. It holds the client's shared state, which owns the client's lock, so no
+//! handle outlives the lock, whatever order the things around it are dropped in.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use cavalry_proto::client_protocol::{CLIENT_LOCK_DIRECTORY, CLIENT_LOCK_SUFFIX};
 use cavalry_shm::counters::Counter;
+
+use crate::conductor::Shared;
 
 /// A client's lock: an exclusive advisory lock on `clients/<client id>.lock` in the
 /// driver's directory, taken before the client's first command and held for as long
@@ -24,8 +31,13 @@ use cavalry_shm::counters::Counter;
 /// them is dropped, and by the system when the process ends. The driver gives a
 /// closed or timed-out client's records to another owner when it holds this lock
 /// (`spec/client-protocol.md`, "The records a client writes"; ADR 0179).
+///
+/// The client does not remove the file when it lets go: the driver does, once it has
+/// taken the lock. A name in `clients/` is a client id, and ids begin again with each
+/// driver, so a client of the driver before a restart that removed "its" file by name
+/// could remove the file of a client of the driver that started.
 pub(crate) struct ClientLock {
-    _file: File,
+    file: File,
     path: PathBuf,
 }
 
@@ -48,29 +60,40 @@ impl ClientLock {
             let _ = std::fs::remove_file(&path);
             return None;
         }
-        Some(Self { _file: file, path })
+        Some(Self { file, path })
     }
-}
 
-impl Drop for ClientLock {
-    fn drop(&mut self) {
-        // The file goes first and the lock with the handle after it: nothing of the
-        // client is left that could store, so a driver that finds no file is told the
-        // same as one that takes the lock.
-        let _ = std::fs::remove_file(&self.path);
+    /// Gives the lock up for a client that sent no command, so that the driver never
+    /// learned of it and will never remove its file: the file is removed here, when
+    /// the name still names this file and no other, by its device and its number.
+    pub(crate) fn abandon(self) {
+        use std::os::unix::fs::MetadataExt;
+        let same = match (self.file.metadata(), std::fs::metadata(&self.path)) {
+            (Ok(held), Ok(named)) => held.dev() == named.dev() && held.ino() == named.ino(),
+            _ => false,
+        };
+        if same {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
 /// One record this client writes, and the only handle on it in this process.
 pub(crate) struct Owned {
     cell: Counter,
+    /// The client's shared state, and with it the client's lock, for as long as this
+    /// handle exists.
+    _shared: Arc<Shared>,
 }
 
 impl Owned {
     /// Takes the handle the counters file gave for a record the driver allocated for
     /// this client. The caller keeps no clone of `cell`.
-    pub(crate) fn new(cell: Counter) -> Self {
-        Self { cell }
+    pub(crate) fn new(cell: Counter, shared: Arc<Shared>) -> Self {
+        Self {
+            cell,
+            _shared: shared,
+        }
     }
 
     /// The record's id.
@@ -103,15 +126,17 @@ impl Owned {
         self.cell.load_acquire()
     }
 
-    /// Stores the release word: the owner's last store to the record, on the owner's
-    /// thread, at a point where it gives the record up. The owner stores nothing
-    /// through this handle afterwards. A second release changes nothing.
-    pub(crate) fn release(&self) {
-        self.cell.release();
+    /// Gives the record up, on the owner's thread, at a point of the owner's choosing:
+    /// the handle is taken and dropped, and its drop stores the release word. Nothing
+    /// is left to store through, and nothing is left whose drop could store the word
+    /// a second time.
+    pub(crate) fn release(self) {
+        drop(self);
     }
 }
 
 impl Drop for Owned {
+    /// The one store of the release word: the owner's last store to the record.
     fn drop(&mut self) {
         self.cell.release();
     }

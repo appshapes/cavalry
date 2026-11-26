@@ -337,6 +337,7 @@ pub(crate) struct Conductor {
 fn own_answer(
     overdue: &mut OverduePublished,
     counters: &CountersWriter,
+    shared: &Arc<Shared>,
     type_id: i32,
     message: &[u8],
 ) {
@@ -352,7 +353,9 @@ fn own_answer(
                 .ok()
                 .and_then(|id| counters.counter(id).ok())
             {
-                Some(counter) => OverduePublished::Counter(Counter::new(counter), 0),
+                Some(counter) => {
+                    OverduePublished::Counter(Counter::new(counter, Arc::clone(shared)), 0)
+                }
                 None => OverduePublished::Refused,
             };
         }
@@ -622,7 +625,7 @@ impl Conductor {
             let got = self.receiver.receive(|type_id, message| {
                 // The answer to the conductor's own `add counter`, which is nobody's
                 // pending command and which `event` passes over (ADR 0177).
-                own_answer(overdue, counters, type_id, message);
+                own_answer(overdue, counters, shared, type_id, message);
                 // The driver's answer to a `remove subscription`, which is nobody's
                 // pending command either: its registration can be forgotten, since
                 // the driver announces nothing more for it (ADR 0179).
@@ -760,13 +763,14 @@ impl Conductor {
             // removal: the record this event names is this client's all the same, and
             // nothing will poll it. Its release word is stored here, by its id.
             if let Ok(record) = u32::try_from(position_counter_id) {
-                let _ = self.counters.release(record);
+                release_unheld(&self.counters, record, correlation_id, session_id);
             }
             return Ok(());
         }
         let event = announced(
             &self.dir,
             &self.counters,
+            &self.shared,
             correlation_id,
             session_id,
             position_counter_id,
@@ -812,6 +816,7 @@ impl Conductor {
 fn announced(
     dir: &Path,
     counters: &CountersWriter,
+    shared: &Arc<Shared>,
     correlation_id: i64,
     session_id: i32,
     position_counter_id: i32,
@@ -845,7 +850,10 @@ fn announced(
         Err(_) => return Err(Closed::Corrupt),
     };
     let position = if named {
-        counters.counter(record).ok().map(Counter::new)
+        counters
+            .counter(record)
+            .ok()
+            .map(|cell| Counter::new(cell, Arc::clone(shared)))
     } else {
         None
     };
@@ -866,10 +874,33 @@ fn announced(
             ImageEvent::Gone { session_id }
         }
         (_, None) => {
-            let _ = counters.release(record);
+            release_unheld(counters, record, correlation_id, session_id);
             ImageEvent::Gone { session_id }
         }
     })
+}
+
+/// Stores, by its id, the release word of a record this client was told of in an
+/// `available image` and holds no handle on (`spec/client-protocol.md`, "The records a
+/// client writes"). The record is the client's from the event on, and the driver gives
+/// it to nobody before the word is stored, so the record either holds no counter, the
+/// driver having freed it and holding it, or is still the image's own. A record that
+/// holds another counter is neither: something broke the rule, and nothing is stored
+/// into it.
+fn release_unheld(counters: &CountersWriter, record: u32, correlation_id: i64, session_id: i32) {
+    let ours = match counters.record(record) {
+        Ok(None) => true,
+        Ok(Some(fields)) => {
+            let key = fields.key();
+            fields.type_id() == SUBSCRIPTION_POSITION.0
+                && key[..8] == correlation_id.to_le_bytes()
+                && key[8..12] == session_id.to_le_bytes()
+        }
+        Err(_) => false,
+    };
+    if ours {
+        let _ = counters.release(record);
+    }
 }
 
 /// The subscriptions one client holds, by registration id, with the queues to each:
@@ -1933,6 +1964,7 @@ mod tests {
             announced(
                 &dir,
                 &counters,
+                &Arc::new(super::Shared::new(0, None)),
                 correlation_id,
                 session_id,
                 record,

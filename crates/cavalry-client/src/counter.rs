@@ -27,7 +27,10 @@ use crate::error::ClientError;
 /// acquire load, and stores nothing once it is closed. Nothing here allocates or
 /// locks.
 pub struct Counter {
-    cell: Cell,
+    /// The handle on the record, until `remove` gives it up.
+    cell: Option<Cell>,
+    /// The record's id, which outlives the handle for a caller that asks.
+    id: u32,
     shared: Arc<Shared>,
     producer: Producer,
     client_id: i64,
@@ -48,7 +51,8 @@ impl Counter {
         type_id: i32,
     ) -> Self {
         Self {
-            cell,
+            id: cell.id(),
+            cell: Some(cell),
             shared,
             producer,
             client_id,
@@ -69,7 +73,7 @@ impl Counter {
     /// The record of the counters file the driver allocated: what a reader of the file
     /// finds the value by.
     pub fn id(&self) -> u32 {
-        self.cell.id()
+        self.id
     }
 
     /// The counter's type id: the `id` of its entry in `counters.toml`.
@@ -83,7 +87,9 @@ impl Counter {
     /// closed, and then nothing is stored.
     pub fn store_release(&self, value: i64) -> Result<(), ClientError> {
         self.open()?;
-        self.cell.store_release(value);
+        if let Some(cell) = &self.cell {
+            cell.store_release(value);
+        }
         Ok(())
     }
 
@@ -91,7 +97,9 @@ impl Counter {
     /// [`ClientError::Closed`] when the client is closed, and then nothing is stored.
     pub fn set(&self, value: i64) -> Result<(), ClientError> {
         self.open()?;
-        self.cell.set(value);
+        if let Some(cell) = &self.cell {
+            cell.set(value);
+        }
         Ok(())
     }
 
@@ -99,7 +107,9 @@ impl Counter {
     /// when the client is closed, and then nothing is added.
     pub fn increment(&self) -> Result<(), ClientError> {
         self.open()?;
-        self.cell.increment();
+        if let Some(cell) = &self.cell {
+            cell.increment();
+        }
         Ok(())
     }
 
@@ -107,13 +117,15 @@ impl Counter {
     /// nothing is added.
     pub fn add(&self, n: i64) -> Result<(), ClientError> {
         self.open()?;
-        self.cell.add(n);
+        if let Some(cell) = &self.cell {
+            cell.add(n);
+        }
         Ok(())
     }
 
     /// The value, with an acquire load.
     pub fn get(&self) -> i64 {
-        self.cell.load_acquire()
+        self.cell.as_ref().map_or(0, Cell::load_acquire)
     }
 
     /// Whether the client this counter belongs to is closed, so that every store from
@@ -142,9 +154,12 @@ impl Counter {
             return;
         }
         self.removed = true;
-        // The release word first: this handle stores nothing after it, and the driver
-        // gives the record to no other owner before it reads the word (ADR 0179).
-        self.cell.release();
+        // The release word first: the handle on the record is given up, so nothing
+        // stores through this counter after it, and the driver gives the record to no
+        // other owner before it reads the word (ADR 0179).
+        if let Some(cell) = self.cell.take() {
+            cell.release();
+        }
         let command = Command::RemoveCounter {
             client_id: self.client_id,
             correlation_id: self.producer.next_correlation_id(),
