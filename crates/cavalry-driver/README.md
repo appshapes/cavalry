@@ -249,6 +249,22 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   frees one when its owner removes it, closes or is timed out, and tells every client
   with `unavailable counter` before it does; another client's remove is code 5
   (`spec/client-protocol.md`, "Commands"; ADR 0062).
+- Gives a counter's record that a client writes, an image's position or a counter
+  the client added, to another owner only when its writer has let it go. The driver
+  frees such a record when it always did, and holds it: no reader sees a counter
+  there, and no allocation takes it. It lets the record go when the record's release
+  word is stored, or when it holds the lock of a client that closed or was timed
+  out, which it tries ten times a second on the client's file, renamed to
+  `clients/<client id>.gone`. It removes `clients/` with everything else the driver
+  before it left, before it creates anything of its own, so a client of that driver
+  can make no lock file in this one's directory. And it drops a command that names a
+  client that has gone, and counts it in `client_protocol.dropped_command`, so a
+  client that was stopped and is continued is not registered a second time. A thread of a client that is
+  not run for a while, or a process that was stopped, so stores into a record that
+  is still its own.
+  `counters.held` is how many records are held, and `counters.retired` how many a
+  client it could not ask about left out of use until the driver starts again
+  (`spec/client-protocol.md`, "The records a client writes"; ADR 0179).
 - Degrades under cgroup CPU throttling, shared-memory pressure or packet loss. It does
   not fall over, and every state transition increments a counter.
 
