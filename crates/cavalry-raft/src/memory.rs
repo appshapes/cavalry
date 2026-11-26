@@ -69,6 +69,9 @@ const STEP_NS: u64 = 1_000_000;
 /// full is lost and counted ([`Cluster::full_queue_losses`]).
 pub const IN_FLIGHT_CAPACITY: usize = 4_096;
 
+/// How far above its member id [`Cluster::start_twin`] names a second run.
+const TWIN: i32 = 1_000;
+
 /// The most a consensus message is late, in milliseconds: the leader heartbeat timeout
 /// (`spec/cluster.md`, "Values"). A message later than that is one the member that
 /// waits for it has already given up on, which loss plays as well.
@@ -197,7 +200,15 @@ struct Cut {
 /// What the world holds for one member: what its `terms` file and its recording would.
 #[derive(Clone)]
 struct Disk {
+    /// The name a test gives it: the member id, or what [`Cluster::start_twin`]
+    /// returns for a second run of one.
     id: i32,
+    /// The member id it runs as, the one its messages name.
+    member: i32,
+    /// Since when the address of its member id is another run's, so that nothing sent
+    /// to the member id reaches it ([`Cluster::move_address`]): `None` while it holds
+    /// the address.
+    unaddressed_since_ns: Option<u64>,
     candidate_term: i64,
     /// The vote floor its `terms` file holds, −1 for none or once cleared (ADR 0145, ADR
     /// 0161).
@@ -249,8 +260,16 @@ struct Disk {
 impl Disk {
     /// A new log directory: no term, no vote, no recording.
     fn empty(id: i32) -> Self {
+        Self::empty_as(id, id, None)
+    }
+
+    /// An empty disk named `id` for a run of member id `member`, which holds its
+    /// member id's address unless `unaddressed_since_ns` says since when it does not.
+    fn empty_as(id: i32, member: i32, unaddressed_since_ns: Option<u64>) -> Self {
         Self {
             id,
+            member,
+            unaddressed_since_ns,
             candidate_term: -1,
             vote_floor: -1,
             terms: Vec::new(),
@@ -337,9 +356,22 @@ struct World {
     loss_one_in: u64,
     max_delay_ms: u64,
     random: u64,
+    /// The member ids whose address a test moved to another run, each with the place
+    /// of the run that holds it now ([`Cluster::move_address`]).
+    addressed: Vec<(i32, usize)>,
 }
 
 impl World {
+    /// The place of the run that a message to member id `member` reaches: the run that
+    /// holds the member id's address, the member's own until a test moves it.
+    fn to(&self, member: i32) -> Option<usize> {
+        self.addressed
+            .iter()
+            .find(|&&(id, _)| id == member)
+            .map(|&(_, index)| index)
+            .or_else(|| self.disks.iter().position(|disk| disk.id == member))
+    }
+
     /// Xorshift64: the same faults at every run of a test.
     fn next_random(&mut self) -> u64 {
         self.random ^= self.random << 13;
@@ -362,9 +394,12 @@ impl World {
 /// partition between the two, or one that cuts one way from `from` to `to`. `None`
 /// while `to` hears `from`.
 fn unheard_since(disks: &[Disk], cuts: &[Cut], from: usize, to: usize) -> Option<u64> {
+    // A run whose member id's address is another run's hears nobody, and is still
+    // heard: what it sends leaves from an address of its own host.
     let own = [from, to]
         .into_iter()
-        .filter_map(|index| disks.get(index).and_then(|disk| disk.cut_since_ns));
+        .filter_map(|index| disks.get(index).and_then(|disk| disk.cut_since_ns))
+        .chain(disks.get(to).and_then(|disk| disk.unaddressed_since_ns));
     let between = cuts
         .iter()
         .filter(|cut| {
@@ -394,13 +429,13 @@ impl Io for MemberIo<'_> {
     type Fault = Faulted;
 
     fn consensus_session(&mut self, member: i32) -> Option<i32> {
-        let to = self.world.disks.iter().position(|disk| disk.id == member)?;
+        let to = self.world.to(member)?;
         let run = self.world.runs.get(self.own).copied().unwrap_or(0);
         Some(session_of(self.own, to, run))
     }
 
     fn send(&mut self, member: i32, message: &Message<'_>) -> bool {
-        let Some(to) = self.world.disks.iter().position(|disk| disk.id == member) else {
+        let Some(to) = self.world.to(member) else {
             return false;
         };
         let mut buffer = [0u8; 256];
@@ -775,7 +810,7 @@ impl Io for MemberIo<'_> {
         position: i64,
         end: Option<i64>,
     ) -> Result<bool, Self::Fault> {
-        let Some(to) = self.world.disks.iter().position(|disk| disk.id == member) else {
+        let Some(to) = self.world.to(member) else {
             return Ok(false);
         };
         // The member's log holds the position when an entry of it begins there, and
@@ -814,9 +849,11 @@ impl Io for MemberIo<'_> {
     }
 
     fn stop_replay(&mut self, member: i32) -> Result<(), Self::Fault> {
-        let to = self.world.disks.iter().position(|disk| disk.id == member);
+        // The replay to a run of the member id, wherever its address is now.
+        let disks = &self.world.disks;
+        let runs = |index: usize| disks.get(index).is_some_and(|disk| disk.member == member);
         for replay in &mut self.world.replays {
-            if replay.from == self.own && Some(replay.to) == to && replay.stopped.is_none() {
+            if replay.from == self.own && runs(replay.to) && replay.stopped.is_none() {
                 replay.stopping = true;
             }
         }
@@ -824,9 +861,10 @@ impl Io for MemberIo<'_> {
     }
 
     fn replay_stopped(&mut self, member: i32) -> Result<Option<ReplayStopped>, Self::Fault> {
-        let to = self.world.disks.iter().position(|disk| disk.id == member);
+        let disks = &self.world.disks;
+        let runs = |index: usize| disks.get(index).is_some_and(|disk| disk.member == member);
         let place = self.world.replays.iter().position(|replay| {
-            replay.from == self.own && Some(replay.to) == to && replay.stopped.is_some()
+            replay.from == self.own && runs(replay.to) && replay.stopped.is_some()
         });
         Ok(place.and_then(|place| self.world.replays.swap_remove(place).stopped))
     }
@@ -856,7 +894,7 @@ impl Io for MemberIo<'_> {
     }
 
     fn send_catchup_position(&mut self, leader: i32, term: i64, position: i64) -> bool {
-        let follower_member_id = self.world.disks.get(self.own).map_or(-1, |disk| disk.id);
+        let follower_member_id = self.world.disks.get(self.own).map_or(-1, |disk| disk.member);
         // This cluster has no endpoints: a replay reaches the member by its place.
         self.send(
             leader,
@@ -932,6 +970,9 @@ impl Io for MemberIo<'_> {
 pub struct Cluster {
     cores: Vec<Consensus>,
     world: World,
+    /// The member ids of the members string, in its order: the members the cluster was
+    /// made with, without a second run of one ([`Cluster::start_twin`]).
+    members: Vec<i32>,
     /// The seed each member's own is made from.
     seed: u64,
     /// The members that each member's own members string marks a standby, by the
@@ -973,11 +1014,12 @@ impl Cluster {
         seed: u64,
     ) -> Result<Self, MembersRefused> {
         let cores = (0..member_ids.len())
-            .map(|index| Self::core(member_ids, standby_ids, index, seed))
+            .map(|index| Self::core(member_ids, standby_ids, index, index, seed))
             .collect::<Result<Vec<_>, _>>()?;
         let disks = member_ids.iter().map(|&id| Disk::empty(id)).collect();
         Ok(Self {
             cores,
+            members: member_ids.to_vec(),
             seed,
             standbys: vec![standby_ids.to_vec(); member_ids.len()],
             world: World {
@@ -1000,19 +1042,23 @@ impl Cluster {
                 loss_one_in: 0,
                 max_delay_ms: 0,
                 random: 0x9E37_79B9_7F4A_7C15,
+                addressed: Vec::new(),
             },
         })
     }
 
-    /// The core of the member at `index` among `member_ids`, whose own members string
-    /// marks those of `standby_ids` standbys.
+    /// The core of the member at `place` among `member_ids`, whose own members string
+    /// marks those of `standby_ids` standbys, run at `index` among the runs: its place,
+    /// or a later one for a second run of its member id, so that two runs draw their
+    /// own delays.
     fn core(
         member_ids: &[i32],
         standby_ids: &[i32],
+        place: usize,
         index: usize,
         seed: u64,
     ) -> Result<Consensus, MembersRefused> {
-        let id = member_ids.get(index).copied().unwrap_or(-1);
+        let id = member_ids.get(place).copied().unwrap_or(-1);
         let (standbys, voters): (Vec<i32>, Vec<i32>) = member_ids
             .iter()
             .partition(|&&member| standby_ids.contains(&member));
@@ -1029,6 +1075,16 @@ impl Cluster {
 
     fn index(&self, member: i32) -> Option<usize> {
         self.world.disks.iter().position(|disk| disk.id == member)
+    }
+
+    /// The place in the members string of the member id that the run at `index` runs
+    /// as.
+    fn place(&self, index: usize) -> usize {
+        self.world
+            .disks
+            .get(index)
+            .and_then(|disk| self.members.iter().position(|&id| id == disk.member))
+            .unwrap_or(index)
     }
 
     fn disk_mut(&mut self, member: i32) -> Option<&mut Disk> {
@@ -1632,7 +1688,7 @@ impl Cluster {
         if let Some(run) = self.world.runs.get_mut(index) {
             *run = run.saturating_add(1);
         }
-        let ids: Vec<i32> = self.world.disks.iter().map(|disk| disk.id).collect();
+        let place = self.place(index);
         let standbys = self.standbys.get(index).cloned().unwrap_or_default();
         let led = self
             .cores
@@ -1640,12 +1696,12 @@ impl Cluster {
             .is_some_and(|core| core.role() == Role::Leader);
         if let (Some(core), Ok(new)) = (
             self.cores.get_mut(index),
-            Self::core(&ids, &standbys, index, self.seed),
+            Self::core(&self.members, &standbys, place, index, self.seed),
         ) {
             *core = new;
         }
         if let Some(disk) = self.world.disks.get_mut(index) {
-            *disk = Disk::empty(member);
+            *disk = Disk::empty_as(member, disk.member, disk.unaddressed_since_ns);
         }
         // Its replays are gone with its recordings. The ones to it end with its
         // subscription, and the member that runs each reads that it stopped, as a
@@ -1694,8 +1750,8 @@ impl Cluster {
         let Some(index) = self.index(member) else {
             return Ok(());
         };
-        let ids: Vec<i32> = self.world.disks.iter().map(|disk| disk.id).collect();
-        let new = Self::core(&ids, standby_ids, index, self.seed)?;
+        let place = self.place(index);
+        let new = Self::core(&self.members, standby_ids, place, index, self.seed)?;
         let led = self
             .cores
             .get(index)
@@ -1807,6 +1863,70 @@ impl Cluster {
     pub fn unstall(&mut self, member: i32) {
         if let Some(disk) = self.disk_mut(member) {
             disk.stalled = false;
+        }
+    }
+
+    /// Starts a second run of member id `member` on a host of its own, on an empty log
+    /// directory, as a host started with another host's line of the members string
+    /// runs (`spec/cluster.md`, "Members and streams"; work item 470), and returns the
+    /// name the other calls take for it, 1,000 above the member id. Its core is the
+    /// member id's, with delays of its own, and its consensus publications have session
+    /// ids of their own. The member id's address stays the first run's, so nothing sent
+    /// to the member id reaches the second run until [`Cluster::move_address`] moves
+    /// it there; what the second run sends reaches its peers, as datagrams from another
+    /// host's address do, and they read it as the member id's. `None` for an id that is
+    /// no member's, or one that has a second run already.
+    pub fn start_twin(&mut self, member: i32) -> Option<i32> {
+        let place = self.members.iter().position(|&id| id == member)?;
+        let name = TWIN.saturating_add(member);
+        if self.index(name).is_some() {
+            return None;
+        }
+        let index = self.world.disks.len();
+        let standbys = self.standbys.get(place).cloned().unwrap_or_default();
+        let core = Self::core(&self.members, &standbys, place, index, self.seed).ok()?;
+        self.cores.push(core);
+        let since = Some(self.world.clock.now_ns);
+        self.world.disks.push(Disk::empty_as(name, member, since));
+        self.world.runs.push(0);
+        self.world.answers_lost.push(false);
+        self.standbys.push(standbys);
+        Some(name)
+    }
+
+    /// Moves the address of the member id that `run` runs as to `run`, a member's name
+    /// or a second run's, as an address that moves from one host to another moves:
+    /// what is sent to the member id from now on reaches `run`, and so does what is in
+    /// flight to it, since a datagram goes where its address is when it arrives. The
+    /// run that held the address hears nothing more and its image of the log goes
+    /// silent, while what it sends still reaches its peers.
+    pub fn move_address(&mut self, run: i32) {
+        let Some(to) = self.index(run) else {
+            return;
+        };
+        let Some(member) = self.world.disks.get(to).map(|disk| disk.member) else {
+            return;
+        };
+        let Some(from) = self.world.to(member) else {
+            return;
+        };
+        if from == to {
+            return;
+        }
+        let now_ns = self.world.clock.now_ns;
+        if let Some(disk) = self.world.disks.get_mut(from) {
+            disk.unaddressed_since_ns = Some(now_ns);
+        }
+        if let Some(disk) = self.world.disks.get_mut(to) {
+            disk.unaddressed_since_ns = None;
+        }
+        self.world.addressed.retain(|&(id, _)| id != member);
+        self.world.addressed.push((member, to));
+        let World { net, held_back, .. } = &mut self.world;
+        for flight in net.iter_mut().chain(held_back.iter_mut()) {
+            if flight.to == from {
+                flight.to = to;
+            }
         }
     }
 
