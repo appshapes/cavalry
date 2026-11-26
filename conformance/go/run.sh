@@ -56,7 +56,8 @@ cargo build --release -p cavalry-ffi --lib
 # itself to it: `linked.Check` (conformance/go/linked) stops one whose value is not the
 # one exported here, as when a `-ldflags` on a `go` line of this file, which replaces the
 # one in GOFLAGS, has taken the value away. What `go env` reports is kept, so that a
-# caller's own flags stay (work item 503).
+# caller's own flags stay, except a caller's `-ldflags`, which this one replaces (work
+# item 503).
 library=$(git hash-object target/release/libcavalry_ffi.a)
 header=$(git hash-object crates/cavalry-ffi/include/cavalry.h)
 CGO_CFLAGS="$(go env CGO_CFLAGS) -DCAVALRY_FFI_HEADER_IS=$header"

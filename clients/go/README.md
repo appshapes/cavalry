@@ -511,10 +511,11 @@ imported with cgo"). With no Go source changed:
 - `go build -o` onto a program that is already there leaves it as it is. Build to a
   new path, or with `-a`.
 
-`go clean -cache` cures all three at the cost of every package's next build.
+`go clean -cache` cures the first two, at the cost of every package's next build,
+and not the third: a program that is already at the path stays.
 `conformance/go/run.sh` names the contents of the library and of the header in its
-build's flags, and each of its programs stops unless it was linked with the library
-just built (`conformance/go/linked`).
+build's flags, and each of its programs that links the library stops unless it was
+linked with the one just built (`conformance/go/linked`).
 
 ```go
 package main
