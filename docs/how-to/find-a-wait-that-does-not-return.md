@@ -18,7 +18,9 @@ lost. It was not seen on Linux, or on macOS 26.3 in a virtual machine, in more t
 - On macOS, `sample`, which the system has. The steps are macOS's, where the fault
   was found. On Linux, `gdb -p <pid> -batch -ex 'thread apply all bt'` prints every
   thread's stack once; take it several times, some seconds apart.
-- For the probe: `rustc`, and this repository's `scripts/sleep-probe.rs`.
+- For the probe: `rustc`, and this repository's `scripts/sleep-probe.rs`. It builds on
+  64-bit macOS and Linux, on x86-64 or Arm, and stops with an error elsewhere, since
+  it declares those systems' C library itself.
 
 ## Steps
 

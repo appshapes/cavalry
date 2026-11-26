@@ -177,6 +177,14 @@ something wakes it, as the Decision sets out, and a test that waits for such a
 thread's work fails at its own deadline or waits without one.
 
 To maintain: the probe, which no gate runs. It is one file, built by `rustc` alone.
+It holds `unsafe`, which `CLAUDE.md` ("Unsafe") permits in `cavalry-shm` and
+`cavalry-ffi` only. The exception is the probe's because the system's own timed
+waits, `nanosleep` with a remainder, `mach_wait_until` and `kevent`, and the signal
+that wakes a stuck sleeper have no safe call in the standard library. The file is
+outside the workspace, so the workspace lint that denies `unsafe` does not see it,
+and no crate of Cavalry builds or links it. Each block carries its `// SAFETY:`
+comment, and the probe builds for 64-bit macOS and Linux only, where its
+declarations of the C library hold. Its header says the same.
 
 Revisit when the second change of work item 338 lands: it names what wakes a held
 thread while the driver runs, and this decision's third paragraph then describes the

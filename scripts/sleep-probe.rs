@@ -7,6 +7,15 @@
 //   rustc -O --edition 2021 scripts/sleep-probe.rs -o target/sleep-probe
 //   target/sleep-probe <seconds> <sleepers> <spinners> [signals]
 //
+// It holds `unsafe`, which CLAUDE.md ("Unsafe") permits in `cavalry-shm` and
+// `cavalry-ffi` only: the system's own timed waits, `nanosleep` with a remainder,
+// `mach_wait_until` and `kevent`, and the signal that wakes a stuck sleeper have no
+// safe call in the standard library. The file is outside the workspace, so the
+// workspace lint that denies `unsafe` does not see it, and no crate of Cavalry
+// builds or links it. Each block says why it is sound in its `// SAFETY:` comment,
+// and it builds for 64-bit macOS and Linux only, where the declarations below hold.
+// ADR 0171, Consequences, records this exception.
+//
 // Each sleeper thread repeats the backoff of Cavalry's idle loops, a wait of 1 µs
 // doubling to 1 ms, starting again from 1 µs every 64 waits as a loop that found work
 // does. The threads are dealt out over the kinds of wait in KINDS: the standard
@@ -36,6 +45,17 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+// The declarations below are the C library's on 64-bit macOS and Linux on x86-64 and
+// Arm, and the probe builds nowhere else. There `time_t` and `long` are 64 bits, so
+// `Timespec` is `struct timespec`; `pthread_t` and a signal handler's address are the
+// width of `usize`; and `SIGUSR1` has the number given below. Every `// SAFETY:`
+// comment that names a declaration leans on this guard.
+#[cfg(not(all(
+    any(target_os = "macos", target_os = "linux"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
+compile_error!("the sleep probe declares the C library of 64-bit macOS and Linux only");
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct Timespec {
@@ -45,10 +65,6 @@ struct Timespec {
 
 extern "C" {
     fn nanosleep(rqtp: *const Timespec, rmtp: *mut Timespec) -> i32;
-    #[cfg(target_os = "macos")]
-    fn __error() -> *mut i32;
-    #[cfg(not(target_os = "macos"))]
-    fn __errno_location() -> *mut i32;
     fn pthread_self() -> usize;
     fn pthread_kill(thread: usize, signal: i32) -> i32;
     fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
@@ -102,15 +118,9 @@ const KINDS: &[&str] = &[SLEEP, NANOSLEEP, PARK, CONDVAR, MACH, KEVENT];
 #[cfg(not(target_os = "macos"))]
 const KINDS: &[&str] = &[SLEEP, NANOSLEEP, PARK, CONDVAR];
 
+/// The calling thread's `errno`, read by the standard library, which needs no `unsafe`.
 fn errno() -> i32 {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        *__error()
-    }
-    #[cfg(not(target_os = "macos"))]
-    unsafe {
-        *__errno_location()
-    }
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
 #[derive(Default)]
@@ -137,6 +147,9 @@ fn nanosleep_checked(sleeper: &Sleeper, park: Duration) {
     let mut ask = Timespec { tv_sec: 0, tv_nsec: park.as_nanos() as i64 };
     loop {
         let mut left = Timespec { tv_sec: -7, tv_nsec: -7 };
+        // SAFETY: `Timespec` is `struct timespec` (the guard above `Timespec`), and both
+        // pointers are to locals of this frame that outlive the call. `nanosleep` reads
+        // `ask` and writes no more than one `struct timespec` to `left`.
         if unsafe { nanosleep(&ask, &mut left) } == 0 {
             return;
         }
@@ -160,12 +173,20 @@ fn nanosleep_checked(sleeper: &Sleeper, park: Duration) {
 }
 
 fn sleeper_loop(kind: &'static str, sleeper: &Sleeper, stop: &AtomicBool, start: Instant) {
+    // SAFETY: `pthread_self` takes nothing, cannot fail, and returns a `pthread_t`, which
+    // is the width of `usize` (the guard above `Timespec`). It is stored before the
+    // first wait's `began`, so a reader that sees `began` with Acquire sees it too.
     sleeper.thread.store(unsafe { pthread_self() } as u64, Ordering::Release);
     let pair = (Mutex::new(()), Condvar::new());
     #[cfg(target_os = "macos")]
     let (timebase, queue) = {
         let mut timebase = Timebase { numer: 1, denom: 1 };
+        // SAFETY: `Timebase` is `mach_timebase_info_data_t`, two `uint32_t` in that
+        // order, and the pointer is to a local that outlives the call.
         unsafe { mach_timebase_info(&mut timebase) };
+        // SAFETY: `kqueue` takes nothing. It returns a new descriptor, or -1, which the
+        // assert below stops on. Nothing closes the descriptor: this thread holds it to
+        // the process's exit, so every `kevent` below is on a live queue.
         let queue = unsafe { kqueue() };
         assert!(queue >= 0, "kqueue failed with errno {}", errno());
         (timebase, queue)
@@ -187,13 +208,25 @@ fn sleeper_loop(kind: &'static str, sleeper: &Sleeper, stop: &AtomicBool, start:
             #[cfg(target_os = "macos")]
             MACH => {
                 let ticks = park.as_nanos() as u64 * timebase.denom as u64 / timebase.numer as u64;
+                // SAFETY: neither call takes a pointer. `mach_absolute_time` cannot fail,
+                // and `mach_wait_until` takes any deadline, one in the past included.
                 unsafe { mach_wait_until(mach_absolute_time() + ticks) };
             }
             #[cfg(target_os = "macos")]
             KEVENT => {
                 let timeout = Timespec { tv_sec: 0, tv_nsec: park.as_nanos() as i64 };
-                let mut event = [0u8; 64];
-                unsafe { kevent(queue, std::ptr::null(), 0, event.as_mut_ptr(), 1, &timeout) };
+                // Room for one `struct kevent`, 32 bytes on 64-bit macOS, with its
+                // alignment of 8; the call is given one slot.
+                let mut event = [0u64; 8];
+                // SAFETY: `queue` is this thread's live kqueue (its `kqueue` call above).
+                // The change list is null with a count of 0, so the call registers
+                // nothing and reads no change. It writes at most one event, into
+                // `event`, which is 64 bytes aligned to 8. `timeout` is `struct
+                // timespec` (the guard above `Timespec`), a local that outlives the
+                // call, with `tv_nsec` under a second since `park` is at most 1 ms.
+                unsafe {
+                    kevent(queue, std::ptr::null(), 0, event.as_mut_ptr().cast::<u8>(), 1, &timeout)
+                };
             }
             _ => unreachable!("a kind of KINDS"),
         }
@@ -215,6 +248,11 @@ fn main() {
     let signals = args.get(4).is_some();
     let start = Instant::now();
     let stop = Arc::new(AtomicBool::new(false));
+    // SAFETY: `nothing` is an `extern "C" fn(i32)`, the type of a signal handler, and
+    // does nothing, so it is safe to run between any two instructions of any thread.
+    // It is installed before the first thread starts, so no `pthread_kill` below can
+    // reach a thread before it, and the signal never takes its default action, which
+    // would end the process.
     unsafe { signal(SIGUSR1, nothing) };
 
     let state: Vec<Arc<Sleeper>> = (0..sleepers).map(|_| Arc::new(Sleeper::default())).collect();
@@ -249,6 +287,11 @@ fn main() {
             while !stop.load(Ordering::Acquire) {
                 let thread = state[at % state.len().max(1)].thread.load(Ordering::Acquire) as usize;
                 if thread != 0 {
+                    // SAFETY: a thread id that is not 0 is one a sleeper stored from its
+                    // own `pthread_self`. Every sleeper's `JoinHandle` stays in `handles`
+                    // until `std::process::exit`, which runs no destructor, so no sleeper
+                    // is joined or detached and its id stays valid, after its thread has
+                    // ended too. Its signal has the handler `nothing` (the start of `main`).
                     unsafe { pthread_kill(thread, SIGUSR1) };
                 }
                 at += 1;
@@ -304,6 +347,12 @@ fn main() {
                     threads[index].unpark();
                     println!("WOKE sleeper-{index} ({kind}) with unpark at {at:.1}s");
                 } else {
+                    // SAFETY: this sleeper is stuck, so it stored `began` after its
+                    // thread id (the start of `sleeper_loop`), and the Acquire of `began`
+                    // above makes the id seen here that of its own `pthread_self`. Its
+                    // `JoinHandle` stays in `handles` until `std::process::exit`, so it is
+                    // never joined or detached and the id stays valid. Its signal has the
+                    // handler `nothing` (the start of `main`).
                     unsafe { pthread_kill(sleeper.thread.load(Ordering::Acquire) as usize, SIGUSR1) };
                     println!("WOKE sleeper-{index} ({kind}) with a signal at {at:.1}s");
                 }
