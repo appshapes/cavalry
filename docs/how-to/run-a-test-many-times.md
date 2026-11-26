@@ -8,6 +8,15 @@ to twenty runs on both runners is
 "Evidence": what the implementation proves goes in its commit messages, the loopback
 tests' twenty runs on both runners among it.
 
+Which runner a test needs, and when: a new or changed test that waits on a clock, a
+socket or another process needs both, before its pull request opens. `ci` then runs
+it on Linux for every change, where a failure that comes and goes stops every pull
+request. On macOS it runs once a week
+([ADR 0170](../decisions/0170-run-the-macos-gates-each-week-and-at-a-release-and-not-for-every-commit.md)),
+so these twenty runs are the only ones on the macOS runner that name the change. A
+laptop's twenty passes do not stand in for them: the runner is a slower machine, and
+a race that the laptop passed 20 of 20 failed there (ADR 0170, "Evidence").
+
 ## Prerequisites
 
 - `cargo`, as for every gate.

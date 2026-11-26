@@ -37,6 +37,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Ask a cluster for a snapshot](how-to/ask-for-a-snapshot.md)
 - [Take a snapshot of a service's state](how-to/take-a-services-snapshot.md)
 - [Schedule a timer in a cluster's service](how-to/schedule-a-services-timer.md)
+- [Read the weekly run of the macOS gates](how-to/read-the-weekly-run-of-the-macos-gates.md)
 
 # Reference
 
@@ -226,4 +227,5 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0167. Have doctor name a leader beside which no service runs](decisions/0167-have-doctor-name-a-leader-beside-which-no-service-runs.md)
 - [0166. Carry the native library inside a client's package, and look for it there first](decisions/0166-carry-the-native-library-inside-a-clients-package-and-look-for-it-there-first.md)
 - [0169. Count a cluster member's failed start, and say what no check holds](decisions/0169-count-a-cluster-members-failed-start-and-say-what-no-check-holds.md)
+- [0170. Run the macOS gates each week and at a release, and not for every commit](decisions/0170-run-the-macos-gates-each-week-and-at-a-release-and-not-for-every-commit.md)
 - [0168. Add a service's counters and its publication to its member when it first opens its member's log](decisions/0168-add-a-services-counters-and-its-publication-to-its-member-when-it-first-opens-its-members-log.md)

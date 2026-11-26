@@ -1,6 +1,6 @@
 # 0073. Run the macOS gates for master and not for pull requests
 
-- **Status:** Accepted
+- **Status:** Superseded by 0170
 - **Date:** 2026-11-11
 - **Invariants affected:** 5, 6; the gates of 1 to 4 run as before on Linux
 - **Supersedes:** none. Amends ADR 0004's Decision, "the checks `gates (linux)` and
