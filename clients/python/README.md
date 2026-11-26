@@ -542,6 +542,31 @@ no checkout and no Rust toolchain. It does not hold the driver: `cavalry run` st
 comes from a checkout. No wheel is published yet. The release publishes one for each
 platform (work item 369), and until then a wheel is built from a checkout.
 
+### Where it runs
+
+| System | The oldest it runs on | The wheel's platform tag |
+| --- | --- | --- |
+| Linux on x86-64 | glibc 2.28 | `manylinux_2_28_x86_64` |
+| macOS on Apple silicon | macOS 11 | `macosx_11_0_arm64` |
+
+glibc is the C library of most Linux systems, and `ldd --version` prints a system's.
+2.28 is the floor of every native file of Cavalry, the oldest glibc one is built for
+and run on
+([ADR 0178](../../docs/decisions/0178-build-every-native-artefact-for-glibc-2-28-in-an-image-of-it-and-run-it-there.md)).
+RHEL 8 and its rebuilds, Debian 10, Ubuntu 20.04 and every later release of the three
+have it or a newer one. The client needs Python 3.9 and pip 20.3, and the Python
+that RHEL 8, Debian 10 and Ubuntu 20.04 install by default is older, 3.6, 3.7 and
+3.8, so on those three it needs a newer Python as well. Amazon Linux 2, RHEL 7 and
+Ubuntu 18.04 have an older glibc, and nothing of Cavalry is built for them: the
+driver does not start there, and the loader's message names `GLIBC_2.28` as not
+found. Alpine Linux has
+another C library, musl, and no wheel is built for it. Linux on 64-bit ARM is built
+and run at the same floor from a checkout, tagged `manylinux_2_28_aarch64`, and CI
+does not run it.
+
+The floor is the C library's. What the driver asks of a Linux kernel, and what holds
+it on an older one, is in ADR 0178.
+
 ### How it is built
 
 Run both commands from the checkout's root:
@@ -585,10 +610,25 @@ system it is loaded on:
 | Library | Tag | Read from |
 | --- | --- | --- |
 | Mach-O, macOS | `macosx_11_0_arm64` | The least macOS version the file says it runs on, in the part of its header named `LC_BUILD_VERSION`, or `LC_VERSION_MIN_MACOSX` in a file from an older linker, and its CPU. A tag has no third number, and from macOS 11 on an installer knows the tags `macosx_<major>_0` alone, so a least version that a tag cannot say is written as the next that it can: 11.3 as `macosx_12_0`. macOS on Apple silicon begins at 11.0, so a library for it is never tagged older. |
-| ELF, Linux | `manylinux_2_34_x86_64` | The newest version of glibc, the C library of most Linux systems, among the versions the file asks its functions in (`GLIBC_2.34` for one that glibc 2.34 added), so the oldest glibc it runs on (PEP 600), and its machine. A version with a third number is written as the next a tag can say: `GLIBC_2.3.4` as `manylinux_2_4`. |
+| ELF, Linux | `manylinux_2_28_x86_64` | The newest version of glibc among the versions the file asks its functions in (`GLIBC_2.28` for one that glibc 2.28 added), so the oldest glibc it runs on (PEP 600), and its machine. No tag is older than the floor, `manylinux_2_28`: a library that asks for less is tagged for the floor, since Cavalry runs its packages on nothing older. A library that asks for more keeps what it asks for, so one linked on Ubuntu 24.04 is tagged `manylinux_2_34`, and `just package` refuses it. A version with a third number is written as the next a tag can say, and `GLIBC_ABI_DT_RELR`, which a link with packed relative relocations asks for, as the glibc that first has it, 2.36. |
 
-The two tags are those of the wheels CI builds, on its macOS and its Linux runner. A
-library the backend has no tag for is refused, with no wheel written: one built
+The two tags are those of the wheels CI builds, on its macOS runner and, in a
+container of glibc 2.28, on its Linux runner. The two build commands above, run on a
+Linux system as they are, link the library against that system's glibc and tag the
+wheel for it or for the floor, whichever is newer. `scripts/floor.sh` runs a command
+in the floor's container, so on any Linux with Docker these give the wheel CI builds
+([Build a native artefact at the floor](../../docs/how-to/build-a-native-artefact-at-the-floor.md)):
+
+```sh
+# ignore: needs Docker, and its first run pulls an image of 556 MB
+scripts/floor.sh cargo build --release -p cavalry-ffi --lib
+scripts/floor.sh python3 clients/python/cavalry_package.py target/package
+```
+
+The wheel is then at `target/floor/package/`, since the container's `target/` is the
+checkout's `target/floor/`.
+
+A library the backend has no tag for is refused, with no wheel written: one built
 for musl, the C library of Alpine Linux, one for Windows, one for a machine other
 than x86-64 and 64-bit ARM, a file that is not a shared library, and one cut short or
 without the part the tag is read from. The message says which, and what to build.
@@ -639,10 +679,15 @@ and prints the same line.
 `just package` does all of this with a driver of its own
 (`scripts/package.sh`, `scripts/package-python.py`), and CI runs it on Linux for every
 pull request and every commit on `master`, and on macOS each week and at a release.
+On Linux it runs in the floor's container, so it needs Docker: the library and the
+driver are linked against glibc 2.28, `scripts/glibc-floor.py` fails either that needs
+a newer one, and the install and the example below run on glibc 2.28 with the
+image's Python 3.12.
 It builds the wheel
 through pip and again with the backend run as a program, and fails unless the two are
 the same bytes. It checks that the wheel holds the library `cargo` built under the tag
-that a second reader gives it, `objdump` on Linux and `otool` on macOS, and on Linux
+that a second reader gives it, `objdump` on Linux, read by `scripts/glibc-floor.py`,
+and `otool` on macOS, and on Linux
 that the library loads no library but glibc's own and `libgcc_s`, which is what a
 `manylinux` tag promises. It installs the wheel into a
 new virtual environment in a directory outside the checkout, and runs the Example's program
