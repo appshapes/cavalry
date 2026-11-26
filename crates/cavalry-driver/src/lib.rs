@@ -11,6 +11,7 @@ mod replayer;
 mod sender;
 mod socket;
 pub mod spec;
+mod watch;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,7 +20,8 @@ use std::thread::JoinHandle;
 
 use cavalry_log::dir::LogDir;
 use cavalry_shm::counters::generated::{
-    LOG_BUFFER_REJECTED_FRAME, RECORDING_SEGMENTS_PURGED, RECORDING_WRITE_FAILED,
+    DRIVER_PARKS_OVERDUE, LOG_BUFFER_REJECTED_FRAME, RECORDING_SEGMENTS_PURGED,
+    RECORDING_WRITE_FAILED,
 };
 use cavalry_shm::spsc;
 
@@ -70,10 +72,55 @@ pub struct Driver {
     replayer: Option<JoinHandle<()>>,
     sender: Option<JoinHandle<()>>,
     receiver: Option<JoinHandle<()>>,
+    /// The watch, where the driver has one: the thread that ends a park of the other
+    /// five that outlived its timeout (ADR 0176).
+    watch: Option<JoinHandle<()>>,
     /// The lock on the directory, held from before the directory was read until the
     /// threads have stopped (`spec/client-protocol.md`, "The driver directory"; ADR
     /// 0079).
     dir_lock: Option<conductor::DirLock>,
+}
+
+/// The five threads' places in the watch's list.
+const CONDUCTOR: usize = 0;
+const RECORDER: usize = 1;
+const REPLAYER: usize = 2;
+const SENDER: usize = 3;
+const RECEIVER: usize = 4;
+
+/// Whether a driver has a watch (ADR 0176).
+#[derive(Clone, Copy, Debug)]
+enum Watching {
+    /// No watch: the five threads store nothing of their parks.
+    Off,
+    /// A watch.
+    On,
+    /// A watch whose first park lasts an hour, which stands for a park whose timeout
+    /// never comes: a test of the conductor's look at the watch.
+    #[cfg(test)]
+    OnAndHeld,
+}
+
+impl Watching {
+    /// A watch where a timed wait has been seen to outlive its timer, which is macOS
+    /// (ADR 0171), and none elsewhere: a thread and two stores for each park would be
+    /// spent for nothing where 381 million waits showed none.
+    const fn for_this_system() -> Self {
+        if cfg!(target_os = "macos") {
+            Watching::On
+        } else {
+            Watching::Off
+        }
+    }
+
+    const fn is_on(self) -> bool {
+        !matches!(self, Watching::Off)
+    }
+
+    #[cfg(test)]
+    fn first_park(self) -> Option<std::time::Duration> {
+        matches!(self, Watching::OnAndHeld).then_some(idle::tests::NEVER)
+    }
 }
 
 impl Driver {
@@ -153,6 +200,24 @@ impl Driver {
         idle: IdleStrategy,
         on_thread_start: ThreadStart,
     ) -> Result<Self, DriverError> {
+        Self::start_watched(
+            dir,
+            log_dir,
+            idle,
+            on_thread_start,
+            Watching::for_this_system(),
+        )
+    }
+
+    /// [`Driver::start_with_threads`] with the watch chosen, which a test chooses and
+    /// every other caller takes from the system it runs on.
+    fn start_watched(
+        dir: impl AsRef<Path>,
+        log_dir: impl AsRef<Path>,
+        idle: IdleStrategy,
+        on_thread_start: ThreadStart,
+        watching: Watching,
+    ) -> Result<Self, DriverError> {
         let dir = dir.as_ref().to_path_buf();
         let log_dir = log_dir.as_ref().to_path_buf();
         let dir_lock = conductor::prepare_dir(&dir)?;
@@ -222,6 +287,22 @@ impl Driver {
         let sender_statics = sender::Statics::new(|id| conductor.counter(id))?;
         let receiver_statics = receiver::Statics::new(|id| conductor.counter(id))?;
         let stop = Arc::new(AtomicBool::new(false));
+        // The watch's side of each thread, when this driver has a watch: where each of
+        // the five says when its park is due, in the order conductor, recorder,
+        // replayer, sender, receiver, and the watch as the conductor sees it.
+        let dues: Option<[Arc<watch::WakeDue>; 5]> = watching
+            .is_on()
+            .then(|| std::array::from_fn(|_| Arc::new(watch::WakeDue::new())));
+        let due = |thread: usize| dues.as_ref().map(|dues| Arc::clone(&dues[thread]));
+        let watched = Arc::new(watch::Watched::default());
+        let parks_overdue = conductor.counter(DRIVER_PARKS_OVERDUE)?;
+        let conductor_watch = match watching.is_on() {
+            true => Some((
+                Arc::clone(&watched),
+                conductor.counter(DRIVER_PARKS_OVERDUE)?,
+            )),
+            false => None,
+        };
         let io = |what: &'static str, path: &PathBuf| {
             let path = path.clone();
             move |source| DriverError::Io { what, path, source }
@@ -232,16 +313,18 @@ impl Driver {
         // same way, since it parks while it holds nothing to send (ADR 0041).
         let flag = Arc::clone(&stop);
         let on_start = Arc::clone(&on_thread_start);
+        let replayer_due = due(REPLAYER);
         let replayer_handle = std::thread::Builder::new()
             .name("cavalry-replayer".to_string())
             .spawn(move || {
                 on_start(DriverThread::Replayer);
-                replayer.run(&flag)
+                replayer.run(&flag, replayer_due)
             })
             .map_err(io("start the replayer thread", &log_dir))?;
         conductor.set_replayer_thread(replayer_handle.thread().clone());
         let flag = Arc::clone(&stop);
         let on_start = Arc::clone(&on_thread_start);
+        let sender_due = due(SENDER);
         let sender_handle = match std::thread::Builder::new()
             .name("cavalry-sender".to_string())
             .spawn(move || {
@@ -254,7 +337,7 @@ impl Driver {
                     sender_statics,
                     idle,
                 );
-                sender.run(&flag)
+                sender.run(&flag, sender_due)
             }) {
             Ok(handle) => handle,
             Err(source) => {
@@ -267,6 +350,7 @@ impl Driver {
         conductor.set_sender_thread(sender_handle.thread().clone());
         let flag = Arc::clone(&stop);
         let on_start = Arc::clone(&on_thread_start);
+        let receiver_due = due(RECEIVER);
         let receiver_handle = match std::thread::Builder::new()
             .name("cavalry-receiver".to_string())
             .spawn(move || {
@@ -279,7 +363,7 @@ impl Driver {
                     receiver_statics,
                     idle,
                 );
-                receiver.run(&flag)
+                receiver.run(&flag, receiver_due)
             }) {
             Ok(handle) => handle,
             Err(source) => {
@@ -294,11 +378,12 @@ impl Driver {
         conductor.set_receiver_thread(receiver_handle.thread().clone());
         let flag = Arc::clone(&stop);
         let on_start = Arc::clone(&on_thread_start);
+        let conductor_due = due(CONDUCTOR);
         let conductor_handle = match std::thread::Builder::new()
             .name("cavalry-conductor".to_string())
             .spawn(move || {
                 on_start(DriverThread::Conductor);
-                conductor.run(&flag)
+                conductor.run(&flag, conductor_due, conductor_watch)
             }) {
             Ok(handle) => handle,
             Err(source) => {
@@ -314,11 +399,12 @@ impl Driver {
         };
         let flag = Arc::clone(&stop);
         let on_start = on_thread_start;
+        let recorder_due = due(RECORDER);
         let recorder_handle = match std::thread::Builder::new()
             .name("cavalry-recorder".to_string())
             .spawn(move || {
                 on_start(DriverThread::Recorder);
-                recorder.run(&flag)
+                recorder.run(&flag, recorder_due)
             }) {
             Ok(handle) => handle,
             Err(source) => {
@@ -334,6 +420,62 @@ impl Driver {
                 return Err(io("start the recorder thread", &log_dir)(source));
             }
         };
+        // The watch last: it needs the five threads, and the conductor learns its
+        // thread through `watched` once it has started. No hook runs on it: it is on no
+        // message's path, and it parks for a tenth of a second at a time.
+        let watch_handle = match dues {
+            None => None,
+            Some(dues) => {
+                let [
+                    conductor_due,
+                    recorder_due,
+                    replayer_due,
+                    sender_due,
+                    receiver_due,
+                ] = dues;
+                let watch = watch::Watch {
+                    threads: vec![
+                        (conductor_handle.thread().clone(), conductor_due),
+                        (recorder_handle.thread().clone(), recorder_due),
+                        (replayer_handle.thread().clone(), replayer_due),
+                        (sender_handle.thread().clone(), sender_due),
+                        (receiver_handle.thread().clone(), receiver_due),
+                    ],
+                    own: Arc::clone(&watched),
+                    parks_overdue,
+                    #[cfg(test)]
+                    first_park: watching.first_park(),
+                };
+                let flag = Arc::clone(&stop);
+                match std::thread::Builder::new()
+                    .name("cavalry-watch".to_string())
+                    .spawn(move || watch.run(&flag))
+                {
+                    Ok(handle) => {
+                        let _ = watched.thread.set(handle.thread().clone());
+                        Some(handle)
+                    }
+                    Err(source) => {
+                        stop.store(true, Ordering::Release);
+                        for handle in [
+                            &conductor_handle,
+                            &recorder_handle,
+                            &replayer_handle,
+                            &sender_handle,
+                            &receiver_handle,
+                        ] {
+                            handle.thread().unpark();
+                        }
+                        let _ = conductor_handle.join();
+                        let _ = recorder_handle.join();
+                        let _ = replayer_handle.join();
+                        let _ = sender_handle.join();
+                        let _ = receiver_handle.join();
+                        return Err(io("start the watch thread", &dir)(source));
+                    }
+                }
+            }
+        };
         Ok(Self {
             dir,
             log_dir,
@@ -343,6 +485,7 @@ impl Driver {
             replayer: Some(replayer_handle),
             sender: Some(sender_handle),
             receiver: Some(receiver_handle),
+            watch: watch_handle,
             dir_lock: Some(dir_lock),
         })
     }
@@ -383,11 +526,16 @@ impl Driver {
             &self.replayer,
             &self.sender,
             &self.receiver,
+            &self.watch,
         ]
         .into_iter()
         .flatten()
         {
             handle.thread().unpark();
+        }
+        // The watch first: it holds the others' threads, and has nothing to flush.
+        if let Some(handle) = self.watch.take() {
+            let _ = handle.join();
         }
         let conductor = match self.conductor.take() {
             Some(handle) => handle.join().map_err(|_| DriverError::Conductor {
@@ -453,45 +601,170 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    /// A stop does not wait on an idling thread's park to time out (ADR 0171). Every
-    /// thread's backoff parks for an hour here, which stands for the park whose timeout
-    /// never comes. The conductor and the recorder idle by their strategy from the
-    /// start, so each is in that park, and `close` returns in time only if the stop
-    /// unparks both. The sender, the receiver and the replayer hold nothing to do in
-    /// this driver and wait in their own park of a second, which would end without an
-    /// unpark: what this test holds of the stop is the conductor's and the recorder's.
-    #[test]
-    fn close_ends_every_thread_though_no_park_would_time_out() {
-        let dir = std::env::temp_dir().join(format!(
-            "cavalry-driver-{}-close-unparks",
-            std::process::id()
-        ));
+    /// A directory of its own for a test of this file.
+    fn test_dir(test: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("cavalry-driver-{}-{test}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let started = Arc::new(AtomicUsize::new(0));
-        let hook: ThreadStart = {
-            let started = Arc::clone(&started);
-            Arc::new(move |_| {
+        dir
+    }
+
+    /// A hook that has each thread of `held` park for an hour where it would park for
+    /// its timeout, which stands for the park whose timeout never comes, and counts
+    /// the threads that have started.
+    fn holding(held: &'static [DriverThread], started: &Arc<AtomicUsize>) -> ThreadStart {
+        let started = Arc::clone(started);
+        Arc::new(move |thread| {
+            if held.contains(&thread) {
                 idle::tests::PARK_FOR_TEST.set(Some(idle::tests::NEVER));
-                started.fetch_add(1, Ordering::AcqRel);
-            })
-        };
-        let driver = Driver::start_with_threads(&dir, dir.join("log"), IdleStrategy::Backoff, hook)
-            .expect("starts");
-        // Each thread has run its hook, and then long enough for the conductor and the
-        // recorder to spend their spins and yields and park.
-        while started.load(Ordering::Acquire) < 5 {
-            std::thread::yield_now();
-        }
-        std::thread::park_timeout(Duration::from_millis(200));
+            }
+            started.fetch_add(1, Ordering::AcqRel);
+        })
+    }
+
+    const ALL: &[DriverThread] = &[
+        DriverThread::Conductor,
+        DriverThread::Recorder,
+        DriverThread::Replayer,
+        DriverThread::Sender,
+        DriverThread::Receiver,
+    ];
+
+    /// `close` on a thread of its own, held to 20 s.
+    fn close_within_bound(driver: Driver, what: &str) {
         let (closed, close) = mpsc::channel();
         let closer = std::thread::spawn(move || {
             let _ = closed.send(driver.close());
         });
-        let result = close
-            .recv_timeout(Duration::from_secs(20))
-            .expect("close returned: a thread that stays parked was not unparked by the stop");
+        let result = close.recv_timeout(Duration::from_secs(20)).expect(what);
         result.expect("closes");
         closer.join().expect("the closing thread ended");
+    }
+
+    /// `driver.parks_overdue` of the driver on `dir`.
+    fn parks_overdue(dir: &Path) -> i64 {
+        cavalry_shm::counters::CountersReader::open(dir)
+            .expect("the counters file opens")
+            .read(DRIVER_PARKS_OVERDUE.record())
+            .expect("a static counter")
+    }
+
+    /// A stop does not wait on any thread's park to time out (ADR 0171). Every park of
+    /// every thread lasts an hour here, which stands for the park whose timeout never
+    /// comes: the backoff's of the conductor and the recorder, and the park of a second
+    /// of a sender, a receiver and a replayer with nothing to do. The driver has no
+    /// watch, so `close` returns in time only if the stop unparks each of the five.
+    #[test]
+    fn close_ends_every_thread_though_no_park_would_time_out() {
+        let dir = test_dir("close-unparks");
+        let started = Arc::new(AtomicUsize::new(0));
+        let driver = Driver::start_watched(
+            &dir,
+            dir.join("log"),
+            IdleStrategy::Backoff,
+            holding(ALL, &started),
+            Watching::Off,
+        )
+        .expect("starts");
+        // Each thread has run its hook, and then long enough for each to park.
+        while started.load(Ordering::Acquire) < 5 {
+            std::thread::yield_now();
+        }
+        std::thread::park_timeout(Duration::from_millis(200));
+        close_within_bound(
+            driver,
+            "close returned: a thread that stays parked was not unparked by the stop",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The watch ends a park that outlived its timeout, of each of the five threads
+    /// (ADR 0176). One driver for each thread, with a watch, in which that thread alone
+    /// parks for an hour where it would park for its timeout. No other thread of it is
+    /// held, so a count in `driver.parks_overdue` is the watch's unpark of that thread:
+    /// 50 ms after a millisecond for the conductor and the recorder, and 50 ms after a
+    /// second for a replayer, a sender and a receiver with nothing to do.
+    #[test]
+    fn the_watch_ends_a_park_that_outlived_its_timeout_for_each_thread() {
+        const EACH: [&[DriverThread]; 5] = [
+            &[DriverThread::Conductor],
+            &[DriverThread::Recorder],
+            &[DriverThread::Replayer],
+            &[DriverThread::Sender],
+            &[DriverThread::Receiver],
+        ];
+        for held in EACH {
+            let dir = test_dir(&format!("watch-{:?}", held[0]));
+            let started = Arc::new(AtomicUsize::new(0));
+            let driver = Driver::start_watched(
+                &dir,
+                dir.join("log"),
+                IdleStrategy::Backoff,
+                holding(held, &started),
+                Watching::On,
+            )
+            .expect("starts");
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while parks_overdue(&dir) < 1 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the watch did not end the park of the {:?}",
+                    held[0]
+                );
+                std::thread::park_timeout(Duration::from_millis(20));
+            }
+            close_within_bound(driver, "close returned");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// The conductor ends the watch's own park when it outlived its timeout (ADR 0176).
+    /// The watch's first park lasts an hour here. No other thread is held, and a watch
+    /// that is parked counts nothing, so a count in `driver.parks_overdue` is the
+    /// conductor's unpark of the watch.
+    #[test]
+    fn the_conductor_ends_the_watchs_park_when_it_outlived_its_timeout() {
+        let dir = test_dir("watch-held");
+        let started = Arc::new(AtomicUsize::new(0));
+        let driver = Driver::start_watched(
+            &dir,
+            dir.join("log"),
+            IdleStrategy::Backoff,
+            holding(&[], &started),
+            Watching::OnAndHeld,
+        )
+        .expect("starts");
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while parks_overdue(&dir) < 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the conductor did not end the watch's park"
+            );
+            std::thread::park_timeout(Duration::from_millis(20));
+        }
+        close_within_bound(driver, "close returned");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A driver without a watch counts nothing and starts no sixth thread: where no
+    /// timed wait has been seen to outlive its timer, the five threads store nothing
+    /// of their parks.
+    #[test]
+    fn a_driver_without_a_watch_counts_no_overdue_park_though_a_thread_is_held() {
+        let dir = test_dir("no-watch");
+        let started = Arc::new(AtomicUsize::new(0));
+        let driver = Driver::start_watched(
+            &dir,
+            dir.join("log"),
+            IdleStrategy::Backoff,
+            holding(&[DriverThread::Recorder], &started),
+            Watching::Off,
+        )
+        .expect("starts");
+        assert!(driver.watch.is_none());
+        std::thread::park_timeout(Duration::from_millis(400));
+        assert_eq!(parks_overdue(&dir), 0);
+        close_within_bound(driver, "close returned");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
