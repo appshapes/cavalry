@@ -144,10 +144,30 @@ fn run_until_led(members: &mut [Member]) {
     members.swap(0, leader);
 }
 
+/// Whether every member but the one at `late` leads, or has left canvass behind a
+/// leader: voted for it or taken it. A member that holds nothing takes a leader only
+/// once it has voted it in or heard every voter (ADR 0145, ADR 0174), so a member
+/// still in canvass may wait for a report of the one held still, which a member that
+/// has taken its leader sends no more: the two could then close nothing.
+fn the_others_follow(members: &[Member], late: usize) -> bool {
+    members.iter().enumerate().all(|(index, m)| {
+        index == late
+            || m.module.role() == Role::Leader
+            || !matches!(
+                m.module.election_state(),
+                ElectionState::Init
+                    | ElectionState::Canvass
+                    | ElectionState::Nominate
+                    | ElectionState::CandidateBallot
+            )
+    })
+}
+
 /// As [`run_until_led`], with one follower made to join the log late, as
 /// `tests/cluster.rs` makes one on every run of its tests (ADR 0104, Evidence). The
-/// first member found in follower log init has taken the leader's term at position 0
-/// and has not yet subscribed to the leader's log. It runs no duty cycle until the
+/// first member found in follower log init, once the third has voted for the leader or
+/// taken it ([`the_others_follow`]), has taken the leader's term at position 0 and has
+/// not yet subscribed to the leader's log. It runs no duty cycle until the
 /// other two have closed their elections and hold the term's first entry. Its image
 /// of the log then joins past its append position: it fails its election and catches
 /// up in the next, and its log is then in more than one recording, which its
@@ -157,7 +177,8 @@ fn run_until_led_with_a_late_follower(members: &mut [Member]) -> i32 {
     run_until(members, "a member took a leader's term", |members| {
         late = members
             .iter()
-            .position(|m| m.module.election_state() == ElectionState::FollowerLogInit);
+            .position(|m| m.module.election_state() == ElectionState::FollowerLogInit)
+            .filter(|&late| the_others_follow(members, late));
         late.is_some()
     });
     let late = late.expect("a member in follower log init");
