@@ -44,6 +44,11 @@ if ! docker version --format '{{.Server.Version}}' >/dev/null 2>&1; then
 fi
 
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
+case "$root" in
+    *:*)
+        echo "floor: the checkout's path, $root, has a colon in it, which docker reads as the end of a path to mount: move the checkout and run this again; $HELP" >&2
+        exit 1 ;;
+esac
 mkdir -p "$root/target/floor"
 
 # The toolchain. On Linux it is the host's own, at its own paths: the same compiler
@@ -67,8 +72,10 @@ else
 fi
 
 # /dev/shm of a container is 64 MiB unless it is asked for, and a driver's directory is
-# there. HOME is a directory any user of the container may write.
-exec docker run --rm --shm-size=1g \
+# there. HOME is a directory any user of the container may write. --init puts a small
+# program at the container's process 1 that passes signals on, so Ctrl-C and a
+# cancelled run end the command: a command that is itself process 1 ignores them.
+exec docker run --rm --init --shm-size=1g \
     "${arguments[@]}" \
     -v "$root:$root" -v "$root/target/floor:$root/target" -w "$root" \
     -e HOME=/tmp -e CAVALRY_AT_FLOOR="$FLOOR" -e "CAVALRY_FLOOR_CARGO_BIN=$cargo_home/bin" \

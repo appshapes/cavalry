@@ -225,8 +225,16 @@ class PlatformTag(unittest.TestCase):
         self.assertEqual(backend.library_platform(alone, "lib")[1], "manylinux_2_36_aarch64")
         newer = elf(needs=(("libc.so.6", ("GLIBC_ABI_DT_RELR", "GLIBC_2.38")),))
         self.assertEqual(backend.library_platform(newer, "lib")[1], "manylinux_2_38_x86_64")
-        # Another name that begins the same way is no glibc version, as before.
-        other = elf(needs=(("libc.so.6", ("GLIBC_ABI_OTHER", "GLIBC_PRIVATE", "GLIBC_2.30")),))
+        # Another name of glibc's with no number is one the backend cannot place: it
+        # refuses the library, and does not tag it as if the name asked for nothing.
+        for name in ("GLIBC_ABI_OTHER", "GLIBC_PRIVATE"):
+            with self.assertRaises(backend.PackageError) as raised:
+                backend.library_platform(elf(needs=(("libc.so.6", (name, "GLIBC_2.30")),)), "target/lib")
+            self.assertIn(f"target/lib asks its C library for {name}, a version name of glibc with no number",
+                          str(raised.exception))
+            self.assertIn("clients/python/README.md#the-package", str(raised.exception))
+        # A name of another library that begins otherwise is no glibc version, as before.
+        other = elf(needs=(("libstdc++.so.6", ("GLIBCXX_3.4",)), ("libc.so.6", ("GLIBC_2.30",))))
         self.assertEqual(backend.library_platform(other, "lib")[1], "manylinux_2_30_x86_64")
 
     def test_an_elf_library_with_no_tag_is_refused(self):

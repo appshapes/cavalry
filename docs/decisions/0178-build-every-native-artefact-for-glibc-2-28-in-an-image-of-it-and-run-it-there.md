@@ -34,10 +34,12 @@ way to build at it before it starts.
 **The floor of every native artefact for Linux is glibc 2.28, and each is linked in
 an image of glibc 2.28 and run there by a gate.**
 
-- **The floor.** glibc 2.28, on x86-64. RHEL 8 and its rebuilds, Debian 10 and
-  Ubuntu 20.04 have it or a newer one, and so has every later release of the three.
-  Amazon Linux 2 (2.26), RHEL 7 (2.17) and Ubuntu 18.04 (2.27) are below it, and no
-  artefact of Cavalry is built for them.
+- **The floor.** glibc 2.28, on x86-64. It is RHEL 8's, which its maker supports
+  until 2029: the oldest glibc of a system still in its maker's standard support.
+  Its rebuilds have it, and so have Debian 10 and Ubuntu 20.04 and every later
+  release of the three, which come with the floor at no cost. Amazon Linux 2
+  (2.26), RHEL 7 (2.17) and Ubuntu 18.04 (2.27) are below it, and no artefact of
+  Cavalry is built for them.
 - **Where an artefact is built.** In a container of the image `manylinux_2_28` that
   the Python packaging project publishes: AlmaLinux 8, a rebuild of RHEL 8, with
   glibc 2.28, a C compiler and Python. `scripts/floor.sh <command>` runs a command
@@ -50,8 +52,9 @@ an image of glibc 2.28 and run there by a gate.**
 - **The gate.** `just package`, a step of `gates (linux)`, runs whole in that
   container on Linux. It builds the library and the binary there.
   `scripts/glibc-floor.py` then fails either file that asks for a glibc newer than
-  the floor, counting `GLIBC_ABI_DT_RELR` as 2.36, or that loads a library other than
-  glibc's own and `libgcc_s`. The Python client's wheel is built from that library,
+  the floor, counting `GLIBC_ABI_DT_RELR` as 2.36, that asks for a glibc name with
+  no number that it cannot place, or that loads a library other than glibc's own
+  and `libgcc_s`. The Python client's wheel is built from that library,
   installed into a new environment and run against that driver, as ADR 0166 has it,
   now on glibc 2.28.
 - **The name an artefact carries.** An artefact names its system in the words of
@@ -80,12 +83,16 @@ it.** What Cavalry asks of a Linux kernel:
 | --- | --- | --- | --- |
 | What Rust's standard library asks: threads and their parking, files, sockets, clocks | every crate | Linux 3.2, Rust's floor | Rust does not run |
 | The populate advice, `MADV_POPULATE_READ` and `MADV_POPULATE_WRITE` | `cavalry-shm`, `pretouch.rs`: every mapping is made resident when it is made (ADR 0027) | Linux 5.14 | The advice fails with `EINVAL`, and the pages are touched in a loop. A driver runs. A driver directory with no room then kills the driver with a bus error, where the advice gives a refusal (work item 497) |
-| UDP sockets: `recvmsg`, `MSG_DONTWAIT`, `SO_RCVBUF`, `SO_SNDBUF` | `cavalry-driver`, `cavalry-client`, through `nix` | before Linux 3.2 | none known |
+| UDP sockets: `recvmmsg`, `sendmmsg`, `sendmsg`, `MSG_DONTWAIT`, `SO_RCVBUF`, `SO_SNDBUF` | `cavalry-driver`, `socket.rs`, through `nix`; `cavalry-client` | Linux 3.0 for `sendmmsg`, older for the rest | none known |
+| Signal handlers for `SIGINT`, `SIGTERM` and `SIGHUP` | the `cavalry` binary, through `ctrlc` | before Linux 3.2 | none known |
+| A memory file system at `/dev/shm`, for the default driver directory | `cavalry-client`, `default_dir` | before Linux 3.2 | with no `/dev/shm` the directory is in the temporary directory, and `doctor` warns with `host-shm` |
 | Shared file mappings, `pread`, `pwrite`, `fsync`, `ftruncate`, `flock` | `cavalry-shm`, `cavalry-log`, through `memmap2` and the standard library | before Linux 3.2 | none known |
 | Files of `/proc` and `/sys` that `doctor` reads | `cavalry-control` | each its own | `doctor` leaves out the check whose file is absent |
 
-The list is from a search of the crates for every call through `nix`, `memmap2` and
-`libc`; the crates make no system call of their own. One line of it is above Rust's
+The list is from a search of the crates for every call through `nix`, `memmap2`,
+`libc` and `ctrlc`; the crates make no system call of their own. Work item 497's own
+read is making the same list with files and lines, and is the one to trust where
+the two differ. One line of it is above Rust's
 floor, and it is on the floor's own systems: RHEL 8 ships Linux 4.18, Debian 10
 ships 4.19, Debian 11 ships 5.10, and Ubuntu 20.04 ships 5.4, or 5.15 with its
 newer kernel installed. A container shares its host's kernel, 6.6 on CI's runner, so
@@ -99,16 +106,18 @@ is the C library's, and no page names a kernel.
 
 - **Stay at glibc 2.34, what a link on the runner gives.** It costs nothing and
   adds no image. It lost because it leaves out RHEL 8, which its maker supports
-  until 2029, and with it Ubuntu 20.04 and Debian 11: the systems an operator of a
-  message transport is most likely to run today.
+  until 2029 and which an operator of a message transport is likely to run. The
+  argument is RHEL 8's alone: Ubuntu 20.04 and Debian 11, which 2.34 leaves out
+  too, passed the end of their makers' standard support in May 2025 and August
+  2026, and Debian 10 in June 2024.
 - **glibc 2.17, in the image `manylinux2014`.** Measured: the same commit builds
   there and asks for 2.17 alone. It would add Amazon Linux 2, RHEL 7 and Ubuntu
-  18.04. It lost on four counts. The three have passed the end of their makers'
-  standard support, in June 2026, June 2024 and May 2023. The image is built on
-  CentOS 7, which has ended too. 2.17 is Rust's own floor, with no room under it:
-  Rust raised that floor in 2022, and the next raise would break the promise from
-  outside. And the runtimes two of the clients need stop higher: Node's own Linux
-  binaries have needed glibc 2.28 since Node 18.
+  18.04. It lost on four counts. No system between 2.17 and 2.28 is in its maker's
+  standard support: the three passed its end in June 2026, June 2024 and May 2023,
+  where RHEL 8 has until 2029. The image is built on CentOS 7, which has ended too.
+  2.17 is Rust's own floor, with no room under it: Rust raised that floor in 2022,
+  and the next raise would break the promise from outside. And one client's runtime
+  stops higher: Node's own Linux binaries have needed glibc 2.28 since Node 18.
 - **A linker that targets an older glibc, such as `cargo zigbuild`, with no
   image.** Not tried. It lost on what it could show: such a link is against lists of
   symbols and no system, so nothing could run at the floor, and the gate would read
@@ -149,17 +158,23 @@ is the C library's, and no page names a kernel.
   2.28), Ubuntu 20.04 and Debian 11 (2.31), AlmaLinux 9 and Amazon Linux 2023
   (2.34), Ubuntu 22.04 (2.35), Debian 12 (2.36), Ubuntu 24.04 (2.39), Debian 13
   (2.41) and Fedora 43 (2.42). It did not start in Amazon Linux 2 (2.26), Ubuntu
-  18.04 (2.27) and CentOS 7 (2.17): the loader said ``version `GLIBC_2.28' not
-  found``, and on x86-64 then `symbol statx, version GLIBC_2.28 not defined`. Each
-  container ran on its host's kernel, 6.6 on the runner and 7.0 on the laptop.
+  18.04 (2.27) and CentOS 7 (2.17). On 64-bit ARM the loader said ``version
+  `GLIBC_2.28' not found``. On x86-64, where the link marks that name as asked of
+  weak symbols alone, it said ``weak version `GLIBC_2.28' not found`` and then
+  failed at `symbol statx, version GLIBC_2.28 not defined`. The library was read
+  with `ldd` in those three, which printed the same first line, and was not loaded
+  by a program there; no pip was run there. Each container ran on its host's
+  kernel, 6.6 on the runner and 7.0 on the laptop.
 - **The kernels**, from each distribution's own package index on 2026-11-26:
   AlmaLinux 8 `4.18.0-553`, Debian 11 `5.10.262`, Ubuntu 20.04 `5.4.0` and, as
   `linux-image-generic-hwe-20.04`, `5.15.0`; AlmaLinux 9 `5.14.0`.
 - **The tests.** `scripts/glibc-floor-test.py`: the check's reading of what
-  `objdump` prints, a file above the floor, packed relative relocations, a library
-  the floor may lack, and that the check, the image's name and the backend's tag
-  name one floor. `clients/package-test.py`: a tag is never below the floor and
-  never lowered by it, and `GLIBC_ABI_DT_RELR` is 2.36.
+  `objdump` prints, a file above the floor, packed relative relocations, a glibc
+  name it cannot place, a library the floor may lack, its exit status over several
+  files, and that the check, the image's name and the backend's tag name one
+  floor. `clients/package-test.py`: a tag is never below the floor and never
+  lowered by it, `GLIBC_ABI_DT_RELR` is 2.36, and a glibc name the backend cannot
+  place refuses the library.
 - **Outside facts**: Rust's floor for the target, Linux 3.2 and glibc 2.17, from its
   platform support page, and its raise from 2.11 in Rust 1.64; Node 18's release
   notes, "glibc 2.28 or later"; Amazon Linux 2's end of support, 2026-06-30, from its
@@ -174,8 +189,9 @@ machine that built it.
 
 Harder:
 
-- `gates (linux)`, the required check, now pulls an image of 556 MB from `quay.io`
-  in every run. It took 10 s. A registry that does not answer fails the check for
+- `gates (linux)`, the required check, now pulls an image from `quay.io` in every
+  run: 556 MB by the sizes the registry lists for its layers, 1.6 GB on the
+  runner's disk. It took 10 s. A registry that does not answer fails the check for
   every pull request until it does.
 - `just package` on Linux needs Docker. A contributor without it gets a message
   that says so and what to install.

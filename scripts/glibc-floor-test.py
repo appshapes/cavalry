@@ -5,7 +5,9 @@ listings are objdump 2.41's of the library built at the floor, cut down, with ve
 names changed where a test says so. Python 3.9 standard library only (ADR 0003).
 """
 
+import contextlib
 import importlib.util
+import io
 import os
 import re
 import sys
@@ -28,7 +30,10 @@ def listing(versions=("GLIBC_2.28", "GLIBC_2.25", "GLIBC_2.18", "GLIBC_2.17"),
             libraries=("libgcc_s.so.1", "libpthread.so.0", "libdl.so.2", "libc.so.6")):
     """What `objdump -p` prints of a library, with these version names asked of libc."""
     needed = "".join(f"  NEEDED               {library}\n" for library in libraries)
-    asked = "".join(f"    0x0696918{index} 0x00 {index + 2:02} {version}\n" for index, version in enumerate(versions))
+    # The second number is 0x02 for a name asked of weak symbols alone, as the x86-64
+    # link writes `GLIBC_2.28` and `GLIBC_2.18`; here every other entry has it.
+    asked = "".join(f"    0x0696918{index} 0x{2 * (index % 2 == 0):02x} {index + 2:02} {version}\n"
+                    for index, version in enumerate(versions))
     return ("\ntarget/release/libcavalry_ffi.so:     file format elf64-littleaarch64\n\n"
             "Program Header:\n    LOAD off    0x0000000000000000 vaddr 0x0000000000000000 paddr 0x0000000000000000 align 2**16\n\n"
             "Dynamic Section:\n" + needed +
@@ -59,9 +64,13 @@ class Reading(unittest.TestCase):
     def test_a_version_name_is_a_glibc_or_none(self):
         for name, version in (("GLIBC_2.28", (2, 28)), ("GLIBC_2.2.5", (2, 3)), ("GLIBC_2.3.4", (2, 4)),
                               ("GLIBC_2.17.0", (2, 17)), ("GLIBC_2.4", (2, 4)), ("GLIBC_ABI_DT_RELR", (2, 36)),
-                              ("GCC_3.0", None), ("GLIBC_PRIVATE", None), ("GLIBC_ABI_OTHER", None),
-                              ("XGLIBC_2.99", None)):
+                              ("GCC_3.0", None), ("XGLIBC_2.99", None), ("GLIBCXX_3.4", None)):
             self.assertEqual(floor.glibc(name), version, name)
+        # A name of glibc's that the check cannot place does not pass as no version.
+        for name in ("GLIBC_PRIVATE", "GLIBC_ABI_OTHER", "GLIBC_2", "GLIBC_"):
+            with self.assertRaises(floor.FloorError, msg=name) as raised:
+                floor.glibc(name)
+            self.assertIn(f"the version name {name} is glibc's and has no number", str(raised.exception))
         # Versions compare as numbers: 2.4 is below 2.17.
         self.assertEqual(floor.newest(["GLIBC_2.4", "GLIBC_2.17", "GCC_9.0"]), (2, 17))
         self.assertIsNone(floor.newest(["GCC_3.0"]))
@@ -105,8 +114,74 @@ class Checking(unittest.TestCase):
             floor.check("lib", "Dynamic Section:\n  NEEDED               libc.musl-x86_64.so.1\n")
         self.assertIn("asks for no GLIBC version", str(raised.exception))
 
+    def test_a_glibc_name_the_check_cannot_place_fails_the_file(self):
+        for name in ("GLIBC_PRIVATE", "GLIBC_ABI_GNU2_TLS"):
+            with self.assertRaises(floor.FloorError) as raised:
+                floor.check("target/release/cavalry", listing(versions=("GLIBC_2.17", name)))
+            said = str(raised.exception)
+            self.assertIn(f"target/release/cavalry: the version name {name} is glibc's", said)
+            self.assertIn("add it to NAMES", said)
+
     def test_the_program_fails_for_any_file_that_fails_and_for_none(self):
-        self.assertEqual(floor.main([]), 2)
+        """The exit status is the gate: 0 when every file holds the floor, 1 when any
+        does not, whichever it is among them, and every file is read all the same."""
+        files = {"good-one": listing(), "good-two": listing(), "bad": listing(versions=("GLIBC_2.34",)),
+                 "static": "Dynamic Section:\n"}
+        asked = []
+
+        def objdump(path, flag):
+            asked.append((path, flag))
+            if flag == "-T" and path == "static":
+                raise floor.FloorError("not a dynamic object")
+            return files[path] if flag == "-p" else SYMBOLS
+
+        def status(arguments):
+            asked.clear()
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed):
+                return floor.main(arguments), printed.getvalue()
+
+        real = floor.objdump, floor.shutil.which
+        floor.objdump, floor.shutil.which = objdump, lambda name: "/usr/bin/" + name
+        try:
+            self.assertEqual(status([])[0], 2)
+            exit_status, printed = status(["good-one", "good-two"])
+            self.assertEqual(exit_status, 0)
+            self.assertEqual(printed.count("needs glibc 2.28 at most"), 2)
+            for order in (["bad"], ["good-one", "bad"], ["bad", "good-one"], ["good-one", "bad", "good-two"]):
+                exit_status, printed = status(order)
+                self.assertEqual(exit_status, 1, order)
+                self.assertEqual([path for path, flag in asked if flag == "-p"], order)
+                self.assertEqual(printed.count("glibc-floor: bad needs glibc 2.34"), 1)
+                self.assertEqual(printed.count("needs glibc 2.28 at most"), len(order) - 1)
+            # A static program has no dynamic symbols to list, and fails as a file
+            # that asks nothing of glibc, not as one objdump could not read.
+            exit_status, printed = status(["static"])
+            self.assertEqual(exit_status, 1)
+            self.assertIn("static asks for no GLIBC version", printed)
+            floor.shutil.which = lambda name: None
+            exit_status, printed = status(["good-one"])
+            self.assertEqual(exit_status, 1)
+            self.assertIn("objdump is not installed", printed)
+        finally:
+            floor.objdump, floor.shutil.which = real
+
+    def test_objdump_is_read_in_the_c_locale(self):
+        """The heading "Version References:" is objdump's, and another locale translates
+        it: the file would then read as one that asks for no glibc."""
+        seen = {}
+
+        def run(arguments, **options):
+            seen.update(options["env"])
+            return type("Result", (), {"returncode": 0, "stdout": listing(), "stderr": ""})()
+
+        real = floor.subprocess.run
+        floor.subprocess.run = run
+        try:
+            floor.objdump("lib", "-p")
+        finally:
+            floor.subprocess.run = real
+        self.assertEqual((seen["LC_ALL"], seen["LANGUAGE"]), ("C", "C"))
 
 
 class OneFloor(unittest.TestCase):

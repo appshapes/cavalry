@@ -23,7 +23,10 @@ cd "$(dirname "$0")/.."
 # On Linux the whole of this runs at the floor, glibc 2.28, in the container that
 # scripts/floor.sh starts: what is built below is linked there, and the package is
 # installed and run there (ADR 0178). On macOS it runs as it is.
-if [ "$(uname -s)" = Linux ] && [ -z "${CAVALRY_AT_FLOOR:-}" ]; then
+# scripts/floor.sh sets CAVALRY_AT_FLOOR to the floor's glibc, and this system is the
+# floor's container when that is the glibc it has: a variable left in a shell does not
+# keep the run on the host.
+if [ "$(uname -s)" = Linux ] && [ "${CAVALRY_AT_FLOOR:-}" != "$(ldd --version 2>/dev/null | sed -n '1s/.* //p')" ]; then
     exec scripts/floor.sh bash scripts/package.sh
 fi
 
@@ -47,7 +50,7 @@ cargo build --release -p cavalry-ffi --lib
 # The floor's check (ADR 0178): neither file may need a newer glibc than the floor's,
 # nor load a library a system of the floor may lack. Here it is true by how they were
 # built; the check is what fails when the image, the toolchain or a dependency moves.
-if [ -n "${CAVALRY_AT_FLOOR:-}" ]; then
+if [ "$(uname -s)" = Linux ]; then
     python3 scripts/glibc-floor.py target/release/libcavalry_ffi.so target/release/cavalry
 fi
 

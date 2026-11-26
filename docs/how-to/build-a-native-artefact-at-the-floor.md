@@ -24,8 +24,9 @@ Linux for everything it builds.
   toolchain, at the host's paths. On a Mac the host's toolchain cannot run in a Linux
   container, so the first run installs one into a Docker volume named
   `cavalry-floor-toolchain`, which takes about a minute, once.
-- A connection to `quay.io` for the first run, which pulls the image: 556 MB to
-  download on x86-64, 2.4 GB on disk.
+- A connection to `quay.io` for the first run, which pulls the image. On x86-64 it
+  is 556 MB to download, by the sizes the registry lists for its layers, and 1.6 GB
+  on disk, as `docker image inspect` reports it.
 - A checkout of this repository. Every command below runs at its root.
 
 ## Steps
@@ -38,7 +39,8 @@ Linux for everything it builds.
    ```
 
    The first line is the script's own. It names the glibc, the compiler, the C
-   compiler, the Python and the kernel the command runs with:
+   compiler, the Python and the kernel the command runs with. These lines, and those
+   of step 3, are CI's Linux runner's, on x86-64:
 
    ```text
    floor: glibc 2.28, rustc 1.100.0 (0ef1bc386 2026-11-09), cc (GCC) 14.2.1 20250110 (Red Hat 14.2.1-11), Python 3.12.16, kernel 6.6.141
@@ -72,9 +74,11 @@ Linux for everything it builds.
    You will see one line for each file:
 
    ```text
-   glibc-floor: target/floor/release/libcavalry_ffi.so needs glibc 2.28 at most, and the floor is 2.28; it loads libgcc_s.so.1, libpthread.so.0, libdl.so.2, libc.so.6
-   glibc-floor: target/floor/release/cavalry needs glibc 2.28 at most, and the floor is 2.28; it loads libgcc_s.so.1, libpthread.so.0, libdl.so.2, libc.so.6
+   glibc-floor: target/floor/release/libcavalry_ffi.so needs glibc 2.28 at most, and the floor is 2.28; it loads libgcc_s.so.1, libpthread.so.0, libdl.so.2, libc.so.6, ld-linux-x86-64.so.2
+   glibc-floor: target/floor/release/cavalry needs glibc 2.28 at most, and the floor is 2.28; it loads libgcc_s.so.1, libpthread.so.0, libdl.so.2, libc.so.6, ld-linux-x86-64.so.2
    ```
+
+   On 64-bit ARM the list ends at `libc.so.6`.
 
    The check needs `objdump`, which the package `binutils` holds. On a Mac, run it
    in the container, where the files are under `target/`:
@@ -125,6 +129,11 @@ Linux for everything it builds.
   `target/release/` and not from `target/floor/release/`. Build it with
   `scripts/floor.sh` as in step 2. If the file was built at the floor, the image has
   moved: the first line of `scripts/floor.sh`'s output names its glibc.
+- **`glibc-floor: ... the version name GLIBC_... is glibc's and has no number`.** The
+  file asks its C library for a name the check cannot place, such as
+  `GLIBC_PRIVATE`, which one build of glibc alone has. A file built at the floor
+  asks for none. If a newer toolchain adds a name for a feature of the loader, the
+  message says where to add it, with the glibc that first has it.
 - **`glibc-floor: ... loads lib<name>.so`.** A dependency links a system library
   that a system of the floor may not have. Link it statically, or leave the
   dependency out.
@@ -137,7 +146,15 @@ Linux for everything it builds.
   installs today's.
 - **`cargo` in the container cannot write under `target/`.** `target/floor/` was
   made by another user, as a run of the container as root makes it. Remove
-  `target/floor/` as that user and run the command again.
+  `target/floor/` as that user and run the command again. With rootless Docker, or
+  with Podman in Docker's place, the container's user is not yours whatever the
+  script asks for, and the script does not work: use Docker Engine with its daemon,
+  as CI does.
+- **`floor: the checkout's path ... has a colon in it`.** Docker reads a colon as
+  the end of a path to mount. Move the checkout to a path without one.
+- **Ctrl-C does not stop a run.** It does, through the small program the script
+  puts at the container's process 1. If a container is left all the same, `docker
+  ps` lists it and `docker stop <its id>` ends it.
 - **The floor's files run in the container and the driver fails on an old system
   all the same.** The floor is the C library's. What Cavalry asks of a kernel is in
   ADR 0178, with what holds it.

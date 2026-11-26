@@ -11,7 +11,8 @@ things from it:
 - The version names it asks of the libraries it loads, such as `GLIBC_2.28` for a
   function glibc 2.28 added. The newest of them is the oldest glibc the file loads on.
   `GLIBC_ABI_DT_RELR`, which a link with packed relative relocations asks for, has no
-  number in it and stands for glibc 2.36.
+  number in it and stands for glibc 2.36. Any other `GLIBC_` name with no number, such
+  as `GLIBC_PRIVATE`, fails the file: the check cannot say which glibc has it.
 - The libraries it loads. A system of the floor is sure to have glibc's own and
   `libgcc_s`, and no other.
 
@@ -22,6 +23,7 @@ it built, and `scripts/package-python.py` takes its second reading of the wheel'
 from here. Python 3.9 standard library only (ADR 0003).
 """
 
+import os
 import re
 import shutil
 import subprocess
@@ -47,12 +49,21 @@ class FloorError(Exception):
 
 def glibc(name):
     """The glibc a version name stands for, as (major, minor), or None for a name that
-    is no glibc version. A third number, `GLIBC_2.3.4`, is the next minor: a file that
-    needs 2.3.4 does not load on 2.3."""
+    is another library's, such as `GCC_3.0`. A third number, `GLIBC_2.3.4`, is the
+    next minor: a file that needs 2.3.4 does not load on 2.3. A `GLIBC_` name that has
+    no number and is not in NAMES is a FloorError: glibc gives such names to what one
+    build of it alone has (`GLIBC_PRIVATE`) and to features of its loader, and a name
+    this check cannot place must not pass as if it asked for nothing."""
     if name in NAMES:
         return NAMES[name]
     version = re.fullmatch(r"GLIBC_(\d+)\.(\d+)(?:\.(\d+))?", name)
     if version is None:
+        if name.startswith("GLIBC_"):
+            raise FloorError(f"the version name {name} is glibc's and has no number, and this check does not know "
+                             f"which glibc first has it: a file that asks for it is not shown to load at the "
+                             f"floor. If the name is a feature of the loader, add it to NAMES in "
+                             f"scripts/glibc-floor.py and to _GLIBC_NAMES in clients/generate_python_package.py "
+                             f"with the glibc that first has it; {HELP}")
         return None
     return int(version.group(1)), int(version.group(2)) + (1 if int(version.group(3) or 0) else 0)
 
@@ -65,7 +76,10 @@ def read(listing):
     references = re.search(r"^Version References:\n((?:[ \t]+.*\n?)*)", listing, flags=re.M)
     if references is not None:
         for line in references.group(1).splitlines():
-            # `    0x06969194 0x00 03 GLIBC_2.28`; a "required from libc.so.6:" line has no such shape.
+            # `    0x06969194 0x00 03 GLIBC_2.28`, the second number 0x02 for a name asked
+            # of weak symbols alone, which counts as any other: the loader of an older
+            # glibc refused the binary for one (ADR 0178, Evidence). A "required from
+            # libc.so.6:" line has no such shape.
             entry = re.fullmatch(r"\s+0x[0-9a-f]+\s+0x[0-9a-f]+\s+\d+\s+(\S+)", line)
             if entry is not None:
                 versions.append(entry.group(1))
@@ -84,7 +98,10 @@ def check(path, listing, symbols=""):
     not. `listing` is `objdump -p`'s output and `symbols` `objdump -T`'s, which names the
     functions in the message."""
     libraries, versions = read(listing)
-    needs = newest(versions)
+    try:
+        needs = newest(versions)
+    except FloorError as error:
+        raise FloorError(f"{path}: {error}") from None
     if needs is None:
         raise FloorError(f"{path} asks for no GLIBC version, so it was not linked against glibc, and the floor "
                          f"is glibc's: build it for a `-linux-gnu` target with scripts/floor.sh; {HELP}")
@@ -107,8 +124,11 @@ def check(path, listing, symbols=""):
 
 
 def objdump(path, flag):
+    """What `objdump <flag> <path>` prints, in the C locale: its headings are read here,
+    and another locale translates them."""
     try:
-        result = subprocess.run(["objdump", flag, path], capture_output=True, text=True, timeout=120)
+        result = subprocess.run(["objdump", flag, path], capture_output=True, text=True, timeout=120,
+                                env=dict(os.environ, LC_ALL="C", LANGUAGE="C"))
     except subprocess.TimeoutExpired:
         raise FloorError(f"`objdump {flag} {path}` did not finish in 120 s") from None
     if result.returncode != 0:
@@ -128,7 +148,14 @@ def main(arguments):
     failed = False
     for path in arguments:
         try:
-            print(check(path, objdump(path, "-p"), objdump(path, "-T")))
+            listing = objdump(path, "-p")
+            try:
+                # The functions' names are for the message alone, and a file with no
+                # dynamic symbols, a static program, has none to give.
+                symbols = objdump(path, "-T")
+            except FloorError:
+                symbols = ""
+            print(check(path, listing, symbols))
         except FloorError as error:
             print(f"glibc-floor: {error}", file=sys.stderr)
             failed = True

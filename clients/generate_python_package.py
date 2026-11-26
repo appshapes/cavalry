@@ -169,7 +169,8 @@ def _elf_platform(data, path):
     and the floor, 2.28, for a library that asks for less (ADR 0178). A
     version with a third number, `GLIBC_2.3.4`, is written as the next a tag can say,
     2_4, as a Mach-O library's is, and `GLIBC_ABI_DT_RELR` is read as the glibc that
-    first has it, 2.36. An entry's offset to the next is followed, an offset
+    first has it, 2.36. Any other `GLIBC_` name with no number, `GLIBC_PRIVATE` among
+    them, refuses the library: no tag would be true of it. An entry's offset to the next is followed, an offset
     of zero ends a list whatever its count says, and no list is read past the entries
     its section has room for."""
     if len(data) < 64:
@@ -213,6 +214,13 @@ def _elf_platform(data, path):
                     found = _GLIBC_NAMES.get(data[strings + name:end])
                     if version is not None:
                         found = (int(version.group(1)), int(version.group(2)) + (1 if int(version.group(3) or 0) else 0))
+                    elif found is None and data[strings + name:end].startswith(b"GLIBC_"):
+                        unknown = data[strings + name:end].decode("ascii", "replace")
+                        raise PackageError(f"{path} asks its C library for {unknown}, a version name of glibc "
+                                           f"with no number, and this backend does not know which glibc first "
+                                           f"has it, so it has no tag that is true of the library; build "
+                                           f"cavalry-ffi at the floor with scripts/floor.sh, as `just package` "
+                                           f"does; {HELP}")
                     if found is not None:
                         newest = found if newest is None or found > newest else newest
                     if aux_following == 0:
