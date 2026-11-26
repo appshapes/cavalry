@@ -261,6 +261,75 @@ fn two_members_that_lost_their_logs_vote_in_the_one_that_holds_the_log() {
     }
 }
 
+/// ADR 0145's accepted case, held now (work item 476): two members of three lose their
+/// log directories while the third, which holds the log, is stopped. Before, the two
+/// heard no report that holds a log, voted as a new cluster's members do, and after
+/// the startup canvass timeout elected between them an empty history, so that what the
+/// cluster committed was gone from every member that ran. Now a member whose log is
+/// empty stands and votes only once every voter has reported: the two elect no leader
+/// in 120 s while the third is stopped. Once it runs, its report holds a log, so they
+/// withhold, it leads in a later term, and the two catch up to everything committed.
+#[test]
+fn two_members_that_lost_their_logs_while_the_third_is_stopped_wait_for_it() {
+    let ids = [0, 1, 2];
+    let mut safety = Safety::new(&ids);
+    let (mut cluster, leader) = elected(11, &mut safety);
+    let committed = offer(&mut cluster, &mut safety, 0, 20);
+    safety.run(&mut cluster, 1_000);
+    let term = cluster
+        .member(leader)
+        .expect("a member")
+        .leadership_term_id();
+    let lost = followers(&ids, leader);
+    cluster.halt(leader);
+    for &id in &lost {
+        cluster.wipe(id);
+    }
+    // Twice the startup canvass timeout: before work item 476 the two elected by now.
+    cluster.run_ms(120_000);
+    assert_eq!(cluster.leader(), None, "the two elect no leader");
+    for &id in &lost {
+        assert_eq!(cluster.append_position(id), Some(0), "member {id} holds nothing");
+        let counts = cluster.counts(id).expect("a member");
+        assert_eq!(counts.candidacies, 0, "member {id}: {counts:?}");
+        assert_eq!(
+            cluster.member(id).expect("a member").voters_unheard(),
+            1,
+            "member {id} waits for the one it has not heard"
+        );
+    }
+    cluster.resume(leader);
+    let mut steps = 0;
+    while !(settled(&cluster, &ids)
+        && cluster.leader() == Some(leader)
+        && lost
+            .iter()
+            .all(|&id| cluster.append_position(id) >= Some(committed)))
+    {
+        assert!(
+            steps < 60_000,
+            "the one that holds the log leads again and the two hold it: not within 60 s"
+        );
+        cluster.step();
+        steps += 1;
+    }
+    assert!(
+        cluster
+            .member(leader)
+            .expect("a member")
+            .leadership_term_id()
+            > term,
+        "elected again, in a later term"
+    );
+    for &id in &lost {
+        assert_eq!(
+            cluster.log_to(id, committed),
+            cluster.log_to(leader, committed),
+            "member {id} holds what the cluster committed"
+        );
+    }
+}
+
 /// A member that lost its log follows no leader that a later term has deposed. A leads
 /// term t and can reach nobody; `voter` still reaches A, so its canvass positions keep A
 /// quorate. `voter` and `parted` elect `parted` in t + 1 and commit entries that A lacks.

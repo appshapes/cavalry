@@ -11,6 +11,12 @@
 //! has named a term below the request's. A vote the member cast in the term before it
 //! lost its log went to a candidate that stored the term first and names it since.
 //!
+//! In a new cluster every log is empty and no log is heard, so a member did not
+//! withhold there, and the case was never asked. A member that lost its log in the
+//! cluster's first ballot then voted a second time in that term (work item 476, lost-log
+//! search seed 804). Now a member whose log is empty withholds too until every voter has
+//! reported, and votes by the case whether it withholds or not.
+//!
 //! [`Io`]: cavalry_raft::Io
 
 mod common;
@@ -136,4 +142,97 @@ fn a_member_that_lost_its_log_votes_when_no_other_voter_named_the_term() {
         .expect("no fault");
     assert_eq!(votes_to(&io, 0), 0, "member 1 has not reported");
     assert_eq!(member.counts().votes_withheld, 1);
+}
+
+/// The canvass position of `member` in a new cluster: its log empty, and its candidate
+/// term `candidate_term`.
+fn empty_canvass(member: i32, candidate_term: i64) -> Message<'static> {
+    Message::CanvassPosition {
+        log_leadership_term_id: -1,
+        log_position: 0,
+        leadership_term_id: candidate_term,
+        follower_member_id: member,
+        protocol_version: 0,
+    }
+}
+
+/// `candidate`'s request vote for `term` in a new cluster, its log empty.
+fn empty_request(candidate: i32, term: i64) -> Message<'static> {
+    Message::RequestVote {
+        log_leadership_term_id: -1,
+        log_position: 0,
+        candidate_term_id: term,
+        candidate_member_id: candidate,
+        protocol_version: 0,
+    }
+}
+
+/// Work item 476, on one core: a member of a new cluster that lost its log in the
+/// cluster's first ballot. Every log is empty, so no log is heard. Before, the member
+/// voted as any voter does, and it voted a second time in term 0: lost-log search seed
+/// 804 found two members leading term 0 that way.
+///
+/// The member has heard member 0 and not member 1, the candidate it may have voted
+/// for in term 0 before it lost its log, which says nothing while its ballot runs. It
+/// withholds: member 0's request for term 0 gets no vote, no term is stored, and the
+/// request is counted. Member 1 then reports, naming term 0, and member 0's request for
+/// term 0 again gets nothing: the term condition. Its request for term 1, a term no
+/// other voter named, gets the member's vote.
+#[test]
+fn a_member_of_a_new_cluster_that_lost_its_log_votes_only_once_it_has_heard_every_voter() {
+    let mut io = Stub::new();
+    let mut member = wiped(1, &mut io);
+    member
+        .on_message(at(2), &empty_canvass(0, -1), &mut io)
+        .expect("no fault");
+    assert_eq!(member.voters_unheard(), 1);
+    io.clear();
+    member
+        .on_message(at(3), &empty_request(0, 0), &mut io)
+        .expect("no fault");
+    assert_eq!(votes_to(&io, 0), 0, "no vote while member 1 has not reported");
+    assert_eq!(
+        io.count(|call| matches!(call, Call::StoreCandidateTerm(_))),
+        0
+    );
+    assert_eq!(member.counts().votes_withheld, 1);
+
+    // Member 1 reports: it stood in term 0, and names it.
+    member
+        .on_message(at(4), &empty_canvass(1, 0), &mut io)
+        .expect("no fault");
+    assert_eq!(member.voters_unheard(), 0);
+    io.clear();
+    member
+        .on_message(at(5), &empty_request(0, 0), &mut io)
+        .expect("no fault");
+    assert_eq!(votes_to(&io, 0), 0, "no second vote in term 0");
+    assert_eq!(member.counts().votes_withheld, 2);
+
+    // A term no other voter named: the member votes.
+    io.clear();
+    member
+        .on_message(at(6), &empty_request(0, 1), &mut io)
+        .expect("no fault");
+    assert_eq!(votes_to(&io, 0), 1, "a vote in term 1");
+}
+
+/// A member of a new cluster that has heard every voter, each naming no term, votes as
+/// it did before work item 476: the guarded case holds for a new cluster whose members
+/// all run.
+#[test]
+fn a_member_of_a_new_cluster_that_has_heard_every_voter_votes() {
+    let mut io = Stub::new();
+    let mut member = wiped(2, &mut io);
+    for voter in [0, 1] {
+        member
+            .on_message(at(2), &empty_canvass(voter, -1), &mut io)
+            .expect("no fault");
+    }
+    io.clear();
+    member
+        .on_message(at(3), &empty_request(0, 0), &mut io)
+        .expect("no fault");
+    assert_eq!(votes_to(&io, 0), 1);
+    assert_eq!(member.counts().votes_withheld, 0);
 }
