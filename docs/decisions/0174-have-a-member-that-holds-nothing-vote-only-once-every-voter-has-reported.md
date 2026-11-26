@@ -106,7 +106,7 @@ The test `a_quorum_that_lost_its_logs_leads_a_term_a_second_time_and_the_check_f
 - **ADR 0145's accepted case, held:** `two_members_that_lost_their_logs_while_the_third_is_stopped_wait_for_it`. The two elect nothing in 120 s, then the third leads and the two hold everything committed.
 - **The cost:** a new cluster of three in memory, every member up, time to its first settled leader over seeds 1 to 1,000. Before and after, identical: minimum 14 ms, median 121 ms, p99 433 ms, maximum 757 ms (seed 868). With every member up the rule costs nothing. The whole cost is a member that never starts, and then the others wait with no bound.
 - **Eleven tests that held the old start**, the startup canvass timeout electing two of three among them, now hold the new one or keep their point with every voter heard.
-- **The twenty runs** of the election's driver tests on both runners: TWENTY_RUNS.
+- **The twenty runs** of the election's driver tests, `cluster`, `cluster_sessions`, `restart`, `standby_drivers` and `partition` of cavalry-raft: run 45838429381, 20 of 20 on the Linux runner and 20 of 20 on the macOS runner. Two earlier runs failed on macOS in the tests' late-follower helper, and that helper was mended: it now holds a follower still only once every consensus image is up and the third member follows. The pull request says what each found.
 
 ## Consequences
 
