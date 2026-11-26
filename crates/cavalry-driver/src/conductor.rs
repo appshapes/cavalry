@@ -24,6 +24,7 @@ use std::collections::VecDeque;
 use std::fs::{File, TryLockError};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -78,6 +79,7 @@ use crate::replayer;
 use crate::sender;
 use crate::socket::{ReceiveSocket, SendSocket};
 use crate::spec;
+use crate::watch::{WakeDue, Watched};
 
 /// The docs anchor an error event's message names.
 const ERRORS_DOC: &str = "docs/reference/client-protocol.md#error-codes";
@@ -1172,10 +1174,33 @@ impl Conductor {
     }
 
     /// The conductor's loop: duty cycles until `stop`, then −1 in the heartbeat.
-    pub(crate) fn run(mut self, stop: &AtomicBool) {
+    pub(crate) fn run(
+        mut self,
+        stop: &AtomicBool,
+        due: Option<Arc<WakeDue>>,
+        watch: Option<(Arc<Watched>, Counter)>,
+    ) {
+        // Where this thread says when each park is due, for the driver's watch, and the
+        // watch itself, whose own park this thread ends when it is overdue: each of the
+        // two gets the other back (ADR 0176).
+        self.idler.watch(due);
+        // The due time of the watch's park last counted: an idle pass can come many
+        // times before the watch has woken and cleared its due time, under busy-spin
+        // every few nanoseconds, and each unparks it and one counts it.
+        let mut counted = 0;
         while !stop.load(Ordering::Acquire) {
             let now = now_nanos();
             if self.duty_cycle(now) == 0 {
+                if let Some((watched, parks_overdue)) = &watch
+                    && let Some((thread, due)) = watched.overdue(now)
+                {
+                    // Counted before the watch is woken, as the watch counts.
+                    if due != counted {
+                        counted = due;
+                        parks_overdue.increment();
+                    }
+                    thread.unpark();
+                }
                 self.idler.idle();
             } else {
                 self.idler.reset();

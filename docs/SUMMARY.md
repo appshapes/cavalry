@@ -232,4 +232,5 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0168. Add a service's counters and its publication to its member when it first opens its member's log](decisions/0168-add-a-services-counters-and-its-publication-to-its-member-when-it-first-opens-its-members-log.md)
 - [0171. Park the idle loops where a stop can wake them, and wake every thread at a stop](decisions/0171-park-the-idle-loops-where-a-stop-can-wake-them-and-wake-every-thread-at-a-stop.md)
 - [0172. Remove the file of a log that could not be created](decisions/0172-remove-the-file-of-a-log-that-could-not-be-created.md)
+- [0176. Watch the driver's parks, and end one that outlived its timeout](decisions/0176-watch-the-drivers-parks-and-end-one-that-outlived-its-timeout.md)
 - [0174. Have a member that holds nothing vote only once every voter has reported](decisions/0174-have-a-member-that-holds-nothing-vote-only-once-every-voter-has-reported.md)

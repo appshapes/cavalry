@@ -20,6 +20,7 @@
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -49,6 +50,7 @@ use crate::conductor::now_nanos;
 use crate::idle::{IdleStrategy, Idler};
 use crate::socket::{ReceiveBuffers, ReceiveSocket};
 use crate::spec;
+use crate::watch::WakeDue;
 
 /// How long the receiver parks while it holds no endpoint: the conductor unparks it with
 /// every request, so a driver that receives nothing wakes no CPU for the receiver, as it
@@ -719,7 +721,9 @@ impl Receiver {
     /// The receiver's loop: duty cycles until `stop`, idling with the strategy while it
     /// holds an endpoint and parked while it holds none. The sockets close with the
     /// receiver; a sender sees its status messages stop and disconnects.
-    pub(crate) fn run(mut self, stop: &AtomicBool) {
+    pub(crate) fn run(mut self, stop: &AtomicBool, due: Option<Arc<WakeDue>>) {
+        // Where this thread says when each park is due, for the driver's watch (ADR 0176).
+        self.idler.watch(due);
         while !stop.load(Ordering::Acquire) {
             let now = now_nanos();
             if self.duty_cycle(now) != 0 {
@@ -728,7 +732,7 @@ impl Receiver {
                 // Nothing can change until the conductor offers a request, and it
                 // unparks this thread when it does (`sender::Sender::run` says why no
                 // request waits for the timeout).
-                std::thread::park_timeout(IDLE_PARK);
+                self.idler.park_for(IDLE_PARK);
                 self.idler.reset();
             } else {
                 self.idler.idle();

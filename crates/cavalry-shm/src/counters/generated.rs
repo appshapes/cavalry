@@ -620,6 +620,9 @@ pub const CLUSTER_FLOOR_ANSWER: CounterId = CounterId(203);
 /// `cluster.voters_unheard`, a client gauge: While one cluster member holds nothing, its log empty and no candidate term stored, the voters of its members string, other than itself, that it has not heard report in its present election, by a canvass position or an append position read since its election began; 0 once each has, and 0 for any other member. Such a member, beside members whose logs are empty too, stands and votes only once this reads 0, so that a member that lost its log in a new cluster's first ballot votes no second time in that term (spec/cluster.md, A member that lost its log; ADR 0174). key and label as cluster.elections.
 pub const CLUSTER_VOTERS_UNHEARD: CounterId = CounterId(205);
 
+/// `driver.parks_overdue`, a static counter: Parks of a driver thread that ran more than 200 ms past their timeout and that the driver then ended, by unparking the thread: the driver's watch for the conductor, the recorder, the replayer, the sender and the receiver, and the conductor for the watch. Under the backoff idle strategy a thread parks for at most 1 ms when its duty cycle found no work, and a sender, a receiver or a replayer that holds nothing to do parks for 1 s; each is due back by that timeout. A park is counted once, however many looks it takes to end. The watch runs where a timed wait can outlive its timer, which is macOS (ADR 0171, ADR 0176); elsewhere the counter stays 0.
+pub const DRIVER_PARKS_OVERDUE: CounterId = CounterId(206);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -2261,5 +2264,13 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "While one cluster member holds nothing, its log empty and no candidate term stored, the voters of its members string, other than itself, that it has not heard report in its present election, by a canvass position or an append position read since its election began; 0 once each has, and 0 for any other member. Such a member, beside members whose logs are empty too, stands and votes only once this reads 0, so that a member that lost its log in a new cluster's first ballot votes no second time in that term (spec/cluster.md, A member that lost its log; ADR 0174). key and label as cluster.elections.",
         doctor: "This member holds nothing, its log empty and no candidate term stored, as a new cluster's members do before their first vote and as a lost log directory leaves a member, and it has not heard this many of the other voters in its present election. It neither stands nor votes until it has heard every voter, so a new cluster elects no leader until each of its members has started. Start or restart the voters it has not heard, and check that each host reaches the consensus endpoint of every other.",
+    },
+    CounterDef {
+        id: DRIVER_PARKS_OVERDUE,
+        name: "driver.parks_overdue",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Parks of a driver thread that ran more than 200 ms past their timeout and that the driver then ended, by unparking the thread: the driver's watch for the conductor, the recorder, the replayer, the sender and the receiver, and the conductor for the watch. Under the backoff idle strategy a thread parks for at most 1 ms when its duty cycle found no work, and a sender, a receiver or a replayer that holds nothing to do parks for 1 s; each is due back by that timeout. A park is counted once, however many looks it takes to end. The watch runs where a timed wait can outlive its timer, which is macOS (ADR 0171, ADR 0176); elsewhere the counter stays 0.",
+        doctor: "A thread of this driver did not come back from a timed wait and was woken by the driver's watch, after a stall of up to 300 ms past its timeout each time. On a Mac the system can lose a timer wake-up, about one in 40 million on the machine where it was found, and a few of these a day is that: nothing to do, and docs/how-to/find-a-wait-that-does-not-return.md says how to probe the machine. Many a minute means the host could not run the driver's threads for 200 ms at a time: look for a host under memory pressure or CPU contention, or a process stopped and continued.",
     },
 ];

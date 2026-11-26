@@ -20,6 +20,7 @@
 
 use std::collections::VecDeque;
 use std::io::IoSlice;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -50,6 +51,7 @@ use crate::conductor::now_nanos;
 use crate::idle::{IdleStrategy, Idler};
 use crate::socket::{Headers, SendSocket, Sent};
 use crate::spec;
+use crate::watch::WakeDue;
 
 /// A heartbeat's flags: BEGIN and END (`spec/udp.md`, "Heartbeat"; `spec/frame.md`,
 /// "Flags").
@@ -779,7 +781,9 @@ impl Sender {
     /// holds an endpoint or a publication and parked while it holds none. The sockets
     /// close with the sender; a receiver sees the heartbeats stop and times its images
     /// out.
-    pub(crate) fn run(mut self, stop: &AtomicBool) {
+    pub(crate) fn run(mut self, stop: &AtomicBool, due: Option<Arc<WakeDue>>) {
+        // Where this thread says when each park is due, for the driver's watch (ADR 0176).
+        self.idler.watch(due);
         while !stop.load(Ordering::Acquire) {
             let now = now_nanos();
             if self.duty_cycle(now) != 0 {
@@ -789,7 +793,7 @@ impl Sender {
                 // unparks this thread when it does; an unpark that came before this
                 // park is a token the park consumes at once, so no request waits for
                 // the timeout. `Driver::close` unparks it too, after storing `stop`.
-                std::thread::park_timeout(IDLE_PARK);
+                self.idler.park_for(IDLE_PARK);
                 self.idler.reset();
             } else {
                 self.idler.idle();
