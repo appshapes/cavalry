@@ -13,6 +13,7 @@ mod replay;
 mod response;
 mod service;
 mod subscription;
+mod watch;
 
 pub use cavalry_proto::client_protocol::{
     FOLLOW_LENGTH, NULL_LENGTH, NULL_POSITION, ReplayStopReason,
